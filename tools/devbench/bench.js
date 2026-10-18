@@ -167,9 +167,14 @@ async function readRange(loader, addr, len, { chunk = 0x400, page = 0x400, pause
 // NEXT read: first read always fine, second stalls or "serial noise". This reader
 // consumes the frame and checks it, so every chunk is also integrity-checked.
 const u32le = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
-// pktSize = page, inflight 1: the stub sends one page and waits for our ack
-// before the next, so at most one page is ever in flight. pauseMs waits before
-// each ack, giving the USB link and the page's read loop slack between pages.
+// READ_FLASH args: offset, size, block (packet) size, max_in_flight, all u32 LE.
+// max_in_flight is BYTES, not packets: the stub sends while
+// (sent - acked) < max_in_flight (esptool-legacy-flasher-stub
+// handle_flash_read), so any value <= block size means exactly one packet,
+// then it waits for our ack. esptool.py passes 64 and espflash defaults to 64,
+// which is also one 4 KiB packet at a time. The ack is the cumulative byte
+// count as a SLIP-framed u32 LE, same as espflash's write_raw(data.len()).
+// pauseMs waits before each ack, giving the link slack between pages.
 async function readFlashExact(loader, addr, size, pktSize = 0x400, inflight = 1, pauseMs = 0) {
   const args = new Uint8Array(16);
   args.set(u32le(addr), 0); args.set(u32le(size), 4); args.set(u32le(pktSize), 8); args.set(u32le(inflight), 12);
@@ -517,7 +522,7 @@ async function runDump(what) {
     // SAME chunk, so a long dump with scattered losses still completes.
     const page = +$("dumppage").value || 256;
     const pauseMs = Math.max(0, Math.min(100, +$("dumppause").value || 0));
-    // One command covers 16 pages: fewer command round trips, still one page in flight.
+    // One command covers 16 pages: fewer command round trips; still one page unacked.
     const rd = { onChunk, out: data, page, pauseMs, chunk: page * 16 };
     log(`pages of ${page} B, ${pauseMs} ms pause per page, ${page * 16} B per command`, "muted");
     let from = 0, retries = 0, sameChunk = 0, lastFail = -1;
