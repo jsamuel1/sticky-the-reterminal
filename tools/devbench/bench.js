@@ -109,19 +109,26 @@ $("forget").onclick = async () => {
 const term = { clean() {}, writeLine: (s) => log(s), write: (s) => log(s) };
 
 async function withLoader(fn) {
+  const s = await openSession();
+  try {
+    return await fn(s.loader, s.transport);
+  } finally {
+    await s.close();
+  }
+}
+
+// One esptool session: reset into ROM, sync, stub, baud. tracing=true records
+// every SLIP frame (hex) in transport.traceLog; only used on retries because
+// a full 16 MB dump would make that log enormous.
+async function openSession({ tracing = false } = {}) {
   await stopMonitor();
-  // 64 KiB host buffer: the 4 KiB default overflowed on multi-KiB stub reads
-  // (the 0xc00 partition-table read stalled on both S3 boards).
-  const transport = new Transport(port, false);
-  // Stub runs at the selected baud for flash reads (default 1152000); ROM sync stays
-  // at 115200. On native USB-Serial/JTAG the rate is nominal, so it is harmless there.
+  // 64 KiB host buffer: the 4 KiB default overflowed on multi-KiB stub reads.
+  const transport = new Transport(port, tracing);
+  // Stub runs at the selected baud (default 1152000); ROM sync stays at 115200.
+  // On native USB-Serial/JTAG the rate is nominal, so it is harmless there.
   const baudrate = +$("baud").value || 1152000;
   const loader = new ESPLoader({ transport, baudrate, romBaudrate: 115200, terminal: term, debugLogging: false, serialOptions: { bufferSize: 65536 } });
-  try {
-    return await fn(loader, transport);
-  } finally {
-    try { await transport.disconnect(); } catch {}
-  }
+  return { loader, transport, close: async () => { try { await transport.disconnect(); } catch {} } };
 }
 
 const step = async (name, p, ms = 8000) => {
@@ -132,14 +139,19 @@ const step = async (name, p, ms = 8000) => {
   } finally { clearTimeout(t); }
 };
 
-// Stub reads in bounded chunks. Each chunk uses readFlashExact (below), which
-// follows esptool.py's protocol including the trailing per-read MD5 frame.
-async function readRange(loader, addr, len, { chunk = 0x10000, onChunk, stopAtPtEnd = false } = {}) {
-  const out = new Uint8Array(len);
-  for (let o = 0; o < len; o += chunk) {
+// Stub reads in bounded chunks via readFlashExact (below). 16 KiB is the size
+// that worked as a first read on the S3 boards; 64 KiB did not (2026-10-18).
+async function readRange(loader, addr, len, { chunk = 0x4000, onChunk, stopAtPtEnd = false, startAt = 0, out = new Uint8Array(len) } = {}) {
+  for (let o = startAt; o < len; o += chunk) {
     const n = Math.min(chunk, len - o);
     const at = addr + o;
-    const part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, readFlashExact(loader, at, n), 20000);
+    let part;
+    try {
+      part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, readFlashExact(loader, at, n), 20000);
+    } catch (e) {
+      e.failedAt = o;  // lets runDump resume from here in a fresh session
+      throw e;
+    }
     out.set(part, o);
     onChunk?.(o + n, len, out.subarray(o, o + n));
     if (stopAtPtEnd) { for (let e = o; e + 32 <= o + n; e += 32) if (out[e] !== 0xaa || out[e + 1] !== 0x50) return out.subarray(0, e + 32); }
@@ -153,7 +165,10 @@ async function readRange(loader, addr, len, { chunk = 0x10000, onChunk, stopAtPt
 // NEXT read: first read always fine, second stalls or "serial noise". This reader
 // consumes the frame and checks it, so every chunk is also integrity-checked.
 const u32le = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
-async function readFlashExact(loader, addr, size, pktSize = 0x1000, inflight = 64) {
+// inflight=2: the stub waits for our ack after every two 4 KiB packets, so the
+// host never has more than ~8 KiB unread. esptool.py uses 64, which a busy
+// browser read loop may not keep up with.
+async function readFlashExact(loader, addr, size, pktSize = 0x1000, inflight = 2) {
   const args = new Uint8Array(16);
   args.set(u32le(addr), 0); args.set(u32le(size), 4); args.set(u32le(pktSize), 8); args.set(u32le(inflight), 12);
   await loader.checkCommand("read flash", loader.ESP_READ_FLASH, args);
@@ -162,7 +177,7 @@ async function readFlashExact(loader, addr, size, pktSize = 0x1000, inflight = 6
   while (got < size) {
     const p = await loader.transport.read(5000);
     if (!(p instanceof Uint8Array) || !p.length) throw new Error(`read flash: empty packet at +0x${got.toString(16)}`);
-    if (got + p.length > size) throw new Error(`read flash: got ${got + p.length} bytes, asked ${size}`);
+    if (got + p.length > size) throw new Error(`read flash: got ${got + p.length} bytes, asked ${size} (stray frame of ${p.length} B)`);
     data.set(p, got); got += p.length;
     await loader.transport.write(u32le(got));   // ack: total bytes received
   }
@@ -453,65 +468,92 @@ async function runDump(what) {
   setBusy(true);
   const t0 = performance.now();
   log(`── dump ${what} ──`, "muted");
+  let session = null;
   try {
-    const res = await withLoader(async (loader) => {
-      const id = await identify(loader);
-      let addr, len, part = null;
-      if (what === "all") { addr = 0; len = id.flash.bytes; }
-      else if (what.startsWith("partition:")) {
-        const name = what.slice(10);
-        const pt = parsePartitions(await readRange(loader, 0x8000, 0xc00, { chunk: 0x100, stopAtPtEnd: true }));
-        part = pt.find((p) => p.name === name);
-        if (!part) throw new Error(`no partition "${name}" (have: ${pt.map((p) => p.name).join(", ")})`);
-        addr = parseInt(part.offset, 16); len = parseInt(part.size, 16);
-      } else {
-        const [a, l] = what.split(":").map((s) => Number(s));
-        if (!Number.isInteger(a) || !Number.isInteger(l) || l <= 0) throw new Error(`bad range "${what}" (want offset:length, e.g. 0x8000:0x1000)`);
-        addr = a; len = l;
+    session = await openSession();
+    let loader = session.loader;
+    const id = await identify(loader);
+    let addr, len, part = null;
+    if (what === "all") { addr = 0; len = id.flash.bytes; }
+    else if (what.startsWith("partition:")) {
+      const pname = what.slice(10);
+      const pt = parsePartitions(await readRange(loader, 0x8000, 0xc00, { chunk: 0x100, stopAtPtEnd: true }));
+      part = pt.find((p) => p.name === pname);
+      if (!part) throw new Error(`no partition "${pname}" (have: ${pt.map((p) => p.name).join(", ")})`);
+      addr = parseInt(part.offset, 16); len = parseInt(part.size, 16);
+    } else {
+      const [a, l] = what.split(":").map((s) => Number(s));
+      if (!Number.isInteger(a) || !Number.isInteger(l) || l <= 0) throw new Error(`bad range "${what}" (want offset:length, e.g. 0x8000:0x1000)`);
+      addr = a; len = l;
+    }
+    if (!len) throw new Error("flash size unknown; dump a range instead");
+    if (id.flash.bytes && addr + len > id.flash.bytes) throw new Error(`range ends at 0x${(addr + len).toString(16)}, past ${id.flash.detected_size} flash`);
+    const name = `${$("label").value}-${id.chip.mac.replace(/:/g, "")}-${what === "all" ? "full" : part ? part.name : `0x${addr.toString(16)}`}-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}`;
+    // Upload in 1 MiB pieces as reads complete, in order.
+    let sent = 0, pending = [], pendingLen = 0, upChain = Promise.resolve();
+    const flushUp = async (final = false) => {
+      if (!pendingLen || (!final && pendingLen < 1 << 20)) return;
+      const chunks = pending, n = pendingLen; pending = []; pendingLen = 0;
+      const body = new Uint8Array(n); let o = 0;
+      for (const c of chunks) { body.set(c, o); o += c.length; }
+      const r = await fetch(`api/dump/${name}?offset=${sent}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body });
+      if (!r.ok) throw new Error(`upload at ${sent} failed: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      sent += n;
+    };
+    const data = new Uint8Array(len);
+    const onChunk = (done, total, chunk) => {
+      progress("dumpprog", done, total, t0);
+      pending.push(chunk.slice()); pendingLen += chunk.length;
+      upChain = upChain.then(() => flushUp());
+    };
+    // A failed chunk costs a fresh session (reset, sync, stub) and a resume at
+    // that chunk; earlier chunks are kept. Retries record a wire trace that is
+    // shipped to the agent so the failure can be diagnosed from the log.
+    let from = 0, retries = 0;
+    for (;;) {
+      try {
+        await readRange(loader, addr, len, { onChunk, startAt: from, out: data });
+        break;
+      } catch (e) {
+        if (e.failedAt == null || ++retries > 4) throw e;
+        from = e.failedAt;
+        log(`chunk at +0x${from.toString(16)} failed (${e.message ?? e}); new session, resuming (retry ${retries}/4)`, "warn");
+        if (session.transport.traceLog) await shipTrace(session.transport.traceLog, `dump-${name}-r${retries - 1}`);
+        await session.close();
+        session = await openSession({ tracing: true });
+        loader = session.loader;
+        await loader.main();
       }
-      if (!len) throw new Error("flash size unknown; dump a range instead");
-      if (id.flash.bytes && addr + len > id.flash.bytes) throw new Error(`range ends at 0x${(addr + len).toString(16)}, past ${id.flash.detected_size} flash`);
-      const name = `${$("label").value}-${id.chip.mac.replace(/:/g, "")}-${what === "all" ? "full" : part ? part.name : `0x${addr.toString(16)}`}-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}`;
-      // Stream to the server in 1 MiB uploads as reads complete, so a long dump
-      // survives a pane reload up to the last uploaded MiB.
-      let sent = 0, pending = [], pendingLen = 0, upChain = Promise.resolve();
-      const flushUp = async (final = false) => {
-        if (!pendingLen || (!final && pendingLen < 1 << 20)) return;
-        const chunks = pending, n = pendingLen; pending = []; pendingLen = 0;
-        const body = new Uint8Array(n); let o = 0;
-        for (const c of chunks) { body.set(c, o); o += c.length; }
-        const r = await fetch(`api/dump/${name}?offset=${sent}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body });
-        if (!r.ok) throw new Error(`upload at ${sent} failed: ${r.status} ${(await r.text()).slice(0, 200)}`);
-        sent += n;
-      };
-      const data = await readRange(loader, addr, len, {
-        onChunk: (done, total, chunk) => {
-          progress("dumpprog", done, total, t0);
-          pending.push(chunk.slice()); pendingLen += chunk.length;
-          upChain = upChain.then(() => flushUp());   // serialised uploads, in order
-        },
-      });
-      await upChain;
-      await flushUp(true);
-      // Cross-check: stub hashes the flash range itself; must equal what we read.
-      log("· verifying with on-chip MD5…", "muted");
-      const local = md5hex(data);
-      const chipMd5 = await step("flash md5", loader.flashMd5sum(addr, len), 120000);
-      const meta = { label: $("label").value, mac: id.chip.mac, chip: id.chip.description, flash: id.flash, what, partition: part, offset: "0x" + addr.toString(16), size: len, md5: local, chip_md5: chipMd5, verified_on_chip: local === chipMd5, seconds: +((performance.now() - t0) / 1000).toFixed(1), baud: loader.baudrate };
-      const done = await (await fetch(`api/dump/${name}/done`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(meta) })).json();
-      if (local !== chipMd5) log(`MD5 MISMATCH: read ${local}, chip ${chipMd5}. The dump is corrupt; retry at a lower baud.`, "bad");
-      else if (!done.verified) log(`server copy mismatch: ${JSON.stringify(done.server)}`, "bad");
-      else log(`dump verified (${len} bytes, md5 ${local}) → dumps/${name}.bin`, "ok");
-      try { await loader.after("hard_reset"); } catch {}
-      return { ok: local === chipMd5 && done.verified, file: `dumps/${name}.bin`, md5: local, size: len, seconds: meta.seconds };
-    });
+    }
+    await upChain;
+    await flushUp(true);
+    log("· verifying with on-chip MD5…", "muted");
+    const local = md5hex(data);
+    const chipMd5 = await step("flash md5", loader.flashMd5sum(addr, len), 120000);
+    const meta = { label: $("label").value, mac: id.chip.mac, chip: id.chip.description, flash: id.flash, what, partition: part, offset: "0x" + addr.toString(16), size: len, md5: local, chip_md5: chipMd5, verified_on_chip: local === chipMd5, retries, seconds: +((performance.now() - t0) / 1000).toFixed(1), baud: loader.baudrate };
+    const done = await (await fetch(`api/dump/${name}/done`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(meta) })).json();
+    if (local !== chipMd5) log(`MD5 MISMATCH: read ${local}, chip ${chipMd5}. The dump is corrupt; retry at a lower baud.`, "bad");
+    else if (!done.verified) log(`server copy mismatch: ${JSON.stringify(done.server)}`, "bad");
+    else log(`dump verified (${len} bytes, md5 ${local}${retries ? `, ${retries} resumed chunk(s)` : ""}) → dumps/${name}.bin`, "ok");
+    try { await loader.after("hard_reset"); } catch {}
     setBusy(false);
-    return res;
+    return { ok: local === chipMd5 && done.verified, file: `dumps/${name}.bin`, md5: local, size: len, retries, seconds: meta.seconds };
   } catch (e) {
     log(`dump failed: ${e.message ?? e}`, "bad");
+    if (session?.transport.traceLog) await shipTrace(session.transport.traceLog, "dump-failed");
     setBusy(false);
     return { ok: false, error: String(e.message ?? e) };
+  } finally {
+    await session?.close();
   }
+}
+
+// Wire traces go to the log endpoint under their own session id so the agent
+// can read reports/<tag>.log; capped to the last 256 KiB.
+async function shipTrace(text, tag) {
+  const body = text.length > 262144 ? text.slice(-262144) : text;
+  try { await fetch("api/log", { method: "POST", headers: { "X-Devbench-Session": `trace-${tag}`.slice(0, 48), "X-Devbench-Label": $("label").value, "Content-Type": "text/plain" }, body }); } catch {}
+  log(`wire trace (${(body.length / 1024).toFixed(0)} KiB) sent to the agent`, "muted");
 }
 
 // ---- flash -------------------------------------------------------------------
