@@ -283,8 +283,8 @@ curl -s -X POST "$KERMES_DASHBOARD_ORIGIN/api/browsers/open" -H 'content-type: a
   The server handles that; any new endpoint must use `_body()`.
 - The page reads flash at **1152000** baud by default (owner's choice), with a dropdown fallback.
   On native USB-Serial/JTAG (`303a:1001`) the baud setting is nominal.
-- The Web Serial host buffer is 64 KiB; the 4 KiB default stalled multi-KiB stub reads.
-  Reads go in 16 KiB chunks with one retry each.
+- The Web Serial host buffer is 64 KiB.
+  Flash reads use `readFlashExact` in bench.js, not esptool-js `readFlash()`. 0.7.0 never consumes the stub's trailing 16-byte MD5 frame, which corrupts the NEXT read ("serial noise" / timeout on the second read). `readFlashExact` reads and checks that frame, in 64 KiB chunks.
 - Run the server with `setsid nohup`. A Kermes `background_job` server was
   reaped mid-session (2026-10-18).
 

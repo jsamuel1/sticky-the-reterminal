@@ -132,21 +132,46 @@ const step = async (name, p, ms = 8000) => {
   } finally { clearTimeout(t); }
 };
 
-// Stub reads in bounded chunks with one retry each. Small chunks survived where
-// one 0xc00 read did not; 16 KiB keeps a 16 MB dump to ~1000 round trips.
-async function readRange(loader, addr, len, { chunk = 0x4000, onChunk, stopAtPtEnd = false } = {}) {
+// Stub reads in bounded chunks. Each chunk uses readFlashExact (below), which
+// follows esptool.py's protocol including the trailing per-read MD5 frame.
+async function readRange(loader, addr, len, { chunk = 0x10000, onChunk, stopAtPtEnd = false } = {}) {
   const out = new Uint8Array(len);
   for (let o = 0; o < len; o += chunk) {
     const n = Math.min(chunk, len - o);
     const at = addr + o;
-    let part;
-    try { part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, loader.readFlash(at, n), 10000); }
-    catch (e) { log(`retry: ${e.message ?? e}`, "warn"); part = await step(`re-read 0x${at.toString(16)}`, loader.readFlash(at, n), 10000); }
-    out.set(part.subarray(0, n), o);
+    const part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, readFlashExact(loader, at, n), 20000);
+    out.set(part, o);
     onChunk?.(o + n, len, out.subarray(o, o + n));
     if (stopAtPtEnd) { for (let e = o; e + 32 <= o + n; e += 32) if (out[e] !== 0xaa || out[e + 1] !== 0x50) return out.subarray(0, e + 32); }
   }
   return out;
+}
+
+// esptool-js 0.7.0 readFlash() stops after the data and never reads the 16-byte
+// MD5 frame the stub sends once it gets the final ack (esptool.py does:
+// `digest_frame = self.read()`). That frame was left in the buffer and broke the
+// NEXT read: first read always fine, second stalls or "serial noise". This reader
+// consumes the frame and checks it, so every chunk is also integrity-checked.
+const u32le = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
+async function readFlashExact(loader, addr, size, pktSize = 0x1000, inflight = 64) {
+  const args = new Uint8Array(16);
+  args.set(u32le(addr), 0); args.set(u32le(size), 4); args.set(u32le(pktSize), 8); args.set(u32le(inflight), 12);
+  await loader.checkCommand("read flash", loader.ESP_READ_FLASH, args);
+  const data = new Uint8Array(size);
+  let got = 0;
+  while (got < size) {
+    const p = await loader.transport.read(5000);
+    if (!(p instanceof Uint8Array) || !p.length) throw new Error(`read flash: empty packet at +0x${got.toString(16)}`);
+    if (got + p.length > size) throw new Error(`read flash: got ${got + p.length} bytes, asked ${size}`);
+    data.set(p, got); got += p.length;
+    await loader.transport.write(u32le(got));   // ack: total bytes received
+  }
+  const digest = await loader.transport.read(5000);
+  if (!(digest instanceof Uint8Array) || digest.length !== 16) throw new Error(`read flash: expected 16-byte MD5 frame, got ${digest?.length ?? "none"}`);
+  const want = Array.from(digest, (x) => x.toString(16).padStart(2, "0")).join("");
+  const have = md5hex(data);
+  if (want !== have) throw new Error(`read flash 0x${addr.toString(16)}+0x${size.toString(16)}: md5 ${have} != chip ${want}`);
+  return data;
 }
 
 const blOffset = (chipName) => (/^ESP32(-S2)?$/.test(chipName) ? 0x1000 : 0x0);
@@ -190,7 +215,7 @@ async function runProbe() {
       // Each read is isolated: a failure is recorded and the report still goes out.
       try {
         const blAt = blOffset(loader.chip.CHIP_NAME);
-        const boot = await step(`read bootloader header @0x${blAt.toString(16)}`, loader.readFlash(blAt, 0x20));
+        const boot = await step(`read bootloader header @0x${blAt.toString(16)}`, readFlashExact(loader, blAt, 0x20));
         r.bootloader_header = { offset: "0x" + blAt.toString(16), magic_ok: boot[0] === 0xe9, flash_mode: FLASH_MODE[boot[2]] ?? boot[2], flash_size: FLASH_SZ[boot[3] >> 4] ?? (boot[3] >> 4), flash_freq_code: boot[3] & 0xf };
       } catch (e) { r.errors.push(String(e.message ?? e)); log(String(e.message ?? e), "bad"); }
       try {
