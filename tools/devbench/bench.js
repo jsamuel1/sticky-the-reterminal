@@ -143,13 +143,13 @@ const step = async (name, p, ms = 8000, show = true) => {
 // small stub packet per READ_FLASH command. The 2026-10-18 wire trace showed
 // ~470 bytes vanishing from inside a 4 KiB packet (it arrived as 3626 B), on
 // the same chunk in every session; 256-byte reads (probe) never lost data.
-async function readRange(loader, addr, len, { chunk = 0x400, onChunk, stopAtPtEnd = false, startAt = 0, out = new Uint8Array(len) } = {}) {
+async function readRange(loader, addr, len, { chunk = 0x400, page = 0x400, pauseMs = 0, onChunk, stopAtPtEnd = false, startAt = 0, out = new Uint8Array(len) } = {}) {
   for (let o = startAt; o < len; o += chunk) {
     const n = Math.min(chunk, len - o);
     const at = addr + o;
     let part;
     try {
-      part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, readFlashExact(loader, at, n), 20000, n >= 0x1000 || (o & 0xffff) === 0);
+      part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, readFlashExact(loader, at, n, Math.min(page, n), 1, pauseMs), 20000 + (n / page) * pauseMs, (o & 0xffff) === 0);
     } catch (e) {
       e.failedAt = o;  // lets runDump resume from here in a fresh session
       throw e;
@@ -167,9 +167,10 @@ async function readRange(loader, addr, len, { chunk = 0x400, onChunk, stopAtPtEn
 // NEXT read: first read always fine, second stalls or "serial noise". This reader
 // consumes the frame and checks it, so every chunk is also integrity-checked.
 const u32le = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
-// pktSize 1 KiB, inflight 1: the stub sends one 1 KiB packet and waits for our
-// ack before the next, so nothing large is ever in flight.
-async function readFlashExact(loader, addr, size, pktSize = 0x400, inflight = 1) {
+// pktSize = page, inflight 1: the stub sends one page and waits for our ack
+// before the next, so at most one page is ever in flight. pauseMs waits before
+// each ack, giving the USB link and the page's read loop slack between pages.
+async function readFlashExact(loader, addr, size, pktSize = 0x400, inflight = 1, pauseMs = 0) {
   const args = new Uint8Array(16);
   args.set(u32le(addr), 0); args.set(u32le(size), 4); args.set(u32le(pktSize), 8); args.set(u32le(inflight), 12);
   await loader.checkCommand("read flash", loader.ESP_READ_FLASH, args);
@@ -183,6 +184,7 @@ async function readFlashExact(loader, addr, size, pktSize = 0x400, inflight = 1)
     const want = Math.min(pktSize, size - got);
     if (p.length !== want) throw new Error(`read flash 0x${(addr + got).toString(16)}: packet of ${p.length} B, expected ${want} (bytes lost in transit)`);
     data.set(p, got); got += p.length;
+    if (pauseMs) await new Promise((r) => setTimeout(r, pauseMs));
     await loader.transport.write(u32le(got));   // ack: total bytes received
   }
   const digest = await loader.transport.read(5000);
@@ -513,10 +515,15 @@ async function runDump(what) {
     // A failed chunk costs a fresh session (reset, sync, stub) and a resume at
     // that chunk; earlier chunks are kept. Give up only after 3 failures on the
     // SAME chunk, so a long dump with scattered losses still completes.
+    const page = +$("dumppage").value || 256;
+    const pauseMs = Math.max(0, Math.min(100, +$("dumppause").value || 0));
+    // One command covers 16 pages: fewer command round trips, still one page in flight.
+    const rd = { onChunk, out: data, page, pauseMs, chunk: page * 16 };
+    log(`pages of ${page} B, ${pauseMs} ms pause per page, ${page * 16} B per command`, "muted");
     let from = 0, retries = 0, sameChunk = 0, lastFail = -1;
     for (;;) {
       try {
-        await readRange(loader, addr, len, { onChunk, startAt: from, out: data });
+        await readRange(loader, addr, len, { ...rd, startAt: from });
         break;
       } catch (e) {
         if (e.failedAt == null) throw e;
@@ -537,7 +544,7 @@ async function runDump(what) {
     log("· verifying with on-chip MD5…", "muted");
     const local = md5hex(data);
     const chipMd5 = await step("flash md5", loader.flashMd5sum(addr, len), 120000);
-    const meta = { label: $("label").value, mac: id.chip.mac, chip: id.chip.description, flash: id.flash, what, partition: part, offset: "0x" + addr.toString(16), size: len, md5: local, chip_md5: chipMd5, verified_on_chip: local === chipMd5, retries, seconds: +((performance.now() - t0) / 1000).toFixed(1), baud: loader.baudrate };
+    const meta = { label: $("label").value, mac: id.chip.mac, chip: id.chip.description, flash: id.flash, what, partition: part, offset: "0x" + addr.toString(16), size: len, md5: local, chip_md5: chipMd5, verified_on_chip: local === chipMd5, retries, page, pause_ms: pauseMs, seconds: +((performance.now() - t0) / 1000).toFixed(1), baud: loader.baudrate };
     const done = await (await fetch(`api/dump/${name}/done`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(meta) })).json();
     if (local !== chipMd5) log(`MD5 MISMATCH: read ${local}, chip ${chipMd5}. The dump is corrupt; retry at a lower baud.`, "bad");
     else if (!done.verified) log(`server copy mismatch: ${JSON.stringify(done.server)}`, "bad");

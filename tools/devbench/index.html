@@ -98,6 +98,8 @@
     <select id="dumpwhat"><option value="all">whole flash</option><option value="range">custom range…</option></select>
     <input id="dumprange" placeholder="0x8000:0x1000" hidden style="width:12em">
     <button id="dump" disabled>Dump to agent</button>
+    <label class="small" title="bytes per stub packet; the board waits for an ack after each one">page <select id="dumppage"><option>256</option><option>512</option><option>1024</option><option>4096</option></select></label>
+    <label class="small" title="pause before acking each page">pause <input id="dumppause" type="number" min="0" max="100" value="2" style="width:4em"> ms</label>
     <span id="dumpprog" class="prog muted"></span>
   </div>
   <div class="small muted">Read-only. Partitions appear here after a probe. Verified against the board's own MD5, saved to <code>tools/devbench/dumps/</code>.</div>
