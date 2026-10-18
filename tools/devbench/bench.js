@@ -131,23 +131,25 @@ async function openSession({ tracing = false } = {}) {
   return { loader, transport, close: async () => { try { await transport.disconnect(); } catch {} } };
 }
 
-const step = async (name, p, ms = 8000) => {
-  log(`· ${name}…`, "muted");
+const step = async (name, p, ms = 8000, show = true) => {
+  if (show) log(`· ${name}…`, "muted");
   let t;
   try {
     return await Promise.race([p, new Promise((_, rej) => (t = setTimeout(() => rej(new Error(`${name} timed out after ${ms} ms`)), ms)))]);
   } finally { clearTimeout(t); }
 };
 
-// Stub reads in bounded chunks via readFlashExact (below). 16 KiB is the size
-// that worked as a first read on the S3 boards; 64 KiB did not (2026-10-18).
-async function readRange(loader, addr, len, { chunk = 0x4000, onChunk, stopAtPtEnd = false, startAt = 0, out = new Uint8Array(len) } = {}) {
+// Stub reads in bounded chunks via readFlashExact (below). Default 1 KiB = one
+// small stub packet per READ_FLASH command. The 2026-10-18 wire trace showed
+// ~470 bytes vanishing from inside a 4 KiB packet (it arrived as 3626 B), on
+// the same chunk in every session; 256-byte reads (probe) never lost data.
+async function readRange(loader, addr, len, { chunk = 0x400, onChunk, stopAtPtEnd = false, startAt = 0, out = new Uint8Array(len) } = {}) {
   for (let o = startAt; o < len; o += chunk) {
     const n = Math.min(chunk, len - o);
     const at = addr + o;
     let part;
     try {
-      part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, readFlashExact(loader, at, n), 20000);
+      part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, readFlashExact(loader, at, n), 20000, n >= 0x1000 || (o & 0xffff) === 0);
     } catch (e) {
       e.failedAt = o;  // lets runDump resume from here in a fresh session
       throw e;
@@ -165,10 +167,9 @@ async function readRange(loader, addr, len, { chunk = 0x4000, onChunk, stopAtPtE
 // NEXT read: first read always fine, second stalls or "serial noise". This reader
 // consumes the frame and checks it, so every chunk is also integrity-checked.
 const u32le = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
-// inflight=2: the stub waits for our ack after every two 4 KiB packets, so the
-// host never has more than ~8 KiB unread. esptool.py uses 64, which a busy
-// browser read loop may not keep up with.
-async function readFlashExact(loader, addr, size, pktSize = 0x1000, inflight = 2) {
+// pktSize 1 KiB, inflight 1: the stub sends one 1 KiB packet and waits for our
+// ack before the next, so nothing large is ever in flight.
+async function readFlashExact(loader, addr, size, pktSize = 0x400, inflight = 1) {
   const args = new Uint8Array(16);
   args.set(u32le(addr), 0); args.set(u32le(size), 4); args.set(u32le(pktSize), 8); args.set(u32le(inflight), 12);
   await loader.checkCommand("read flash", loader.ESP_READ_FLASH, args);
@@ -177,7 +178,10 @@ async function readFlashExact(loader, addr, size, pktSize = 0x1000, inflight = 2
   while (got < size) {
     const p = await loader.transport.read(5000);
     if (!(p instanceof Uint8Array) || !p.length) throw new Error(`read flash: empty packet at +0x${got.toString(16)}`);
-    if (got + p.length > size) throw new Error(`read flash: got ${got + p.length} bytes, asked ${size} (stray frame of ${p.length} B)`);
+    // Every packet is exactly pktSize except the last. A short one means bytes
+    // were dropped between board and page; acking it would desync the stub.
+    const want = Math.min(pktSize, size - got);
+    if (p.length !== want) throw new Error(`read flash 0x${(addr + got).toString(16)}: packet of ${p.length} B, expected ${want} (bytes lost in transit)`);
     data.set(p, got); got += p.length;
     await loader.transport.write(u32le(got));   // ack: total bytes received
   }
@@ -507,20 +511,23 @@ async function runDump(what) {
       upChain = upChain.then(() => flushUp());
     };
     // A failed chunk costs a fresh session (reset, sync, stub) and a resume at
-    // that chunk; earlier chunks are kept. Retries record a wire trace that is
-    // shipped to the agent so the failure can be diagnosed from the log.
-    let from = 0, retries = 0;
+    // that chunk; earlier chunks are kept. Give up only after 3 failures on the
+    // SAME chunk, so a long dump with scattered losses still completes.
+    let from = 0, retries = 0, sameChunk = 0, lastFail = -1;
     for (;;) {
       try {
         await readRange(loader, addr, len, { onChunk, startAt: from, out: data });
         break;
       } catch (e) {
-        if (e.failedAt == null || ++retries > 4) throw e;
+        if (e.failedAt == null) throw e;
+        sameChunk = e.failedAt === lastFail ? sameChunk + 1 : 1;
+        lastFail = e.failedAt;
+        if (sameChunk > 3) throw new Error(`chunk +0x${e.failedAt.toString(16)} failed 3 times: ${e.message ?? e}`);
+        retries++;
         from = e.failedAt;
-        log(`chunk at +0x${from.toString(16)} failed (${e.message ?? e}); new session, resuming (retry ${retries}/4)`, "warn");
-        if (session.transport.traceLog) await shipTrace(session.transport.traceLog, `dump-${name}-r${retries - 1}`);
+        log(`chunk at +0x${from.toString(16)} failed (${e.message ?? e}); new session, resuming (${retries} so far)`, "warn");
         await session.close();
-        session = await openSession({ tracing: true });
+        session = await openSession();
         loader = session.loader;
         await loader.main();
       }
