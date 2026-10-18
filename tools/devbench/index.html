@@ -12,6 +12,10 @@
   button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--b); cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
   button.primary { background: #2a7; color: #fff; border-color: #2a7; }
+  button.danger { background: #c43; color: #fff; border-color: #c43; }
+  .job { padding: 6px 10px; margin: 4px 0; border: 1px solid var(--warn); border-radius: 6px; }
+  .prog { font: 12px ui-monospace, Menlo, monospace; }
+  pre.small { height: auto; max-height: 140px; }
   select, input { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--b); }
   #env { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--b); }
   #env.bad { border-color: var(--bad); }
@@ -29,6 +33,7 @@
 <body>
 <h1>devbench <span class="muted">— boards on your machine, results to the agent</span></h1>
 <div id="env">checking browser…</div>
+<div id="jobs" hidden></div>
 
 <fieldset>
   <legend>Board</legend>
@@ -44,7 +49,7 @@
     <span id="portinfo" class="muted">no port</span>
     <button id="forget" disabled>Forget port</button>
   </div>
-  <div class="muted">Read-only: identify and boot-log never write flash. The probe loads esptool's stub into RAM and resets the board afterwards.</div>
+  <div class="muted">Probe, boot log and dump are read-only. Flash writes, and always asks first. Each operation loads esptool's stub into RAM and resets the board afterwards.</div>
 </fieldset>
 
 <fieldset>
@@ -60,6 +65,30 @@
     <span id="sent" class="muted"></span>
   </div>
   <table id="facts"></table>
+</fieldset>
+
+<fieldset>
+  <legend>Dump flash</legend>
+  <div class="row">
+    <select id="dumpwhat"><option value="all">whole flash</option><option value="range">custom range…</option></select>
+    <input id="dumprange" placeholder="0x8000:0x1000" hidden style="width:12em">
+    <button id="dump" disabled>Dump to agent</button>
+    <span id="dumpprog" class="prog muted"></span>
+  </div>
+  <div class="muted">Streams to <code>tools/devbench/dumps/</code> on the agent's host, then checks the board's own MD5 of the range against what was read. Probe first to pick a partition.</div>
+</fieldset>
+
+<fieldset>
+  <legend>Flash firmware</legend>
+  <div class="row">
+    <select id="flashset" style="min-width:22em"></select>
+    <button id="reloadsets">↻</button>
+    <label><input type="checkbox" id="eraseall"> erase whole chip first</label>
+    <button id="flash" class="danger" disabled>Flash…</button>
+    <span id="flashprog" class="prog muted"></span>
+  </div>
+  <pre id="flashparts" class="small"></pre>
+  <div class="muted">Each part is MD5-checked after download and again on the chip after writing. The chip type and flash size are checked before the first write.</div>
 </fieldset>
 
 <fieldset>

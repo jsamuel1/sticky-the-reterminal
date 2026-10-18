@@ -256,17 +256,35 @@ setsid nohup python3 tools/devbench/server.py >> .logs/devbench.log 2>&1 < /dev/
 curl -s -X POST "$KERMES_DASHBOARD_ORIGIN/api/browsers/open" -H 'content-type: application/json' -d '{"url":"8765"}'
 ```
 
-- The owner picks a board label, clicks **Connect…**, **Probe**, **Reset + capture boot log**.
-  Read-only: it never writes flash.
+- The owner picks a board label, clicks **Connect…**, then **Probe**, **Reset + capture boot log**, **Dump** or **Flash…**.
+  Probe, boot log and dump are read-only. Flash writes, and always asks first with a confirm naming the board, the image set and whether the chip is erased.
+- **The agent drives through jobs.** `tools/devbench/job.py probe|boot|dump|flash --label <board> ...` queues a request.
+  - The page shows it as a banner with Run / Decline. Nothing runs without the owner's click.
+  - `job.py wait <id>` blocks until the result lands in `jobs/done/<id>.json`.
+  - Queue one job and wait for it. Don't stack writes.
+- **Dump**: `--what all | partition:<name> | 0x8000:0x1000`.
+  - It streams to `tools/devbench/dumps/<label>-<mac>-<what>-<ts>.bin` in 1 MiB uploads.
+  - It is verified twice: the board's own MD5 of the range against what was read, and the server re-hashing its copy.
+  - The result goes in `dumps/<name>.json` with `verified: true|false`. Never use an unverified dump.
+- **Flash**: image sets come from `GET /api/sets`.
+  - `firmware/build` appears automatically as `build-firmware`, read from IDF's `flasher_args.json`.
+  - Any `tools/devbench/images/<set>/manifest.json` is listed too; see `images/README.md`. Binaries are gitignored.
+  - Every part is MD5-checked after download.
+  - Before the first write the page checks the chip type, flash size, and that nothing is placed below 0x8000 except at the chip's bootloader offset.
+  - After each part, esptool-js has the chip hash the written range. A mismatch fails the job.
+  - `--erase-all` wipes NVS (Wi-Fi, pairing token). Only use it when asked.
+- `python3 tools/devbench/selftest.py` checks every server endpoint against the live server, no board needed. Keep it green.
 - Read the results from disk; don't ask the owner to paste them.
   - `tools/devbench/reports/latest-<label>.json` holds the chip, features, MAC, flash JEDEC ID/size, bootloader header, partitions, app descriptors, boot log and parsed boot facts.
   - `reports/devbench.log` gets every console line within ~1 s, stamped with session and label.
-  - `reports/` is gitignored.
+  - `reports/`, `dumps/` and `jobs/` are gitignored.
 - Reports are auto-sent after every probe and every boot capture.
 - Under the dashboard proxy, requests arrive with `Transfer-Encoding: chunked`.
   The server handles that; any new endpoint must use `_body()`.
 - The page reads flash at **1152000** baud by default (owner's choice), with a dropdown fallback.
   On native USB-Serial/JTAG (`303a:1001`) the baud setting is nominal.
+- The Web Serial host buffer is 64 KiB; the 4 KiB default stalled multi-KiB stub reads.
+  Reads go in 16 KiB chunks with one retry each.
 - Run the server with `setsid nohup`. A Kermes `background_job` server was
   reaped mid-session (2026-10-18).
 

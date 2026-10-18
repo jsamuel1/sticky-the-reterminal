@@ -1,7 +1,9 @@
 // devbench page logic. Runs in the OWNER's browser; talks to the board with Web
 // Serial and reports to the agent's server with relative fetches (works under
-// any reverse-proxy prefix). Never writes flash.
+// any reverse-proxy prefix). Probe/boot/dump are read-only; Flash writes, and
+// only after an explicit confirm naming board, image set and erase mode.
 import { ESPLoader, Transport } from "./vendor/esptool-js-0.7.0.bundle.js";
+import { md5hex } from "./md5.js";
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -51,11 +53,14 @@ function envCheck() {
 }
 
 function setBusy(b) {
-  for (const id of ["probe", "boot", "mon", "rst", "forget"]) $(id).disabled = b || !port;
+  busy = b;
+  for (const id of ["probe", "boot", "mon", "rst", "forget", "dump", "flash"]) $(id).disabled = b || !port;
   $("pick").disabled = b;
   $("send").disabled = b || !report;
   $("line").disabled = !monitor;
+  for (const el of document.querySelectorAll("#jobs button")) el.disabled = b || !port;
 }
+let busy = false;
 
 function portLabel(p) {
   const i = p.getInfo();
@@ -88,17 +93,46 @@ const term = { clean() {}, writeLine: (s) => log(s), write: (s) => log(s) };
 
 async function withLoader(fn) {
   await stopMonitor();
+  // 64 KiB host buffer: the 4 KiB default overflowed on multi-KiB stub reads
+  // (the 0xc00 partition-table read stalled on both S3 boards).
   const transport = new Transport(port, false);
   // Stub runs at the selected baud for flash reads (default 1152000); ROM sync stays
   // at 115200. On native USB-Serial/JTAG the rate is nominal, so it is harmless there.
   const baudrate = +$("baud").value || 1152000;
-  const loader = new ESPLoader({ transport, baudrate, romBaudrate: 115200, terminal: term, debugLogging: false });
+  const loader = new ESPLoader({ transport, baudrate, romBaudrate: 115200, terminal: term, debugLogging: false, serialOptions: { bufferSize: 65536 } });
   try {
     return await fn(loader, transport);
   } finally {
     try { await transport.disconnect(); } catch {}
   }
 }
+
+const step = async (name, p, ms = 8000) => {
+  log(`· ${name}…`, "muted");
+  let t;
+  try {
+    return await Promise.race([p, new Promise((_, rej) => (t = setTimeout(() => rej(new Error(`${name} timed out after ${ms} ms`)), ms)))]);
+  } finally { clearTimeout(t); }
+};
+
+// Stub reads in bounded chunks with one retry each. Small chunks survived where
+// one 0xc00 read did not; 16 KiB keeps a 16 MB dump to ~1000 round trips.
+async function readRange(loader, addr, len, { chunk = 0x4000, onChunk, stopAtPtEnd = false } = {}) {
+  const out = new Uint8Array(len);
+  for (let o = 0; o < len; o += chunk) {
+    const n = Math.min(chunk, len - o);
+    const at = addr + o;
+    let part;
+    try { part = await step(`read 0x${at.toString(16)}+0x${n.toString(16)}`, loader.readFlash(at, n), 10000); }
+    catch (e) { log(`retry: ${e.message ?? e}`, "warn"); part = await step(`re-read 0x${at.toString(16)}`, loader.readFlash(at, n), 10000); }
+    out.set(part.subarray(0, n), o);
+    onChunk?.(o + n, len, out.subarray(o, o + n));
+    if (stopAtPtEnd) { for (let e = o; e + 32 <= o + n; e += 32) if (out[e] !== 0xaa || out[e + 1] !== 0x50) return out.subarray(0, e + 32); }
+  }
+  return out;
+}
+
+const blOffset = (chipName) => (/^ESP32(-S2)?$/.test(chipName) ? 0x1000 : 0x0);
 
 const u32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
 const cstr = (b, o, n) => dec.decode(b.subarray(o, o + n)).replace(/\0.*$/s, "");
@@ -127,64 +161,28 @@ function parseAppDesc(b) {
   return { project: cstr(b, 32 + 48, 32), version: cstr(b, 32 + 16, 32), idf: cstr(b, 32 + 112, 32), time: cstr(b, 32 + 80, 16), date: cstr(b, 32 + 96, 16) };
 }
 
-$("probe").onclick = async () => {
+$("probe").onclick = () => runProbe();
+async function runProbe() {
   setBusy(true);
   log("── probe: entering ROM download mode (board will reset) ──", "muted");
   try {
     report = await withLoader(async (loader) => {
-      const chipName = await loader.main();               // detect + stub + baud
-      const c = loader.chip;
-      const r = { label: $("label").value, port: portLabel(port), port_info: port.getInfo(), probed_at: new Date().toISOString(), baud: loader.baudrate };
-      r.chip = {
-        description: chipName,
-        name: c.CHIP_NAME,
-        features: (await c.getChipFeatures(loader)).map((s) => s.trim()),
-        crystal_mhz: await c.getCrystalFreq(loader),
-        mac: await c.readMac(loader),
-      };
-      const step = async (name, p, ms = 8000) => {
-        log(`· ${name}…`, "muted");
-        let t;
-        try {
-          return await Promise.race([p, new Promise((_, rej) => (t = setTimeout(() => rej(new Error(`${name} timed out after ${ms} ms`)), ms)))]);
-        } finally { clearTimeout(t); }
-      };
+      const r = await identify(loader);
       r.errors = [];
-      const id = await step("read flash id", loader.readFlashId());
-      const mfr = id & 0xff, sizeId = (id >> 16) & 0xff;
-      r.flash = { jedec_id: "0x" + id.toString(16).padStart(6, "0"), manufacturer: JEDEC_MFR[mfr] ?? `0x${mfr.toString(16)}`,
-                  device: "0x" + ((id >> 8) & 0xffff).toString(16), detected_size: loader.DETECTED_FLASH_SIZES?.[sizeId] ?? null };
       // Read-only peeks: bootloader header, partition table, first bytes of each app.
       // Each read is isolated: a failure is recorded and the report still goes out.
       try {
-        // Second-stage bootloader offset: 0x1000 on ESP32/ESP32-S2, 0x0 on S3/C-series.
-        const blAt = /^ESP32(-S2)?$/.test(c.CHIP_NAME) ? 0x1000 : 0x0;
+        const blAt = blOffset(loader.chip.CHIP_NAME);
         const boot = await step(`read bootloader header @0x${blAt.toString(16)}`, loader.readFlash(blAt, 0x20));
         r.bootloader_header = { offset: "0x" + blAt.toString(16), magic_ok: boot[0] === 0xe9, flash_mode: FLASH_MODE[boot[2]] ?? boot[2], flash_size: FLASH_SZ[boot[3] >> 4] ?? (boot[3] >> 4), flash_freq_code: boot[3] & 0xf };
       } catch (e) { r.errors.push(String(e.message ?? e)); log(String(e.message ?? e), "bad"); }
-      // Large stub reads stalled on both boards at 0xc00 (timeout on one, "serial
-      // noise" on the other) while the 0x20 header read worked. Read in small
-      // chunks, retry each once, and stop at the table's end marker.
-      const readChunked = async (addr, len, chunk = 0x100) => {
-        const out = new Uint8Array(len);
-        for (let o = 0; o < len; o += chunk) {
-          const n = Math.min(chunk, len - o);
-          let part;
-          try { part = await step(`read 0x${(addr + o).toString(16)}+0x${n.toString(16)}`, loader.readFlash(addr + o, n), 4000); }
-          catch (e) { log(`retry: ${e.message ?? e}`, "warn"); part = await step(`re-read 0x${(addr + o).toString(16)}`, loader.readFlash(addr + o, n), 4000); }
-          out.set(part.subarray(0, n), o);
-          // End of partition table: an entry slot that is not 0xAA50 (MD5 0xEBEB or erased 0xFF).
-          if (addr === 0x8000) { for (let e = o; e + 32 <= o + n; e += 32) if (out[e] !== 0xaa || out[e + 1] !== 0x50) return out.subarray(0, e + 32); }
-        }
-        return out;
-      };
       try {
-        r.partitions = parsePartitions(await readChunked(0x8000, 0xc00));
+        r.partitions = parsePartitions(await readRange(loader, 0x8000, 0xc00, { chunk: 0x100, stopAtPtEnd: true }));
       } catch (e) { r.partitions = []; r.errors.push(String(e.message ?? e)); log(String(e.message ?? e), "bad"); }
       r.apps = [];
       for (const p of r.partitions.filter((p) => p.type === "app")) {
         try {
-          const desc = parseAppDesc(await readChunked(parseInt(p.offset, 16), 0x100));
+          const desc = parseAppDesc(await readRange(loader, parseInt(p.offset, 16), 0x100, { chunk: 0x100 }));
           r.apps.push({ partition: p.name, ...(desc ?? { empty_or_unknown: true }) });
         } catch (e) { r.errors.push(String(e.message ?? e)); log(String(e.message ?? e), "bad"); break; }
       }
@@ -192,15 +190,41 @@ $("probe").onclick = async () => {
       try { await step("hard reset", loader.after("hard_reset"), 4000); } catch (e) { log(String(e.message ?? e), "warn"); }
       return r;
     });
+    lastProbe = report;
     renderFacts(report);
+    renderPartitionPicker();
     log(JSON.stringify(report, null, 2));
     await sendReport();  // auto-send so the agent sees every probe
+    setBusy(false);
+    return { ok: !report.errors?.length, report: `latest-${report.label}.json`, errors: report.errors };
   } catch (e) {
     log(`probe failed: ${e.message ?? e}`, "bad");
     log("If the board never entered download mode: hold BOOT, tap RESET, release BOOT, then probe again.", "warn");
+    setBusy(false);
+    return { ok: false, error: String(e.message ?? e) };
   }
-  setBusy(false);
-};
+}
+
+let lastProbe = null;
+
+async function identify(loader) {
+  const chipName = await loader.main();               // detect + stub + baud
+  const c = loader.chip;
+  const r = { label: $("label").value, port: portLabel(port), port_info: port.getInfo(), probed_at: new Date().toISOString(), baud: loader.baudrate };
+  r.chip = {
+    description: chipName,
+    name: c.CHIP_NAME,
+    features: (await c.getChipFeatures(loader)).map((s) => s.trim()),
+    crystal_mhz: await c.getCrystalFreq(loader),
+    mac: await c.readMac(loader),
+  };
+  const id = await step("read flash id", loader.readFlashId());
+  const mfr = id & 0xff, sizeId = (id >> 16) & 0xff;
+  r.flash = { jedec_id: "0x" + id.toString(16).padStart(6, "0"), manufacturer: JEDEC_MFR[mfr] ?? `0x${mfr.toString(16)}`,
+              device: "0x" + ((id >> 8) & 0xffff).toString(16), detected_size: loader.DETECTED_FLASH_SIZES?.[sizeId] ?? null };
+  r.flash.bytes = r.flash.detected_size ? loader.flashSizeBytes(r.flash.detected_size) : null;
+  return r;
+}
 
 function renderFacts(r) {
   const rows = [
@@ -280,9 +304,10 @@ $("line").onkeydown = async (e) => {
 };
 $("clear").onclick = () => logEl.replaceChildren();
 
-$("boot").onclick = async () => {
+$("boot").onclick = () => runBoot();
+async function runBoot(secsArg) {
   setBusy(true);
-  const secs = Math.max(2, Math.min(60, +$("bootsecs").value || 8));
+  const secs = Math.max(2, Math.min(120, secsArg ?? (+$("bootsecs").value || 8)));
   let text = "";
   const collect = (t) => { text += t; };
   log(`── boot capture: reset + ${secs}s ──`, "muted");
@@ -305,11 +330,14 @@ $("boot").onclick = async () => {
     if (report.boot_facts) log(JSON.stringify(report.boot_facts, null, 2), "ok");
     await sendReport();
     if (!text.trim()) log("No console output. The firmware may log to UART0 (header pins) instead of USB, or it may be silent.", "warn");
+    setBusy(false);
+    return { ok: true, chars: text.length, report: `latest-${report.label}.json`, boot_facts: report.boot_facts };
   } catch (e) {
     log(`boot capture failed: ${e.message}`, "bad");
+    setBusy(false);
+    return { ok: false, error: String(e.message ?? e) };
   }
-  setBusy(false);
-};
+}
 
 function bootFacts(t) {
   const m = (re) => t.match(re)?.slice(1);
@@ -357,3 +385,207 @@ if (envCheck()) {
 }
 setBusy(false);
 loadReports();
+loadSets();
+pollJobs();
+setInterval(pollJobs, 3000);
+
+// ---- dump --------------------------------------------------------------------
+const progress = (el, done, total, t0) => {
+  const pct = total ? (100 * done) / total : 0;
+  const secs = (performance.now() - t0) / 1000;
+  const rate = secs > 0 ? done / 1024 / secs : 0;
+  $(el).textContent = `${pct.toFixed(1)}%  ${(done / 1024).toFixed(0)}/${(total / 1024).toFixed(0)} KiB  ${rate.toFixed(0)} KiB/s`;
+};
+
+function renderPartitionPicker() {
+  const sel = $("dumpwhat");
+  const keep = sel.value;
+  sel.replaceChildren(new Option("whole flash", "all"), ...(lastProbe?.partitions ?? []).map((p) => new Option(`${p.name} (${p.subtype}, ${p.size_kb}K @${p.offset})`, `partition:${p.name}`)), new Option("custom range…", "range"));
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+}
+$("dumpwhat").onchange = () => { $("dumprange").hidden = $("dumpwhat").value !== "range"; };
+$("dump").onclick = () => runDump($("dumpwhat").value === "range" ? $("dumprange").value.trim() : $("dumpwhat").value);
+
+// what: "all" | "partition:<name>" | "<offset>:<length>" (hex or decimal)
+async function runDump(what) {
+  setBusy(true);
+  const t0 = performance.now();
+  log(`── dump ${what} ──`, "muted");
+  try {
+    const res = await withLoader(async (loader) => {
+      const id = await identify(loader);
+      let addr, len, part = null;
+      if (what === "all") { addr = 0; len = id.flash.bytes; }
+      else if (what.startsWith("partition:")) {
+        const name = what.slice(10);
+        const pt = parsePartitions(await readRange(loader, 0x8000, 0xc00, { chunk: 0x100, stopAtPtEnd: true }));
+        part = pt.find((p) => p.name === name);
+        if (!part) throw new Error(`no partition "${name}" (have: ${pt.map((p) => p.name).join(", ")})`);
+        addr = parseInt(part.offset, 16); len = parseInt(part.size, 16);
+      } else {
+        const [a, l] = what.split(":").map((s) => Number(s));
+        if (!Number.isInteger(a) || !Number.isInteger(l) || l <= 0) throw new Error(`bad range "${what}" (want offset:length, e.g. 0x8000:0x1000)`);
+        addr = a; len = l;
+      }
+      if (!len) throw new Error("flash size unknown; dump a range instead");
+      if (id.flash.bytes && addr + len > id.flash.bytes) throw new Error(`range ends at 0x${(addr + len).toString(16)}, past ${id.flash.detected_size} flash`);
+      const name = `${$("label").value}-${id.chip.mac.replace(/:/g, "")}-${what === "all" ? "full" : part ? part.name : `0x${addr.toString(16)}`}-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}`;
+      // Stream to the server in 1 MiB uploads as reads complete, so a long dump
+      // survives a pane reload up to the last uploaded MiB.
+      let sent = 0, pending = [], pendingLen = 0, upChain = Promise.resolve();
+      const flushUp = async (final = false) => {
+        if (!pendingLen || (!final && pendingLen < 1 << 20)) return;
+        const chunks = pending, n = pendingLen; pending = []; pendingLen = 0;
+        const body = new Uint8Array(n); let o = 0;
+        for (const c of chunks) { body.set(c, o); o += c.length; }
+        const r = await fetch(`api/dump/${name}?offset=${sent}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body });
+        if (!r.ok) throw new Error(`upload at ${sent} failed: ${r.status} ${(await r.text()).slice(0, 200)}`);
+        sent += n;
+      };
+      const data = await readRange(loader, addr, len, {
+        onChunk: (done, total, chunk) => {
+          progress("dumpprog", done, total, t0);
+          pending.push(chunk.slice()); pendingLen += chunk.length;
+          upChain = upChain.then(() => flushUp());   // serialised uploads, in order
+        },
+      });
+      await upChain;
+      await flushUp(true);
+      // Cross-check: stub hashes the flash range itself; must equal what we read.
+      log("· verifying with on-chip MD5…", "muted");
+      const local = md5hex(data);
+      const chipMd5 = await step("flash md5", loader.flashMd5sum(addr, len), 120000);
+      const meta = { label: $("label").value, mac: id.chip.mac, chip: id.chip.description, flash: id.flash, what, partition: part, offset: "0x" + addr.toString(16), size: len, md5: local, chip_md5: chipMd5, verified_on_chip: local === chipMd5, seconds: +((performance.now() - t0) / 1000).toFixed(1), baud: loader.baudrate };
+      const done = await (await fetch(`api/dump/${name}/done`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(meta) })).json();
+      if (local !== chipMd5) log(`MD5 MISMATCH: read ${local}, chip ${chipMd5}. The dump is corrupt; retry at a lower baud.`, "bad");
+      else if (!done.verified) log(`server copy mismatch: ${JSON.stringify(done.server)}`, "bad");
+      else log(`dump verified (${len} bytes, md5 ${local}) → dumps/${name}.bin`, "ok");
+      try { await loader.after("hard_reset"); } catch {}
+      return { ok: local === chipMd5 && done.verified, file: `dumps/${name}.bin`, md5: local, size: len, seconds: meta.seconds };
+    });
+    setBusy(false);
+    return res;
+  } catch (e) {
+    log(`dump failed: ${e.message ?? e}`, "bad");
+    setBusy(false);
+    return { ok: false, error: String(e.message ?? e) };
+  }
+}
+
+// ---- flash -------------------------------------------------------------------
+let sets = [];
+async function loadSets() {
+  try {
+    sets = await (await fetch("api/sets")).json();
+    const sel = $("flashset"), keep = sel.value;
+    sel.replaceChildren(...(sets.length ? sets.map((s) => new Option(s.error ? `⚠ ${s.error}` : `${s.name} — ${s.chip || "?"} — ${s.parts.length} parts${s.version ? " — " + s.version : ""}`, s.name)) : [new Option("no image sets (build firmware or add images/<set>/manifest.json)", "")]));
+    if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+    renderSet();
+  } catch { $("flashparts").textContent = "server unreachable"; }
+}
+function renderSet() {
+  const s = sets.find((x) => x.name === $("flashset").value);
+  $("flashparts").textContent = s ? (s.note ? s.note + "\n" : "") + s.parts.map((p) => `0x${p.offset.toString(16).padStart(6, "0")}  ${p.file}  ${(p.size / 1024).toFixed(0)} KiB  md5 ${p.md5}`).join("\n") + `\nsource: ${s.source}` : "";
+}
+$("flashset").onchange = renderSet;
+$("reloadsets").onclick = loadSets;
+$("flash").onclick = () => runFlash($("flashset").value, $("eraseall").checked);
+
+async function runFlash(setName, eraseAll, { preconfirmed = false } = {}) {
+  await loadSets();
+  const s = sets.find((x) => x.name === setName);
+  if (!s || s.error || !s.parts.length) { log(`no usable image set "${setName}"`, "bad"); return { ok: false, error: "no such set" }; }
+  const label = $("label").value;
+  if (s.boards?.length && !s.boards.includes(label)) {
+    if (!confirm(`Image set "${s.name}" is declared for ${s.boards.join(", ")}, but the board label is "${label}". Flash anyway?`)) return { ok: false, error: "label mismatch declined" };
+  }
+  const summary = `Write ${s.parts.length} part(s) from "${s.name}" to the board labelled "${label}"` +
+    (eraseAll ? ", ERASING THE WHOLE CHIP FIRST (NVS: Wi-Fi, pairing token, settings all lost)" : " (regions outside these parts are kept)") +
+    `?\n\n${s.parts.map((p) => `0x${p.offset.toString(16)}  ${p.file}  ${(p.size / 1024).toFixed(0)} KiB`).join("\n")}`;
+  if (!preconfirmed && !confirm(summary)) { log("flash cancelled", "muted"); return { ok: false, error: "cancelled by owner" }; }
+  setBusy(true);
+  const t0 = performance.now();
+  log(`── flash ${s.name}${eraseAll ? " (erase all)" : ""} ──`, "muted");
+  try {
+    // Fetch and verify every part BEFORE touching the board.
+    const files = [];
+    for (const p of s.parts) {
+      const r = await fetch(`api/sets/${encodeURIComponent(s.name)}/${encodeURIComponent(p.file)}`);
+      if (!r.ok) throw new Error(`fetch ${p.file}: ${r.status}`);
+      const data = new Uint8Array(await r.arrayBuffer());
+      const got = md5hex(data);
+      if (data.length !== p.size || got !== p.md5) throw new Error(`${p.file}: downloaded ${data.length} B md5 ${got}, server said ${p.size} B md5 ${p.md5}`);
+      files.push({ data, address: p.offset, name: p.file });
+    }
+    log(`fetched ${files.length} part(s), md5 verified`, "ok");
+    const res = await withLoader(async (loader) => {
+      const id = await identify(loader);
+      if (s.chip && s.chip.toUpperCase() !== id.chip.name.toUpperCase()) throw new Error(`image set is for ${s.chip}, board is ${id.chip.name}`);
+      const end = Math.max(...files.map((f) => f.address + f.data.length));
+      if (id.flash.bytes && end > id.flash.bytes) throw new Error(`image ends at 0x${end.toString(16)}, past ${id.flash.detected_size} flash`);
+      const bl = files.find((f) => f.address === blOffset(id.chip.name));
+      if (!bl && files.some((f) => f.address < 0x8000)) throw new Error(`a part sits below 0x8000 but not at this chip's bootloader offset 0x${blOffset(id.chip.name).toString(16)}`);
+      const fs = s.flash_settings || {};
+      await loader.writeFlash({
+        fileArray: files.map(({ data, address }) => ({ data, address })),
+        flashMode: fs.flash_mode || "keep", flashFreq: fs.flash_freq || "keep", flashSize: fs.flash_size || "keep",
+        eraseAll, compress: true,
+        reportProgress: (i, written, total) => { $("flashprog").textContent = `${files[i].name}: ${((100 * written) / total).toFixed(0)}%`; },
+        calculateMD5Hash: (img) => md5hex(img),   // esptool-js re-hashes on chip after each part
+      });
+      log(`flash written and verified on chip in ${((performance.now() - t0) / 1000).toFixed(1)} s; resetting`, "ok");
+      try { await loader.after("hard_reset"); } catch {}
+      return { ok: true, set: s.name, parts: files.map((f) => ({ file: f.name, offset: "0x" + f.address.toString(16), md5: md5hex(f.data) })), erase_all: eraseAll, mac: id.chip.mac, seconds: +((performance.now() - t0) / 1000).toFixed(1) };
+    });
+    await fetch("api/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label, kind: "flash", session, ...res }) });
+    setBusy(false);
+    return res;
+  } catch (e) {
+    log(`flash failed: ${e.message ?? e}`, "bad");
+    log("A failed write leaves the board unbootable until a flash succeeds. The ROM loader is in mask ROM and cannot be damaged: retry, lower the baud, or hold BOOT while plugging in.", "warn");
+    setBusy(false);
+    return { ok: false, error: String(e.message ?? e) };
+  }
+}
+
+// ---- agent-queued jobs -----------------------------------------------------------
+// The agent drops jobs/*.json via tools/devbench/job.py. Each one shows as a
+// banner; nothing runs until the owner clicks Run (flash also confirms).
+const seenJobs = new Set();
+async function pollJobs() {
+  let jobs = [];
+  try { jobs = await (await fetch("api/jobs")).json(); } catch { return; }
+  const box = $("jobs");
+  box.hidden = !jobs.length;
+  box.replaceChildren(...jobs.map((j) => {
+    const div = document.createElement("div");
+    div.className = "job";
+    const what = j.kind === "flash" ? `flash set "${j.set}"${j.erase_all ? " + ERASE ALL" : ""}` : j.kind === "dump" ? `dump ${j.what}` : j.kind === "boot" ? `boot log ${j.secs}s` : j.kind;
+    div.innerHTML = `<b></b> <span></span> <span class="muted"></span> `;
+    div.children[0].textContent = `Agent asks: ${what}`;
+    div.children[1].textContent = `for board "${j.label}"`;
+    div.children[2].textContent = j.note ? `— ${j.note}` : "";
+    const run = document.createElement("button"); run.textContent = "Run"; run.className = j.kind === "flash" ? "danger" : "primary";
+    const skip = document.createElement("button"); skip.textContent = "Decline";
+    run.disabled = busy || !port;
+    run.onclick = async () => {
+      if (j.label && $("label").value !== j.label) {
+        if (!confirm(`This job is for "${j.label}" but the bench is labelled "${$("label").value}". Switch the label to "${j.label}" and run it on the connected board?`)) return;
+        $("label").value = j.label;
+      }
+      let res;
+      if (j.kind === "probe") res = await runProbe();
+      else if (j.kind === "boot") res = await runBoot(j.secs);
+      else if (j.kind === "dump") res = await runDump(j.what || "all");
+      else if (j.kind === "flash") res = await runFlash(j.set, !!j.erase_all);
+      else res = { ok: false, error: `unknown job kind ${j.kind}` };
+      if (res?.error === "cancelled by owner") return;  // stays queued
+      await fetch(`api/jobs/${j.id}/result`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(res ?? { ok: false }) });
+      pollJobs();
+    };
+    skip.onclick = async () => { await fetch(`api/jobs/${j.id}/result`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ok: false, declined: true }) }); pollJobs(); };
+    div.append(run, " ", skip);
+    if (!seenJobs.has(j.id)) { seenJobs.add(j.id); log(`agent queued job ${j.id}: ${what} for "${j.label}"`, "warn"); }
+    return div;
+  }));
+}
