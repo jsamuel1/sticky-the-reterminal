@@ -59,8 +59,26 @@ function setBusy(b) {
   $("send").disabled = b || !report;
   $("line").disabled = !monitor;
   for (const el of document.querySelectorAll("#jobs button")) el.disabled = b || !port;
+  for (const el of document.querySelectorAll("#modes button")) el.disabled = b;  // no switching mid-operation
+  $("modes").hidden = !port;
+  $("empty").hidden = !!port;
+  if (!port) for (const p of document.querySelectorAll(".panel")) p.classList.remove("on");
+  else if (!document.querySelector(".panel.on")) setMode(localStorage.devbenchMode || "console");
 }
 let busy = false;
+
+// ---- modes: one task's controls at a time ------------------------------------
+function setMode(m) {
+  if (!document.querySelector(`.panel[data-panel="${m}"]`)) m = "console";
+  for (const b of document.querySelectorAll("#modes button")) b.setAttribute("aria-selected", String(b.dataset.mode === m));
+  for (const p of document.querySelectorAll(".panel")) p.classList.toggle("on", p.dataset.panel === m);
+  localStorage.devbenchMode = m;
+  if (m === "flash") loadSets();
+}
+for (const b of document.querySelectorAll("#modes button")) b.onclick = async () => {
+  if (b.dataset.mode !== "console" && monitor) { await stopMonitor(); $("mon").textContent = "Open monitor (115200)"; }
+  setMode(b.dataset.mode);
+};
 
 function portLabel(p) {
   const i = p.getInfo();
@@ -85,8 +103,7 @@ $("forget").onclick = async () => {
   await stopMonitor();
   if (port?.forget) await port.forget();
   port = null; $("portinfo").textContent = "no port"; setBusy(false);
-};
-navigator.serial?.addEventListener("disconnect", (e) => { if (e.target === port) log("port disconnected (USB re-enumeration or unplug)", "warn"); });
+};navigator.serial?.addEventListener("disconnect", (e) => { if (e.target === port) log("port disconnected (USB re-enumeration or unplug)", "warn"); });
 
 // ---- probe -----------------------------------------------------------------
 const term = { clean() {}, writeLine: (s) => log(s), write: (s) => log(s) };
@@ -574,6 +591,7 @@ async function pollJobs() {
         $("label").value = j.label;
       }
       let res;
+      setMode({ probe: "identify", boot: "identify", dump: "dump", flash: "flash" }[j.kind] || "console");
       if (j.kind === "probe") res = await runProbe();
       else if (j.kind === "boot") res = await runBoot(j.secs);
       else if (j.kind === "dump") res = await runDump(j.what || "all");

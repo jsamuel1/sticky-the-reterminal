@@ -5,107 +5,122 @@
 <title>devbench — USB board bench</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  :root { color-scheme: light dark; --b:#8884; --ok:#2a7; --bad:#c43; --warn:#c80; }
-  body { font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 12px 16px; }
-  h1 { font-size: 16px; margin: 0 0 8px; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
-  button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--b); cursor: pointer; }
+  :root { color-scheme: light dark; --b:#8884; --ok:#2a7; --bad:#c43; --warn:#c80; --acc:#2a7; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  h1 { font-size: 15px; margin: 0 6px 0 0; }
+  button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--b); cursor: pointer; background: transparent; }
   button:disabled { opacity: .45; cursor: default; }
-  button.primary { background: #2a7; color: #fff; border-color: #2a7; }
-  button.danger { background: #c43; color: #fff; border-color: #c43; }
-  .job { padding: 6px 10px; margin: 4px 0; border: 1px solid var(--warn); border-radius: 6px; }
-  .prog { font: 12px ui-monospace, Menlo, monospace; }
-  pre.small { height: auto; max-height: 140px; }
+  button.primary { background: var(--acc); color: #fff; border-color: var(--acc); }
+  button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
   select, input { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--b); }
-  #env { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--b); }
-  #env.bad { border-color: var(--bad); }
-  table { border-collapse: collapse; margin: 6px 0; }
-  td { padding: 2px 10px 2px 0; vertical-align: top; }
+  .muted { opacity: .65; } .small { font-size: 12px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  #env.bad { color: var(--bad); }
+  #jobs .job { padding: 6px 10px; margin: 0 0 4px; border: 1px solid var(--warn); border-radius: 6px; }
+  /* mode tabs: only after a port is selected */
+  #modes { display: flex; gap: 2px; border-bottom: 1px solid var(--b); align-items: center; }
+  #portinfo { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40ch; }
+  #modes button { border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 6px 14px; }
+  #modes button[aria-selected="true"] { border-bottom-color: var(--acc); font-weight: 600; }
+  #modes button.danger-tab[aria-selected="true"] { border-bottom-color: var(--bad); }
+  .panel { display: none; }
+  .panel.on { display: block; }
+  .panel .bar { margin: 4px 0; }
+  table { border-collapse: collapse; margin: 4px 0; }
+  td { padding: 1px 10px 1px 0; vertical-align: top; }
   td:first-child { opacity: .7; white-space: nowrap; }
   pre { font: 12px/1.35 ui-monospace, Menlo, monospace; background: #8881; border: 1px solid var(--b);
-        border-radius: 6px; padding: 8px; height: 280px; overflow: auto; white-space: pre-wrap; margin: 6px 0; }
-  .muted { opacity: .65; }
-  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
-  fieldset { border: 1px solid var(--b); border-radius: 8px; margin: 10px 0; padding: 6px 12px; }
-  legend { padding: 0 4px; font-weight: 600; }
+        border-radius: 6px; padding: 8px; overflow: auto; white-space: pre-wrap; margin: 0; }
+  #flashparts { max-height: 160px; margin: 4px 0; }
+  #out { flex: 1; min-height: 180px; display: flex; flex-direction: column; gap: 4px; }
+  #log { flex: 1; min-height: 160px; }
+  .prog { font: 12px ui-monospace, Menlo, monospace; }
+  details summary { cursor: pointer; }
+  #empty { padding: 18px 0; }
 </style>
 </head>
 <body>
-<h1>devbench <span class="muted">— boards on your machine, results to the agent</span></h1>
-<div id="env">checking browser…</div>
+
+<div class="bar">
+  <h1>devbench</h1>
+  <select id="label" title="board label: reports, dumps and jobs are filed under it">
+    <option value="fnk0104s">Freenove FNK0104S (4.0")</option>
+    <option value="amoled18-v2">Waveshare AMOLED-1.8 V2</option>
+    <option value="cyd-2432s028">ESP32-2432S028 (CYD 2.8")</option>
+    <option value="reterminal-sticky">Seeed reTerminal Sticky</option>
+    <option value="other">other</option>
+  </select>
+  <button id="pick" class="primary">Connect…</button>
+  <span id="portinfo" class="muted">no port</span>
+  <button id="forget" disabled title="forget this port">✕</button>
+</div>
+<div id="env" class="small muted">checking browser…</div>
 <div id="jobs" hidden></div>
 
-<fieldset>
-  <legend>Board</legend>
-  <div class="row">
-    <label>Label <select id="label">
-      <option value="fnk0104s">Freenove FNK0104S (4.0")</option>
-      <option value="amoled18-v2">Waveshare AMOLED-1.8 V2</option>
-      <option value="cyd-2432s028">ESP32-2432S028 (CYD 2.8")</option>
-      <option value="reterminal-sticky">Seeed reTerminal Sticky</option>
-      <option value="other">other</option>
-    </select></label>
-    <button id="pick" class="primary">Connect…</button>
-    <span id="portinfo" class="muted">no port</span>
-    <button id="forget" disabled>Forget port</button>
-  </div>
-  <div class="muted">Probe, boot log and dump are read-only. Flash writes, and always asks first. Each operation loads esptool's stub into RAM and resets the board afterwards.</div>
-</fieldset>
+<div id="empty" class="muted">Connect a board to choose what to do with it.</div>
 
-<fieldset>
-  <legend>Identify</legend>
-  <div class="row">
-    <label>Flash-read baud <select id="baud">
-      <option>1152000</option><option>921600</option><option>460800</option><option>115200</option>
-    </select></label>
+<nav id="modes" hidden role="tablist">
+  <button data-mode="console" role="tab">Console</button>
+  <button data-mode="identify" role="tab">Identify</button>
+  <button data-mode="dump" role="tab">Dump</button>
+  <button data-mode="flash" role="tab" class="danger-tab">Flash</button>
+  <span style="flex:1"></span>
+  <label class="small muted" title="stub baud for identify, dump and flash; native USB ignores it">baud
+    <select id="baud"><option>1152000</option><option>921600</option><option>460800</option><option>115200</option></select></label>
+</nav>
+
+<section class="panel" data-panel="console">
+  <div class="bar">
+    <button id="mon" disabled>Open monitor (115200)</button>
+    <button id="rst" disabled>Reset</button>
+    <input id="line" placeholder="send a line (Enter)" style="flex:1;min-width:14em" disabled>
+  </div>
+</section>
+
+<section class="panel" data-panel="identify">
+  <div class="bar">
     <button id="probe" disabled>Probe chip + flash</button>
     <button id="boot" disabled>Reset + capture boot log</button>
-    <label><input id="bootsecs" type="number" min="2" max="60" value="8" style="width:4em"> s</label>
-    <button id="send" disabled>Send report to agent</button>
-    <span id="sent" class="muted"></span>
+    <label class="small"><input id="bootsecs" type="number" min="2" max="120" value="8" style="width:4em"> s</label>
+    <button id="send" disabled title="reports are sent automatically; this re-sends">Re-send report</button>
+    <span id="sent" class="small muted"></span>
   </div>
   <table id="facts"></table>
-</fieldset>
+  <details class="small"><summary class="muted">stored reports</summary><div id="reports" class="muted">…</div></details>
+</section>
 
-<fieldset>
-  <legend>Dump flash</legend>
-  <div class="row">
+<section class="panel" data-panel="dump">
+  <div class="bar">
     <select id="dumpwhat"><option value="all">whole flash</option><option value="range">custom range…</option></select>
     <input id="dumprange" placeholder="0x8000:0x1000" hidden style="width:12em">
     <button id="dump" disabled>Dump to agent</button>
     <span id="dumpprog" class="prog muted"></span>
   </div>
-  <div class="muted">Streams to <code>tools/devbench/dumps/</code> on the agent's host, then checks the board's own MD5 of the range against what was read. Probe first to pick a partition.</div>
-</fieldset>
+  <div class="small muted">Read-only. Partitions appear here after a probe. Verified against the board's own MD5, saved to <code>tools/devbench/dumps/</code>.</div>
+</section>
 
-<fieldset>
-  <legend>Flash firmware</legend>
-  <div class="row">
-    <select id="flashset" style="min-width:22em"></select>
-    <button id="reloadsets">↻</button>
-    <label><input type="checkbox" id="eraseall"> erase whole chip first</label>
-    <button id="flash" class="danger" disabled>Flash…</button>
+<section class="panel" data-panel="flash">
+  <div class="bar">
+    <select id="flashset" style="min-width:20em;flex:1"></select>
+    <button id="reloadsets" title="reload image sets">↻</button>
+  </div>
+  <pre id="flashparts"></pre>
+  <div class="bar">
+    <label><input type="checkbox" id="eraseall"> erase whole chip first <span class="small muted">(loses Wi-Fi + pairing)</span></label>
+    <span style="flex:1"></span>
     <span id="flashprog" class="prog muted"></span>
+    <button id="flash" class="danger" disabled>Flash…</button>
   </div>
-  <pre id="flashparts" class="small"></pre>
-  <div class="muted">Each part is MD5-checked after download and again on the chip after writing. The chip type and flash size are checked before the first write.</div>
-</fieldset>
+</section>
 
-<fieldset>
-  <legend>Serial console</legend>
-  <div class="row">
-    <button id="mon" disabled>Open monitor (115200)</button>
-    <button id="rst" disabled>Reset</button>
-    <input id="line" placeholder="line to send (Enter)" style="flex:1;min-width:16em" disabled>
-    <button id="clear">Clear</button>
-  </div>
+<div id="out">
+  <div class="bar small"><span class="muted">output</span><span style="flex:1"></span><button id="clear">Clear</button></div>
   <pre id="log"></pre>
-</fieldset>
-
-<fieldset>
-  <legend>Stored reports</legend>
-  <div id="reports" class="muted">…</div>
-</fieldset>
+</div>
 
 <script type="module" src="bench.js"></script>
 </body>
