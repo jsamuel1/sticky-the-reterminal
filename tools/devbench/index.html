@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>devbench — USB board bench</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: light dark; --b:#8884; --ok:#2a7; --bad:#c43; --warn:#c80; }
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 12px 16px; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+  button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--b); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: #2a7; color: #fff; border-color: #2a7; }
+  select, input { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--b); }
+  #env { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--b); }
+  #env.bad { border-color: var(--bad); }
+  table { border-collapse: collapse; margin: 6px 0; }
+  td { padding: 2px 10px 2px 0; vertical-align: top; }
+  td:first-child { opacity: .7; white-space: nowrap; }
+  pre { font: 12px/1.35 ui-monospace, Menlo, monospace; background: #8881; border: 1px solid var(--b);
+        border-radius: 6px; padding: 8px; height: 280px; overflow: auto; white-space: pre-wrap; margin: 6px 0; }
+  .muted { opacity: .65; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  fieldset { border: 1px solid var(--b); border-radius: 8px; margin: 10px 0; padding: 6px 12px; }
+  legend { padding: 0 4px; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>devbench <span class="muted">— boards on your machine, results to the agent</span></h1>
+<div id="env">checking browser…</div>
+
+<fieldset>
+  <legend>Board</legend>
+  <div class="row">
+    <label>Label <select id="label">
+      <option value="fnk0104s">Freenove FNK0104S (4.0")</option>
+      <option value="amoled18-v2">Waveshare AMOLED-1.8 V2</option>
+      <option value="cyd-2432s028">ESP32-2432S028 (CYD 2.8")</option>
+      <option value="reterminal-sticky">Seeed reTerminal Sticky</option>
+      <option value="other">other</option>
+    </select></label>
+    <button id="pick" class="primary">Connect…</button>
+    <span id="portinfo" class="muted">no port</span>
+    <button id="forget" disabled>Forget port</button>
+  </div>
+  <div class="muted">Read-only: identify and boot-log never write flash. The probe loads esptool's stub into RAM and resets the board afterwards.</div>
+</fieldset>
+
+<fieldset>
+  <legend>Identify</legend>
+  <div class="row">
+    <label>Flash-read baud <select id="baud">
+      <option>1152000</option><option>921600</option><option>460800</option><option>115200</option>
+    </select></label>
+    <button id="probe" disabled>Probe chip + flash</button>
+    <button id="boot" disabled>Reset + capture boot log</button>
+    <label><input id="bootsecs" type="number" min="2" max="60" value="8" style="width:4em"> s</label>
+    <button id="send" disabled>Send report to agent</button>
+    <span id="sent" class="muted"></span>
+  </div>
+  <table id="facts"></table>
+</fieldset>
+
+<fieldset>
+  <legend>Serial console</legend>
+  <div class="row">
+    <button id="mon" disabled>Open monitor (115200)</button>
+    <button id="rst" disabled>Reset</button>
+    <input id="line" placeholder="line to send (Enter)" style="flex:1;min-width:16em" disabled>
+    <button id="clear">Clear</button>
+  </div>
+  <pre id="log"></pre>
+</fieldset>
+
+<fieldset>
+  <legend>Stored reports</legend>
+  <div id="reports" class="muted">…</div>
+</fieldset>
+
+<script type="module" src="bench.js"></script>
+</body>
+</html>

@@ -245,6 +245,45 @@ package. `PLAYGROUND.md` at the root is the short version of this section.
   only a `screenshot` proves pixels.
 - Rotation is runtime state: screenshot → tap coordinates must be atomic.
 
+### 10a. USB bench: `tools/devbench` (the default for boards on the owner's desk)
+
+The boards plug into the **owner's laptop**; the agent often runs on a remote
+Linux box with no USB. `tools/devbench` bridges that: a stdlib server here,
+a Web Serial page in the owner's Chrome/Edge (Safari has no Web Serial).
+
+```sh
+setsid nohup python3 tools/devbench/server.py >> .logs/devbench.log 2>&1 < /dev/null &   # 127.0.0.1:8765
+curl -s -X POST "$KERMES_DASHBOARD_ORIGIN/api/browsers/open" -H 'content-type: application/json' -d '{"url":"8765"}'
+```
+
+- The owner picks a board label, clicks **Connect…**, **Probe**, **Reset + capture boot log**.
+  Read-only: it never writes flash.
+- Read the results from disk; don't ask the owner to paste them.
+  - `tools/devbench/reports/latest-<label>.json` holds the chip, features, MAC, flash JEDEC ID/size, bootloader header, partitions, app descriptors, boot log and parsed boot facts.
+  - `reports/devbench.log` gets every console line within ~1 s, stamped with session and label.
+  - `reports/` is gitignored.
+- Reports are auto-sent after every probe and every boot capture.
+- Under the dashboard proxy, requests arrive with `Transfer-Encoding: chunked`.
+  The server handles that; any new endpoint must use `_body()`.
+- The page reads flash at **1152000** baud by default (owner's choice), with a dropdown fallback.
+  On native USB-Serial/JTAG (`303a:1001`) the baud setting is nominal.
+- Run the server with `setsid nohup`. A Kermes `background_job` server was
+  reaped mid-session (2026-10-18).
+
+Measured 2026-10-18 (both on `303a:1001`, ESP32-S3 QFN56 v0.2, embedded PSRAM 8 MB AP octal):
+
+| label | MAC | flash JEDEC | bootloader hdr | console |
+|---|---|---|---|---|
+| `fnk0104s` | b8:1f:3f:c5:05:2c | 0x18405e Zbit, 16 MB | dio / 16MB | silent on USB (factory fw logs to UART0 header) |
+| `amoled18-v2` | 44:bd:8d:78:30:b4 | 0x184020 XMC, 16 MB | dio / 16MB | USB; app at 0x200000, flash io qio, CO5300 + CST816S-driver touch at 0x15 (IC id 183), AXP2101, PCF85063A |
+| `cyd-2432s028` | 68:09:47:f8:c1:2c | 0x164068 Boya, 4 MB | @0x1000 (ESP32) | CH340 `1a86:7523`; ESP32-D0WD-V3 rev 3, **no PSRAM**; factory Arduino sketch ("Setup done"), 2×1280K OTA + 1472K spiffs |
+
+- CYD (ESP32-2432S028) USB-C: computer USB-C ports give it no power, most likely because the CC pull-downs are missing.
+  Use a USB-A→C cable.
+- On CH340, esptool-js's baud change re-opens the port, which resets the board.
+  It then falls back to 115200 on its own, so probes work but slowly.
+- The first stub read after each command reports "serial noise"; the per-chunk retry succeeds.
+
 ## 11. Things that are personal, secret, or must never be committed
 
 - `.secrets.*.json`, `.logs/`, `recovery/*.bin`, `firmware/sdkconfig`,
