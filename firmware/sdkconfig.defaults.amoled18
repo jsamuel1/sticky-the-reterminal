@@ -1,0 +1,20 @@
+# Waveshare ESP32-S3-Touch-AMOLED-1.8 V2 overlay — layered on sdkconfig.defaults:
+#   idf.py -B build-amoled18 -DSDKCONFIG=build-amoled18/sdkconfig \
+#          -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.amoled18" build
+# (or tools/build_board.sh amoled18).
+CONFIG_TINY_BOARD_AMOLED18=y
+# CONFIG_TINY_BOARD_RETERMINAL is not set
+
+# Flash: 16 MB QIO 80 MHz, PSRAM 8 MB octal (vendor sdkconfig.defaults).
+# CONFIG_ESPTOOLPY_FLASHSIZE_32MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# CONFIG_ESPTOOLPY_FLASHMODE_DIO is not set
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb.csv"
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Console: native USB-Serial-JTAG on the USB-C port (vendor default).
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

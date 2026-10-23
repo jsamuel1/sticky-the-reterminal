@@ -47,7 +47,16 @@ STICKY_PORT=/dev/cu.usbmodemXXXX ../tools/flash.sh        # app only, 460800 the
 STICKY_PORT=/dev/cu.usbmodemXXXX ../tools/first_flash.sh  # blank board: all four parts, 45 s boot log
 STICKY_PORT=/dev/cu.usbmodemXXXX ../tools/monitor.sh
 tests/run.sh                                 # host tests: askq, bootmark, sleep/wake — must stay green
+tools/build_board.sh fnk0104s                # board variant → firmware/build-fnk0104s (also: amoled18)
 ```
+
+- Board variants: `choice TINY_BOARD` (Kconfig.projbuild) = reterminal
+  (default) | fnk0104s | amoled18. Pins per board in `pin_config_<board>.h`,
+  HAL set per board in `main/CMakeLists.txt`, run-time facts in
+  `tiny/board_caps.h` (status `board` + `absent[]`). Colour boards layer
+  `sdkconfig.defaults.<board>` on the base, use `partitions_16mb.csv`, log on
+  USB-Serial-JTAG, and refuse `ota` (no channel carries their images). Shared
+  `tiny_*` code takes no board `#if` beyond touch/audio/buttons/console.
 
 - `tools/port.sh` resolves the port and **refuses to guess** when several
   CH343 "USB Single Serial" adapters are present (SO-101 servo buses share the

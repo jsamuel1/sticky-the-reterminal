@@ -1,5 +1,34 @@
 menu "tiny Sticky"
 
+choice TINY_BOARD
+    prompt "Target board"
+    default TINY_BOARD_RETERMINAL
+    help
+        Which physical board this image is for. The pin map (pin_config.h),
+        the HAL sources (main/CMakeLists.txt) and the capability table
+        (board_caps.h) all follow this choice. The reTerminal is the default
+        and the release target; the others are selected by an extra
+        sdkconfig.defaults overlay (sdkconfig.defaults.<board>).
+
+config TINY_BOARD_RETERMINAL
+    bool "Seeed reTerminal Sticky (SSD1677 e-ink, 32 MB flash)"
+
+config TINY_BOARD_FNK0104S
+    bool "Freenove FNK0104S 4.0\" (ST7796 LCD, 16 MB flash)"
+    help
+        Phase 1: boots, joins Wi-Fi and serves the relay. Display, touch,
+        audio, battery ADC and SD are not driven yet (headless canvas,
+        absent stubs). Console is USB-Serial-JTAG (the USB-C port).
+
+config TINY_BOARD_AMOLED18
+    bool "Waveshare ESP32-S3-Touch-AMOLED-1.8 V2 (CO5300, 16 MB flash)"
+    help
+        Phase 1: boots, brings the TCA9554 rails/resets up, probes the I2C
+        bus (touch 0x15 = V2), joins Wi-Fi and serves the relay. Display,
+        touch, audio, PMU, RTC, IMU and SD are not driven yet.
+
+endchoice
+
 config TINY_DASHBOARD_URL
     string "Dashboard base URL (settings QR target)"
     default "https://sticky.cagatay.my"

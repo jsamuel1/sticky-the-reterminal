@@ -1,0 +1,11 @@
+# 16 MB flash (FNK0104S, AMOLED-1.8): no factory slot, A/B OTA, assets.
+# App is ~1.5 MB today (reTerminal 0.29.0: 0x1762b0), so 6 MB slots leave
+# room for the colour-panel drivers and fonts. Offsets match partitions.csv
+# up to phy_init so NVS survives a board-variant reflash of the same layout.
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000
+otadata,    data, ota,      0xf000,   0x2000
+phy_init,   data, phy,      0x11000,  0x1000
+ota_0,      app,  ota_0,    0x20000,  0x600000
+ota_1,      app,  ota_1,    0x620000, 0x600000
+assets,     data, spiffs,   0xc20000, 0x3e0000

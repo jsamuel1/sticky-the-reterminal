@@ -1,0 +1,24 @@
+# Freenove FNK0104S overlay — layered on sdkconfig.defaults:
+#   idf.py -B build-fnk0104s -DSDKCONFIG=build-fnk0104s/sdkconfig \
+#          -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.fnk0104s" build
+# (or tools/build_board.sh fnk0104s). firmware/build stays the reTerminal
+# release input; this board never builds there.
+CONFIG_TINY_BOARD_FNK0104S=y
+# CONFIG_TINY_BOARD_RETERMINAL is not set
+
+# Flash: 16 MB, JEDEC 0x18405e measured on the owner's unit (the schematic's
+# W25X40 label is wrong). DIO 80 MHz = the vendor's own flash script.
+# CONFIG_ESPTOOLPY_FLASHSIZE_32MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb.csv"
+
+# PSRAM: ESP32-S3R8 = 8 MB octal in package (measured). Same as base.
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Console: the USB-C port is the S3's native USB-Serial-JTAG (no bridge chip;
+# UART0 is only on the header pins). Boot log + the {json} bench line reader.
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

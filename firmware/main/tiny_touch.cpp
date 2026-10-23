@@ -25,8 +25,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "gt911.h"
 #include "pin_config.h"
+#include "sdkconfig.h"
+#if defined(CONFIG_TINY_BOARD_RETERMINAL)
+// GT911 is the reTerminal's controller. The colour boards (FNK0104S FT6336,
+// AMOLED CST820) get theirs in a later phase; until then they keep the action
+// task and the synthetic tap/swipe path, but sample no finger.
+#define TINY_TOUCH_GT911 1
+#include "gt911.h"
+#endif
 #include "sticky_buzzer.h"
 #include "tiny/tiny_button.h"
 #include "tiny/tiny_display.h"
@@ -43,10 +50,12 @@ constexpr uint16_t kPortraitW = 480, kPortraitH = 800;
 constexpr TickType_t kPoll = pdMS_TO_TICKS(30);
 constexpr int kTapSlop = 24;  // finger may drift this much and still be a tap
 
+#if TINY_TOUCH_GT911
 i2c_master_bus_handle_t s_bus = nullptr;
 GT911 s_ctl;
-TaskHandle_t s_task = nullptr;
 bool s_touching = false;
+#endif
+TaskHandle_t s_task = nullptr;
 uint16_t s_start_x = 0, s_start_y = 0, s_last_x = 0, s_last_y = 0;
 // Ghost-touch defence: the GT911 emits phantom
 // single-poll points during boot/wifi bring-up. A real finger spans several
@@ -61,8 +70,10 @@ uint16_t s_start_x = 0, s_start_y = 0, s_last_x = 0, s_last_y = 0;
 constexpr int kDebouncePolls = 2;
 constexpr int64_t kBootGraceMs = 1200;
 constexpr uint16_t kMinTrustedSize = 1;
+#if TINY_TOUCH_GT911
 int s_touch_streak = 0;
 TickType_t s_init_tick = 0;
+#endif
 // Card generation sampled at finger-DOWN. If a render commits a different card
 // while the finger is still down, the button under it is not the one the human
 // aimed at, so the tap is dropped (audit TOUCH P0-1).
@@ -350,6 +361,7 @@ void queue_action(Act act, int index, const char *label, const char *id) {
         ESP_LOGW(kTag, "action queue full — tap %d dropped", index);
 }
 
+#if TINY_TOUCH_GT911
 uint16_t scale_coord(uint16_t v, uint16_t in_max, uint16_t out_max) {
     const uint16_t c = std::min(v, in_max);
     return static_cast<uint16_t>(
@@ -368,6 +380,7 @@ void transform(uint16_t tx, uint16_t ty, uint16_t &dx, uint16_t &dy) {
     dx = kW - fx - 1U;
     dy = kH - fy - 1U;
 }
+#endif  // TINY_TOUCH_GT911
 
 void on_tap_up() {
     const int adx = std::abs(static_cast<int>(s_last_x) - s_start_x);
@@ -439,6 +452,7 @@ void on_tap_up() {
            s_start_y, tiny_display_current_card_id(), n);
 }
 
+#if TINY_TOUCH_GT911
 void touch_task(void *) {
     TickType_t next = xTaskGetTickCount();
     while (true) {
@@ -495,6 +509,7 @@ void touch_task(void *) {
         vTaskDelayUntil(&next, kPoll);
     }
 }
+#endif  // TINY_TOUCH_GT911
 
 }  // namespace
 
@@ -537,6 +552,7 @@ extern "C" esp_err_t tiny_touch_inject_swipe(int x0, int y0, int x1, int y1) {
 }
 
 extern "C" esp_err_t tiny_touch_init(void) {
+#if TINY_TOUCH_GT911
     gpio_config_t en = {};
     en.pin_bit_mask = 1ULL << PIN_TOUCH_EN;
     en.mode = GPIO_MODE_OUTPUT;
@@ -563,6 +579,7 @@ extern "C" esp_err_t tiny_touch_init(void) {
     ESP_LOGI(kTag, "GT911 ready: sensor=%ux%u addr=0x%02X", sw, sh,
              s_ctl.address());
     s_init_tick = xTaskGetTickCount();
+#endif  // TINY_TOUCH_GT911
 
     // Depth 1: one pending action. A second tap while an ask is running is
     // dropped, not queued.
@@ -576,11 +593,20 @@ extern "C" esp_err_t tiny_touch_init(void) {
     if (xTaskCreate(act_task, "tiny_act", 12288, nullptr, 4, nullptr) != pdPASS)
         return ESP_ERR_NO_MEM;
 
+#if TINY_TOUCH_GT911
     // prio 6 — above the node task: sampling fingers must never wait on HTTP.
     return xTaskCreate(touch_task, "tiny_touch", 4096, nullptr, 6, &s_task) ==
                    pdPASS
                ? ESP_OK
                : ESP_ERR_NO_MEM;
+#else
+    // No controller driven on this board yet: the relay tap/swipe verbs still
+    // route through the action task above. NOT_SUPPORTED names the missing
+    // finger in the boot log without failing anything.
+    (void)s_task;
+    ESP_LOGW(kTag, "no touch controller on this board build - synthetic taps only");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 extern "C" void tiny_touch_set_regions(const tiny_touch_region_t *, int) {

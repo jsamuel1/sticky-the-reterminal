@@ -191,8 +191,13 @@ extern "C" esp_err_t tiny_button_init(void) {
     ESP_ERROR_CHECK(mk_button(PIN_BTN_OK, &s_ai, on_ai_click, NULL));
     ESP_ERROR_CHECK(iot_button_register_cb(s_ai, BUTTON_LONG_PRESS_START, NULL,
                                            on_ai_long, NULL));
+#if PIN_BTN_UP >= 0 && PIN_BTN_DOWN >= 0
     ESP_ERROR_CHECK(mk_button(PIN_BTN_UP, &s_up, on_page_click, (void *)0));
     ESP_ERROR_CHECK(mk_button(PIN_BTN_DOWN, &s_down, on_page_click, (void *)1));
+#else
+    // Single-button board (BOOT = OK/AI): click asks, long-press is home.
+    (void)s_up; (void)s_down; (void)on_page_click;
+#endif
     ESP_LOGI(TAG, "buttons live: AI=%d up=%d down=%d", PIN_BTN_OK, PIN_BTN_UP,
              PIN_BTN_DOWN);
     return ESP_OK;

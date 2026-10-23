@@ -3,6 +3,7 @@
 // EVERY request: 15s timeout. 401 on heartbeat/poll -> STRIKE, not wipe;
 // reboot (fresh boot lands in unprovisioned path -> portal once M3b lands).
 #include "tiny/tiny_node.h"
+#include "tiny/board_caps.h"
 #include "tiny/tiny_beacon.h"
 #include "tiny/tiny_askq.h"
 #include "tiny/tiny_agent.h"
@@ -797,6 +798,22 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     cJSON_AddStringToObject(s, "fw", TINY_FW_VERSION);
     cJSON_AddStringToObject(s, "fw_commit", TINY_FW_COMMIT);
     cJSON_AddNumberToObject(s, "grammar_version", TINY_GRAMMAR_VERSION);
+    // v13: which body this is. Consumers gate hardware verbs on `board` and
+    // read `absent` for the parts this build does not drive (an absent part
+    // answers null/NOT_SUPPORTED, never a guess).
+    {
+        const tiny_board_caps_t *bc = tiny_board_caps();
+        cJSON_AddStringToObject(s, "board", bc->id);
+        cJSON *ab = cJSON_AddArrayToObject(s, "absent");
+        const struct { bool have; const char *name; } parts[] = {
+            {bc->panel, "display"}, {bc->touch, "touch"}, {bc->mic, "mic"},
+            {bc->buzzer, "buzzer"}, {bc->battery_gauge, "battery"},
+            {bc->rtc, "rtc"}, {bc->imu, "imu"}, {bc->env, "env"},
+            {bc->sd, "sd"}, {bc->ota, "ota"},
+        };
+        for (const auto &p : parts)
+            if (!p.have) cJSON_AddItemToArray(ab, cJSON_CreateString(p.name));
+    }
     // v11: who answers the asks. "" = the owner's own tiny (default). The
     // dashboard/reviewer verify agent switching without eyes on the glass.
     cJSON_AddStringToObject(s, "active_agent", tiny_agent_current());
@@ -910,21 +927,22 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     cJSON_AddBoolToObject(s, "sleeping", false);  // deep sleep lands in M7b
     // §11 spec-mandated truth surface: the lock state is a status field.
     cJSON_AddBoolToObject(s, "locked", tiny_lock_is_locked());
-    cJSON_AddStringToObject(s, "display", "800x480 4-gray");
+    cJSON_AddStringToObject(s, "display", tiny_board_caps()->display);
     cJSON_AddStringToObject(s, "card_id", tiny_display_current_card_id());
     cJSON_AddBoolToObject(s, "auth_halted", s_auth_halted);
     char summary[224];
     if (have_batt)
         snprintf(summary, sizeof summary,
                  "sticky online: fw %s, wifi %s, heap %lu, battery %d%%, "
-                 "up %llds, display 800x480 ready",
+                 "up %llds, display %s ready",
                  TINY_FW_VERSION, wifi_up ? "up" : "down", heap, br.percent,
-                 up_s);
+                 up_s, tiny_board_caps()->display_short);
     else
         snprintf(summary, sizeof summary,
                  "sticky online: fw %s, wifi %s, heap %lu, battery n/a, "
-                 "up %llds, display 800x480 ready",
-                 TINY_FW_VERSION, wifi_up ? "up" : "down", heap, up_s);
+                 "up %llds, display %s ready",
+                 TINY_FW_VERSION, wifi_up ? "up" : "down", heap, up_s,
+                 tiny_board_caps()->display_short);
     cJSON_AddStringToObject(s, "summary", summary);
 
     char *js = cJSON_PrintUnformatted(s);
@@ -2322,6 +2340,10 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                   "OTA refused: pointer is not newer than running "
                   TINY_FW_VERSION " and bundle has no \"force\":\"1\" — "
                   "publish a newer version, or set force to downgrade");
+        } else if (r == ESP_ERR_INVALID_STATE && !tiny_board_caps()->ota) {
+            reply(envelope_id,
+                  "OTA refused: no channel carries images for this board - "
+                  "flash it over USB");
         } else {
             char out[96];
             snprintf(out, sizeof out, "OTA failed: %s", esp_err_to_name(r));
@@ -2642,8 +2664,11 @@ static void node_task(void *) {
         // verb that just arrived always executes before the due-check runs.
         if (autosleep_due() && !s_crumb_inflight && !tiny_stream_playing()) {
             BatteryDetail bd = {};
+            // No fuel gauge (colour boards, phase 1) = no evidence of running
+            // on battery: treat as wall power and stay on the relay.
             const bool charging =
-                sticky_battery_read_detail(bd) == ESP_OK && bd.charging;
+                !tiny_board_caps()->battery_gauge ||
+                (sticky_battery_read_detail(bd) == ESP_OK && bd.charging);
             tiny_config_t cfg = {};
             const bool enrolled = tiny_config_load(&cfg) == ESP_OK &&
                                   tiny_config_is_provisioned(&cfg);

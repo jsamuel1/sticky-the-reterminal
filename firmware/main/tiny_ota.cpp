@@ -20,6 +20,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "mbedtls/sha256.h"
+#include "tiny/board_caps.h"
 #include "tiny/tiny_config.h"
 #include "tiny/tiny_version.h"
 
@@ -135,6 +136,14 @@ static int ver_cmp(const char *pointer, const char *current) {
 }
 
 extern "C" esp_err_t tiny_ota_check_and_stage(const char *channel) {
+    // The OTA channels carry reTerminal images (32 MB layout, e-ink pins).
+    // Staging one on another board would boot the wrong pin map. Refuse
+    // before any network until the channel names the board it targets.
+    if (!tiny_board_caps()->ota) {
+        ESP_LOGE(TAG, "REFUSED: no OTA channel carries %s images",
+                 tiny_board_caps()->id);
+        return ESP_ERR_INVALID_STATE;
+    }
     char ver[48], url[256], sha_want[72];
     bool force = false;
     ESP_RETURN_ON_ERROR(

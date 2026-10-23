@@ -17,9 +17,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "pin_config.h"
+#include "sdkconfig.h"
 #include "sticky_buzzer.h"
 
 static const char *TAG = "tiny_audio";
+
+#if defined(CONFIG_TINY_BOARD_RETERMINAL)
 
 #define SAMPLE_RATE 16000
 #define MAX_SECONDS 15
@@ -131,3 +134,26 @@ extern "C" esp_err_t tiny_audio_chime(const char *) {
     // Tier 1: the vendored buzzer beep. Named chimes/RTTTL are M7 polish.
     return sticky_buzzer_beep();
 }
+
+#else  // colour boards: ES8311 capture lands in the audio phase
+
+// No PDM mic on these boards, and the USB pad must NOT be disabled: their
+// console is USB-Serial-JTAG. Every capture path funnels through here, so the
+// refusal reaches voice, the AI button and miccheck alike.
+extern "C" esp_err_t tiny_audio_init(void) {
+    ESP_LOGW(TAG, "no microphone driver on this board build");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+extern "C" esp_err_t tiny_audio_record_wav(int, uint8_t **wav, size_t *len) {
+    if (wav) *wav = NULL;
+    if (len) *len = 0;
+    if (tiny_lock_is_locked()) return ESP_ERR_NOT_ALLOWED;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+extern "C" esp_err_t tiny_audio_chime(const char *) {
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+#endif

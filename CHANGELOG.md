@@ -4,6 +4,26 @@ Firmware versions come from `firmware/main/tiny/tiny_version.h`; the verb
 grammar version (`TINY_GRAMMAR_VERSION`) is what clients gate on. One line per
 release, newest first.
 
+## 0.30.0 — grammar v13 — board variants (phase 1)
+
+- **firmware** — `choice TINY_BOARD` in `main/Kconfig.projbuild`:
+  reTerminal Sticky (default, unchanged HAL), Freenove FNK0104S, Waveshare
+  ESP32-S3-Touch-AMOLED-1.8 V2. One pin map per board behind `pin_config.h`,
+  HAL sources gated per board in `main/CMakeLists.txt`, and a run-time
+  `board_caps` table read by boot, `status`, the beacon caps bits, auto-sleep
+  and OTA. Colour boards build with `tools/build_board.sh <board>` into
+  `firmware/build-<board>` (own sdkconfig; `firmware/build` stays the
+  reTerminal release input) on `partitions_16mb.csv` (2 × 6 MB OTA).
+- **firmware** — colour boards, phase 1: no latch, headless 800×480 canvas
+  (cards render, `screenshot` works, nothing reaches a panel), absent
+  battery/RTC/SHT40/IMU/buzzer/SD stubs answering `ESP_ERR_NOT_SUPPORTED`,
+  BOOT (GPIO0) = OK/AI, console + `{json}` bench line on USB-Serial-JTAG.
+  Boot logs flash id/size and PSRAM size/mode and probes the shared I2C bus;
+  the AMOLED releases DSI_PWR_EN/LCD_RST/TOUCH_RST on its TCA9554 first and
+  names the touch revision (CST820 0x15 = V2). No gauge = no auto-sleep.
+- **grammar v13** — `status` gains `board` and `absent[]`; `ota` refuses on a
+  board no channel carries.
+
 ## 0.29.0 — grammar v12 — TinyBeacon v2 presence
 
 - **firmware** — the Sticky is findable over Bluetooth without pairing

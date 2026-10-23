@@ -36,3 +36,6 @@ docs/dashboard/frontend/tsconfig.tsbuildinfo
 
 # Playground registry package — regenerate with tools/playground_package.sh
 playground/*/firmware/
+
+# per-board build dirs (tools/build_board.sh)
+firmware/build-*/

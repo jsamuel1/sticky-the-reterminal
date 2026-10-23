@@ -1,5 +1,5 @@
 #pragma once
-#define TINY_FW_VERSION "0.29.0"
+#define TINY_FW_VERSION "0.30.0"
 
 // The verb grammar is a 3-consumer contract (dashboard, iOS StickyPanel,
 // relay agents) held together by string prefixes. Bump this on ANY change to
@@ -81,4 +81,12 @@
 //      + heartbeat capabilities[] gains "sd" — dispatched since 0.26.0, never
 //        advertised (the drift README/commands.md carried). 23 = 23 now.
 //      + status reply gains onboard:"<step>" ("done" once the tour is dismissed).
-#define TINY_GRAMMAR_VERSION 12  // v12: onboarding pages + sd parity
+// v13 = board variants (0.30.0):
+//      + status reply gains board:"reterminal"|"fnk0104s"|"amoled18" and
+//        absent:[...] — the parts this build does not drive (display, touch,
+//        mic, buzzer, battery, rtc, imu, env, sd, ota). reTerminal: [].
+//      + status `display` / summary come from the board table ("800x480
+//        4-gray" on the reTerminal, unchanged).
+//      + `ota` on a board no channel carries replies "OTA refused: no channel
+//        carries images for this board" and stages nothing.
+#define TINY_GRAMMAR_VERSION 13  // v13: board + absent in status

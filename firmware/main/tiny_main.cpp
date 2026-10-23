@@ -12,9 +12,15 @@
 #include "esp_log.h"
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
+#include "sdkconfig.h"
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "board.h"
+#include "tiny/board_caps.h"
 #include "canvas.h"
 #include "sticky_buzzer.h"
 #include "sticky_display.h"
@@ -51,7 +57,8 @@ static const char *TAG = "tiny";
 // backend's ```card fenced block emits (docs/API_CONTRACT.md).
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "tiny-sticky fw %s booting", TINY_FW_VERSION);
+    ESP_LOGI(TAG, "tiny-sticky fw %s booting on %s", TINY_FW_VERSION,
+             tiny_board_caps()->name);
     sticky_power_log_wakeup_reason();
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER)
         ESP_LOGI(TAG, "woke from deep sleep by timer");
@@ -187,7 +194,7 @@ extern "C" void app_main(void)
         bc.tools = tools; bc.tool_count = ntools;
         bc.social = false;
         bc.battery = true;
-        bc.caps = (1u << 2) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 11) | (1u << 12) | (1u << 13); // speaker display imu wifi env touch eink = 0x391c (fixtures.json sticky_full)
+        bc.caps = tiny_board_beacon_caps();  // reTerminal: speaker display imu wifi env touch eink = 0x391c (fixtures.json sticky_full)
         bc.rssi1m = -61;
         esp_err_t berr = tiny_beacon_start(&bc);
         if (berr == ESP_OK) berr = tiny_ble_start();
@@ -298,8 +305,17 @@ extern "C" void app_main(void)
     // starting with '{' is parsed as a card and rendered. Drive it with
     // tools/render_card.py — this is how tiny tests on the device live.
     // stdin over UART needs the driver + VFS hookup, else getchar() is EOF forever.
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+    // Colour boards: the USB-C port is the S3's own USB-Serial-JTAG (no
+    // bridge chip), so the bench console and the {json} line reader live here.
+    usb_serial_jtag_driver_config_t ujc = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ujc.rx_buffer_size = 4096;
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&ujc));
+    usb_serial_jtag_vfs_use_driver();
+#else
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 4096, 0, 0, NULL, 0));
     uart_vfs_dev_use_driver(UART_NUM_0);
+#endif
     ESP_LOGI(TAG, "card console ready: send {json} line over serial");
     static char line[2048];
     size_t pos = 0;

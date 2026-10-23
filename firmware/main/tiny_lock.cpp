@@ -113,6 +113,11 @@ extern "C" esp_err_t tiny_lock_set(bool locked, const char *reason) {
 // the ONLY path back, so it must not depend on iot_button (whose callbacks
 // tiny_button.cpp gates when locked).
 static void chord_task(void *) {
+#if PIN_BTN_UP < 0 || PIN_BTN_DOWN < 0
+    // Single-button board: no chord exists. Lockout is entered and left
+    // over the relay (`lock` / `unlock`); there is no IMU auto-entry either.
+    vTaskDelete(NULL);
+#endif
     int held_ms = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kChordPollMs));
