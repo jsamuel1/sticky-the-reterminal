@@ -4,6 +4,15 @@ Firmware versions come from `firmware/main/tiny/tiny_version.h`; the verb
 grammar version (`TINY_GRAMMAR_VERSION`) is what clients gate on. One line per
 release, newest first.
 
+## Unreleased
+
+- **firmware** — FNK0104S touch: FT6336U polled on the shared I2C bus
+  (`board_sensor_i2c_bus()`), one finger, raw-point log on finger-down, same
+  tap/swipe classifier and `ui_tap` events as the GT911 path. The sensor →
+  physical-canvas axis map is one function (`tiny/tiny_touch_map.h`,
+  host-tested against `Canvas::to_logical`). `tap`/`swipe` bounds follow the
+  physical canvas on colour boards. Caps `touch` on. No verb or reply change.
+
 ## 0.30.0 — grammar v13 — board variants (phase 1)
 
 - **firmware** — `choice TINY_BOARD` in `main/Kconfig.projbuild`:
