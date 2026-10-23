@@ -8,7 +8,8 @@
 //                urlencoded form (the human: ssid/key/device_id/token)
 //                -> tiny_config_merge_json -> reply -> reboot into node mode
 //
-// XXXX = FNV-1a over the full 6-byte base MAC. The Nicla lesson transfers:
+// XXXX = FNV-1a over the full 6-byte softAP MAC (base + 1 on the S3; esptool
+// read_mac prints the base). The Nicla lesson transfers:
 // short suffixes of a factory-sequential id collide within a lot, and two APs
 // with one name is an owner who cannot tell the app which device to set up.
 // FNV-1a moves when any byte moves.

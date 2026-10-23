@@ -26,7 +26,8 @@ STICKY_PORT=/dev/cu.usbmodemXXXX tools/monitor.sh
 
 `tools/port.sh` resolves the port; it refuses to guess when more than one serial
 adapter is plugged in. Enrolling a board into a tiny.technology account is
-`tools/provision_new.sh` (see its header).
+`tools/provision_new.sh --board <board> <port>` (see its `--help`; `--dry-run`
+first).
 
 ## Tests
 

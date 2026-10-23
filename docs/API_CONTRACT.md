@@ -63,7 +63,7 @@ The original trigger was **direction-blind** (`strcmp` difference, not
 ## Provisioning portal (device-side, Nicla-compatible)
 
 ```
-softAP  SSID tiny-XXXX (FNV-1a over the full MAC — a serial suffix collides), key "tinysetup", 192.168.4.1
+softAP  SSID tiny-XXXX (FNV-1a over the full softAP MAC = base MAC + 1 — a serial suffix collides), key "tinysetup", 192.168.4.1
 GET  /info   → {"kind":"reterminal-sticky","name","mac","version","provisioned"}
 POST /setup  {device_id, token[, api, name], networks:[{ssid,key},…]}  → merge into NVS → 200 → reboot
 GET  /       → minimal HTML form (manual fallback)

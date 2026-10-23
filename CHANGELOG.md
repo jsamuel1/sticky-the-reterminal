@@ -4,6 +4,24 @@ Firmware versions come from `firmware/main/tiny/tiny_version.h`; the verb
 grammar version (`TINY_GRAMMAR_VERSION`) is what clients gate on. One line per
 release, newest first.
 
+## Unreleased
+
+- **tools** — `tools/provision_new.sh` is board-aware and builds from any
+  source: `--board reterminal|fnk0104s|amoled18`, `--repo <url|path>`,
+  `--branch <ref>` (temp clone unless it is this checkout's HEAD; the flashed
+  sha is printed; a `-dirty` build refuses without `--allow-dirty`). Parts and
+  flash mode/size/freq come from the build's own `flasher_args.json` (was a
+  hard-coded 32 MB), NVS from the board's partition table. The enrol name is
+  now FNV-1a over the **softAP** MAC (base + 1) — what the board broadcasts;
+  the old base-MAC hash enrolled the FNK as tiny-ed39 while it said tiny-eba6.
+  No session → a pairing code (`/api/devices/pair/*`) instead of a refusal;
+  ONLINE same-name row refuses unless `--adopt`. `--dry-run` prints the plan.
+  No host ESP-IDF needed: NVS is generated in `espressif/idf:v5.4`, esptool
+  comes from IDF, python3 or a pinned venv; macOS and Linux. Logic lives in
+  `tools/provision_lib.py`; `tests/host/provision_host_test.sh` covers it.
+  `npx tiny-tech flash --body sticky-the-reterminal` still calls it with the
+  port alone (board via `STICKY_BOARD`).
+
 ## 0.31.0 — grammar v14 — on-device pairing code (onboarding Phase B)
 
 - **firmware** — FNK0104S touch: FT6336U polled on the shared I2C bus

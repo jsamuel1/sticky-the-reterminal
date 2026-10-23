@@ -49,6 +49,8 @@ source ~/esp/esp-idf-v5.4/export.sh          # flashing/monitoring only: they ne
 STICKY_PORT=/dev/cu.usbmodemXXXX tools/flash.sh        # app only, 460800 then 115200 fallback
 STICKY_PORT=/dev/cu.usbmodemXXXX tools/first_flash.sh  # blank board: all four parts, 45 s boot log
 STICKY_PORT=/dev/cu.usbmodemXXXX tools/monitor.sh
+WIFI_SSID=ap WIFI_KEY=k tools/provision_new.sh --board fnk0104s [--repo URL] [--branch REF] <port>
+                                             # enrol + build + flash provisioned; --dry-run prints the plan
 tests/run.sh                                 # host tests: askq, bootmark, sleep/wake — must stay green
 ```
 
