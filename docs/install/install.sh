@@ -14,6 +14,8 @@
 #
 # Knobs:
 #   STICKY_PORT=/dev/cu.usbmodemXXXX   skip auto-detect, use this port
+#   STICKY_BOARD=reterminal|fnk0104s|amoled18   which build (default reterminal); reads
+#                                      manifest-<board>.json and its flash settings
 #   STICKY_BASE=https://…/install      fetch manifest + parts from another origin
 #   STICKY_DRY_RUN=1                   do everything except flash; print the esptool command
 #   STICKY_NO_ERASE=1                  keep NVS (token + Wi-Fi) — default for a fresh install is a full erase
@@ -21,8 +23,14 @@ set -eu
 
 BASE="${STICKY_BASE:-https://cagataycali.github.io/sticky-the-reterminal/install}"
 DRY="${STICKY_DRY_RUN:-0}"
+BOARD="${STICKY_BOARD:-reterminal}"
 say()  { printf '\033[1;36msticky\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31msticky\033[0m %s\n' "$*" >&2; exit 1; }
+case "$BOARD" in
+  reterminal) MANIFEST=manifest.json; SUMS=sha256sums.txt ;;
+  fnk0104s|amoled18) MANIFEST="manifest-$BOARD.json"; SUMS="sha256sums-$BOARD.txt" ;;
+  *) die "STICKY_BOARD must be reterminal, fnk0104s or amoled18 (got '$BOARD')" ;;
+esac
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v python3 >/dev/null 2>&1 || die "python3 is required (esptool is Python)"
@@ -50,10 +58,15 @@ say "esptool via: $ESPTOOL"
 # ── 2. artifacts ─────────────────────────────────────────────────────────────
 TMP=$(mktemp -d 2>/dev/null || mktemp -d -t sticky)
 trap 'rm -rf "$TMP"' EXIT INT TERM
-say "fetching $BASE/manifest.json"
-curl -fsSL "$BASE/manifest.json" -o "$TMP/manifest.json" || die "manifest not reachable"
-curl -fsSL "$BASE/sha256sums.txt" -o "$TMP/sha256sums.txt" || die "sha256sums not reachable"
+say "fetching $BASE/$MANIFEST"
+curl -fsSL "$BASE/$MANIFEST" -o "$TMP/manifest.json" || die "manifest not reachable"
+curl -fsSL "$BASE/$SUMS" -o "$TMP/sha256sums.txt" || die "sha256sums not reachable"
 VER=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$TMP/manifest.json")
+# Flash settings: the manifest's own (release.sh copies flasher_args.json's); a
+# manifest from before per-board builds has none and is the 32 MB reTerminal's.
+FLASH=$(python3 -c 'import json,sys;f=json.load(open(sys.argv[1])).get("flash_settings") or {};print(f.get("flash_mode","dio"),f.get("flash_size","32MB"),f.get("flash_freq","80m"))' "$TMP/manifest.json")
+set -- $FLASH
+FMODE=$1; FSIZE=$2; FFREQ=$3
 # "path offset" per part, sorted by offset
 python3 - "$TMP/manifest.json" > "$TMP/parts.txt" <<'PY'
 import json, sys
@@ -63,9 +76,9 @@ b or sys.exit("manifest has no ESP32-S3 build")
 for p in sorted(b[0]["parts"], key=lambda p: p["offset"]):
     print(p["path"], hex(p["offset"]))
 PY
-say "firmware $VER"
-mkdir -p "$TMP/fw"
+say "firmware $VER for $BOARD ($FMODE, $FSIZE, $FFREQ)"
 while read -r path off; do
+  mkdir -p "$TMP/$(dirname "$path")"
   curl -fsSL "$BASE/$path" -o "$TMP/$path" || die "could not download $path"
   size=$(wc -c < "$TMP/$path" | tr -d ' ')
   say "  $off  $size B  $path"
@@ -114,7 +127,7 @@ say "port $PORT"
 
 # ── 4. flash ─────────────────────────────────────────────────────────────────
 ARGS="--chip esp32s3 --port $PORT --before default_reset --after hard_reset"
-WRITE="write_flash --flash_mode dio --flash_size 32MB --flash_freq 80m"
+WRITE="write_flash --flash_mode $FMODE --flash_size $FSIZE --flash_freq $FFREQ"
 [ "${STICKY_NO_ERASE:-0}" = 1 ] || WRITE="$WRITE --erase-all"
 PARTS=$(while read -r path off; do printf '%s %s ' "$off" "$TMP/$path"; done < "$TMP/parts.txt")
 CMD_FAST="$ESPTOOL $ARGS --baud 460800 $WRITE $PARTS"

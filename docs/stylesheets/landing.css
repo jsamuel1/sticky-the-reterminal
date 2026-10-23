@@ -16,6 +16,10 @@
 .install-cta small { font-weight: 400; opacity: .75; margin-left: .45em; font-family: var(--md-code-font); font-size: .75em; }
 .install-note { display: inline-block; color: var(--ink-2); font-size: .85em; line-height: 1.5; }
 esp-web-install-button { --esp-tools-button-color: var(--ink-3); --esp-tools-button-text-color: var(--paper); }
+.install-form { display: grid; gap: .45rem; margin: .4rem 0 .6rem; }
+.install-form label { display: grid; grid-template-columns: 4.5em 1fr; align-items: center; gap: .5rem; font-size: .9rem; }
+.install-form select, .install-form input { font: inherit; padding: .35em .5em; border: var(--hairline); border-radius: 8px; background: var(--paper); color: inherit; min-width: 0; }
+.install-note.warn { color: var(--accent); }
 
 /* ---- Home landing ---------------------------------------------------------- */
 .landing { --ease: cubic-bezier(.2,.7,.2,1); --dur: .4s;   /* nothing on this page takes longer than one e-ink refresh */ font-family: var(--md-text-font); color: var(--ink-3); overflow-x: clip; }

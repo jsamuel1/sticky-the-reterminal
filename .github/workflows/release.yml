@@ -2,10 +2,11 @@
 # Actions tab when minutes exist; until then tools/release.sh --deploy from a laptop
 # is the rail and produces byte-identical artefacts).
 #
-# What a run does: build fw in the pinned IDF container → tools/release.sh writes
-# docs/install/manifest.json + sha256sums.txt from that build → mkdocs site (the
-# install_assets hook ships the 4 parts into site/install/fw/, sha-gated) → push to
-# gh-pages → tag v<version> + GitHub release carrying the same parts + sums.
+# What a run does: build fw for every board in the pinned IDF container →
+# tools/release.sh writes docs/install/manifest*.json + sha256sums*.txt from
+# those builds → mkdocs site (the install_assets hook ships each board's 4 parts
+# into site/install/fw/ and fw/<board>/, sha-gated) → push to gh-pages → tag
+# v<version> + GitHub release carrying the reTerminal parts + sums.
 name: release
 on:
   workflow_dispatch:
@@ -33,7 +34,9 @@ jobs:
         shell: bash
         run: |
           . $IDF_PATH/export.sh
-          tools/idf.sh build
+          tools/build_board.sh reterminal
+          tools/build_board.sh fnk0104s
+          tools/build_board.sh amoled18
       - name: manifest + sha256sums
         shell: bash
         run: tools/release.sh
@@ -41,13 +44,14 @@ jobs:
         with:
           name: fw-${{ steps.ver.outputs.version }}
           path: |
-            firmware/build/flasher_args.json
-            firmware/build/tiny_sticky.bin
-            firmware/build/bootloader/bootloader.bin
-            firmware/build/partition_table/partition-table.bin
-            firmware/build/ota_data_initial.bin
-            docs/install/manifest.json
-            docs/install/sha256sums.txt
+            firmware/build*/flasher_args.json
+            firmware/build*/config/sdkconfig.json
+            firmware/build*/tiny_sticky.bin
+            firmware/build*/bootloader/bootloader.bin
+            firmware/build*/partition_table/partition-table.bin
+            firmware/build*/ota_data_initial.bin
+            docs/install/manifest*.json
+            docs/install/sha256sums*.txt
 
   pages:
     needs: build
@@ -72,7 +76,11 @@ jobs:
           for f in manifest.json sha256sums.txt fw/bootloader.bin fw/partition-table.bin fw/ota_data_initial.bin fw/tiny_sticky.bin; do
             curl -fsSI "$B/$f" | head -1 || exit 1
           done
-          cd docs/install && curl -fsSL "$B/sha256sums.txt" | diff - sha256sums.txt
+          cd docs/install
+          for s in sha256sums*.txt; do
+            curl -fsSL "$B/$s" | diff - "$s" || exit 1
+            for f in $(awk '{print $2}' "$s"); do curl -fsSI "$B/$f" | head -1 || exit 1; done
+          done
 
   release:
     if: ${{ inputs.publish_release }}
