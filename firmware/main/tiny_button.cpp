@@ -149,6 +149,40 @@ static void on_ai_long(void *, void *) {
     queue_nav(Nav::kHome);
 }
 
+#if !defined(CONFIG_TINY_BOARD_RETERMINAL)
+// Colour boards (one physical button, BOOT): REMAPPED from the reTerminal.
+//   reTerminal:   click = ask (fixed-length capture), hold 2 s = home.
+//   colour board: click = home, hold = push-to-talk — capture runs while
+//                 BOOT is held (0.5 s floor, 15 s cap) and the ask is sent
+//                 on release.
+// Holding to talk is the natural gesture for a speaker+mic board, and home
+// still has a single-press path. kTalkHoldMs is short enough to feel like
+// "press and speak", long enough that a click never opens the mic.
+constexpr uint16_t kTalkHoldMs = 450;
+
+static void on_boot_click(void *, void *) {
+    if (tiny_lock_is_locked()) return;  // §11
+    tiny_lock_note_activity();
+    queue_nav(Nav::kHome);
+}
+
+static void on_talk_start(void *, void *) {
+    if (tiny_lock_is_locked()) {
+        ESP_LOGW(TAG, "locked: hold-to-talk refused (§11)");
+        sticky_buzzer_beep_double();
+        return;
+    }
+    tiny_lock_note_activity();
+    tiny_audio_talk_arm(true);
+    if (tiny_button_request_voice_ask() != ESP_OK) {
+        tiny_audio_talk_arm(false);
+        sticky_buzzer_beep_double();  // ask in flight: dead-end word
+    }
+}
+
+static void on_talk_release(void *, void *) { tiny_audio_talk_release(); }
+#endif
+
 static void on_page_click(void *, void *usr) {
     // §11: while locked, UP/DOWN are the unlock chord ONLY (tiny_lock's own
     // GPIO watcher reads them raw) — they page nothing here.
@@ -161,9 +195,10 @@ static void on_page_click(void *, void *usr) {
 }
 
 static esp_err_t mk_button(int gpio, button_handle_t *h,
-                           button_cb_t cb, void *usr) {
+                           button_cb_t cb, void *usr,
+                           uint16_t long_ms = 2000) {
     button_config_t bc = {};
-    bc.long_press_time = 2000;
+    bc.long_press_time = long_ms;
     bc.short_press_time = 180;
     button_gpio_config_t gc = {};
     gc.gpio_num = gpio;
@@ -188,14 +223,25 @@ extern "C" esp_err_t tiny_button_init(void) {
     if (!s_nav_q) return ESP_ERR_NO_MEM;
     if (xTaskCreate(nav_task, "shell_nav", 6144, NULL, 3, NULL) != pdPASS)
         return ESP_ERR_NO_MEM;
+#if defined(CONFIG_TINY_BOARD_RETERMINAL)
     ESP_ERROR_CHECK(mk_button(PIN_BTN_OK, &s_ai, on_ai_click, NULL));
     ESP_ERROR_CHECK(iot_button_register_cb(s_ai, BUTTON_LONG_PRESS_START, NULL,
                                            on_ai_long, NULL));
+#else
+    (void)on_ai_click; (void)on_ai_long;
+    ESP_ERROR_CHECK(mk_button(PIN_BTN_OK, &s_ai, on_boot_click, NULL, kTalkHoldMs));
+    ESP_ERROR_CHECK(iot_button_register_cb(s_ai, BUTTON_LONG_PRESS_START, NULL,
+                                           on_talk_start, NULL));
+    ESP_ERROR_CHECK(iot_button_register_cb(s_ai, BUTTON_PRESS_UP, NULL,
+                                           on_talk_release, NULL));
+    ESP_LOGI(TAG, "BOOT remap: click = home, hold %u ms = push-to-talk",
+             (unsigned)kTalkHoldMs);
+#endif
 #if PIN_BTN_UP >= 0 && PIN_BTN_DOWN >= 0
     ESP_ERROR_CHECK(mk_button(PIN_BTN_UP, &s_up, on_page_click, (void *)0));
     ESP_ERROR_CHECK(mk_button(PIN_BTN_DOWN, &s_down, on_page_click, (void *)1));
 #else
-    // Single-button board (BOOT = OK/AI): click asks, long-press is home.
+    // Single-button board (BOOT): see the remap note above on_boot_click.
     (void)s_up; (void)s_down; (void)on_page_click;
 #endif
     ESP_LOGI(TAG, "buttons live: AI=%d up=%d down=%d", PIN_BTN_OK, PIN_BTN_UP,

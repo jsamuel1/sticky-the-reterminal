@@ -29,6 +29,11 @@ static const char *TAG = "tiny_audio";
 
 static i2s_chan_handle_t s_rx = NULL;
 
+// Hold-to-talk is a colour-board gesture; the reTerminal keeps fixed-length
+// captures, so these are no-ops here.
+extern "C" void tiny_audio_talk_arm(bool) {}
+extern "C" void tiny_audio_talk_release(void) {}
+
 // 44-byte canonical PCM WAV header.
 static void wav_header(uint8_t *h, uint32_t pcm_bytes) {
     const uint32_t byte_rate = SAMPLE_RATE * 2;  // mono s16
@@ -135,25 +140,129 @@ extern "C" esp_err_t tiny_audio_chime(const char *) {
     return sticky_buzzer_beep();
 }
 
-#else  // colour boards: ES8311 capture lands in the audio phase
+#else  // colour boards: ES8311 + I2S std (audio_es8311.cpp)
 
-// No PDM mic on these boards, and the USB pad must NOT be disabled: their
-// console is USB-Serial-JTAG. Every capture path funnels through here, so the
-// refusal reaches voice, the AI button and miccheck alike.
+// Capture contract identical to the reTerminal: 16 kHz / 16-bit mono WAV in
+// PSRAM, 15 s cap, lock gate at the entry point. The ES8311 ADC runs from
+// boot (the codec is clocked by the always-on MCLK), so a capture is a drain
+// of stale DMA + a read — no rail cycling, no pin-mux reclaim, and the USB
+// pad is never touched (the console is USB-Serial-JTAG on these boards).
+#include "audio_es8311.h"
+#include "esp_timer.h"
+#include "tiny_pcm.h"
+
+#define SAMPLE_RATE AUDIO_ES8311_RATE
+#define MAX_SECONDS 15
+
+namespace {
+
+// Hold-to-talk (BOOT long-press). Armed by the button, consumed by the next
+// capture; an arm nobody consumes in kArmTtlUs expires so a stale release
+// cannot cut a later miccheck short.
+constexpr int64_t kArmTtlUs = 3 * 1000 * 1000;
+constexpr size_t kMinTalkFrames = SAMPLE_RATE / 2;  // 0.5 s floor
+volatile int64_t s_talk_armed_at = 0;
+volatile bool s_talk_released = false;
+
+bool take_talk_arm()
+{
+    const int64_t at = s_talk_armed_at;
+    s_talk_armed_at = 0;
+    return at && esp_timer_get_time() - at < kArmTtlUs;
+}
+
+}  // namespace
+
+extern "C" void tiny_audio_talk_arm(bool armed) {
+    s_talk_released = false;
+    s_talk_armed_at = armed ? esp_timer_get_time() : 0;
+}
+
+extern "C" void tiny_audio_talk_release(void) { s_talk_released = true; }
+
 extern "C" esp_err_t tiny_audio_init(void) {
-    ESP_LOGW(TAG, "no microphone driver on this board build");
-    return ESP_ERR_NOT_SUPPORTED;
+    // sticky_buzzer_init (boot, earlier) already brought the codec up; this
+    // reports its state to the "audio init" boot line.
+    return audio_es8311_init();
 }
 
-extern "C" esp_err_t tiny_audio_record_wav(int, uint8_t **wav, size_t *len) {
-    if (wav) *wav = NULL;
-    if (len) *len = 0;
-    if (tiny_lock_is_locked()) return ESP_ERR_NOT_ALLOWED;
-    return ESP_ERR_NOT_SUPPORTED;
+extern "C" esp_err_t tiny_audio_record_wav(int seconds, uint8_t **wav, size_t *len) {
+    // D-UX5: every microphone activation funnels through here.
+    if (tiny_lock_is_locked()) {
+        ESP_LOGW(TAG, "locked: mic capture refused at audio entry (S11/D-UX5)");
+        return ESP_ERR_NOT_ALLOWED;
+    }
+    if (!wav || !len) return ESP_ERR_INVALID_ARG;
+    *wav = NULL; *len = 0;
+    const bool talk = take_talk_arm();
+    if (!audio_es8311_ready()) return ESP_ERR_NOT_SUPPORTED;
+    if (talk) seconds = MAX_SECONDS;
+    if (seconds < 1) seconds = 1;
+    if (seconds > MAX_SECONDS) seconds = MAX_SECONDS;
+
+    // The "ask" chime that precedes a capture must not end up in it.
+    audio_es8311_wait_idle(1500);
+
+    const size_t cap = (size_t)seconds * SAMPLE_RATE;  // frames
+    // Stereo staging: the ES8311 puts the ADC on one slot of the frame.
+    // Keep both and pick the live one, so a slot assumption that is wrong on
+    // some board shows up as a log line, not as a silent upload.
+    int16_t *st = (int16_t *)heap_caps_malloc(cap * 4, MALLOC_CAP_SPIRAM);
+    if (!st) return ESP_ERR_NO_MEM;
+
+    // Drain what the DMA ring collected while nobody listened (~90 ms).
+    {
+        static int16_t junk[2 * 256];
+        for (int i = 0; i < 8; ++i)
+            if (audio_es8311_read(junk, 256, 20) < 256) break;
+    }
+
+    size_t got = 0;
+    esp_err_t err = ESP_OK;
+    while (got < cap) {
+        if (talk && s_talk_released && got >= kMinTalkFrames) break;
+        const size_t want = cap - got < 256 ? cap - got : 256;
+        const size_t n = audio_es8311_read(st + 2 * got, want, 500);
+        if (n == 0) { err = ESP_ERR_TIMEOUT; break; }
+        got += n;
+    }
+    if (err != ESP_OK) { free(st); goto out; }
+
+    {
+        const TinyPcmStats l = tiny_pcm_stats(st, got * 2, 2);
+        const TinyPcmStats r = tiny_pcm_stats(st + 1, got * 2 - 1, 2);
+        const int slot = r.rms > l.rms ? 1 : 0;
+        ESP_LOGI(TAG, "capture %u frames%s: L rms %d peak %d, R rms %d peak %d -> %s",
+                 (unsigned)got, talk ? " (hold-to-talk)" : "", l.rms, l.peak, r.rms,
+                 r.peak, slot ? "R" : "L");
+        const size_t pcm_bytes = got * 2;
+        uint8_t *buf = (uint8_t *)heap_caps_malloc(44 + pcm_bytes, MALLOC_CAP_SPIRAM);
+        if (!buf) { free(st); err = ESP_ERR_NO_MEM; goto out; }
+        int16_t *mono = (int16_t *)(buf + 44);
+        for (size_t i = 0; i < got; ++i) mono[i] = st[2 * i + slot];
+        free(st);
+        tiny_pcm_wav_header(buf, SAMPLE_RATE, (uint32_t)pcm_bytes);
+        *wav = buf;
+        *len = 44 + pcm_bytes;
+    }
+
+out:
+    ESP_LOGI(TAG, "record %ds -> %s (%u bytes)", seconds, esp_err_to_name(err),
+             (unsigned)*len);
+    return err;
 }
 
-extern "C" esp_err_t tiny_audio_chime(const char *) {
-    return ESP_ERR_NOT_SUPPORTED;
+extern "C" esp_err_t tiny_audio_chime(const char *name) {
+    if (sticky_buzzer_silent()) return ESP_OK;  // UI_SPEC §7, same gate as beeps
+    if (!name || !*name) name = "beep";
+    TinyNote notes[32];
+    size_t n = tiny_pcm_chime_notes(name, notes, 32);
+    if (!n) n = tiny_pcm_rtttl(name, notes, 32, SAMPLE_RATE * 2 / 5);
+    if (!n) {
+        ESP_LOGW(TAG, "chime '%.24s': not a chime name or RTTTL - plain beep", name);
+        return sticky_buzzer_beep();
+    }
+    return audio_es8311_play(notes, n, sticky_buzzer_amp());
 }
 
 #endif

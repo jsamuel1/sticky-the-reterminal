@@ -13,3 +13,7 @@ dependencies:
   # ST7796S panel driver for the FNK0104S (lcd_panel_st7796.cpp). Pinned:
   # 1.5.0 is the version the vendor-init review was done against.
   espressif/esp_lcd_st7796: "==1.5.0"
+  # ES8311 register control for the colour boards' audio (audio_es8311.cpp),
+  # over the new i2c_master driver on the shared bus. Linked only where
+  # referenced, so the reTerminal image does not carry it.
+  espressif/esp_codec_dev: "==1.6.2"

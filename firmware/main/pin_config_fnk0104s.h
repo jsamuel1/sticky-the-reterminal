@@ -7,7 +7,8 @@
 // Phase 1 drives only the BOOT button and the shared I2C bus; the rest is
 // recorded here for the display/touch/audio phases.
 
-// Buttons: BOOT is the only user button. It is OK/AI (click = ask, long = home).
+// Buttons: BOOT is the only user button. click = home, hold = push-to-talk
+// (tiny_button.cpp colour-board remap).
 #define PIN_BTN_OK          0
 #define PIN_BTN_UP          (-1)
 #define PIN_BTN_DOWN        (-1)

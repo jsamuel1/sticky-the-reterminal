@@ -1,18 +1,14 @@
 // hal_absent — the drivers a board does not have (yet).
 //
-// Built instead of sticky_battery / sticky_buzzer / sticky_rtc / sticky_sht40
-// / sticky_imu / sticky_sdcard on the colour boards. Every reader gets
+// Built instead of sticky_battery / sticky_rtc / sticky_sht40 / sticky_imu /
+// sticky_sdcard on the colour boards. Every reader gets
 // ESP_ERR_NOT_SUPPORTED, so the existing "null over guess" paths in
 // tiny_sensors, `status` and the glance strip report "no reading" instead of
 // a fabricated value, and nothing in the shared code needs a board #if.
 //
-// Two deliberate exceptions return ESP_OK:
-//   * sticky_buzzer_init: there is nothing to initialise, and boot treats a
-//     buzzer init failure as fatal (it is, on the reTerminal);
-//   * the silent/soft flags keep their value, so the `silent` status field and
-//     its NVS shadow still agree.
+// The buzzer API is NOT here: both colour boards drive it through the ES8311
+// (sticky_buzzer_es8311.cpp).
 #include "sticky_battery.h"
-#include "sticky_buzzer.h"
 #include "sticky_imu.h"
 #include "sticky_rtc.h"
 #include "sticky_sdcard.h"
@@ -22,17 +18,6 @@
 esp_err_t sticky_battery_init(i2c_master_bus_handle_t) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_battery_read(BatteryReading &) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_battery_read_detail(BatteryDetail &) { return ESP_ERR_NOT_SUPPORTED; }
-
-// ---- buzzer ----------------------------------------------------------------
-static bool s_silent = false;
-static bool s_soft = false;
-esp_err_t sticky_buzzer_init() { return ESP_OK; }
-esp_err_t sticky_buzzer_beep() { return ESP_ERR_NOT_SUPPORTED; }
-esp_err_t sticky_buzzer_beep_double() { return ESP_ERR_NOT_SUPPORTED; }
-void sticky_buzzer_set_silent(bool silent) { s_silent = silent; }
-bool sticky_buzzer_silent(void) { return s_silent; }
-void sticky_buzzer_set_soft(bool soft) { s_soft = soft; }
-bool sticky_buzzer_soft(void) { return s_soft; }
 
 // ---- RTC -------------------------------------------------------------------
 esp_err_t sticky_rtc_init(i2c_master_bus_handle_t) { return ESP_ERR_NOT_SUPPORTED; }
