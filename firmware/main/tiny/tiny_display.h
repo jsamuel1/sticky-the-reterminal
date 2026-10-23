@@ -15,7 +15,8 @@ esp_err_t tiny_display_init(void);
 esp_err_t tiny_display_render_card(const char *card_json);   // parse+draw+refresh
 esp_err_t tiny_display_splash(const char *version, const char *state);
 esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len, bool partial);
-// Fetch a server-packed canvas-space .raw (48000 B mono / 96000 B gray4) into
+// Fetch a server-packed canvas-space .raw (panel W*H/8 B mono / W*H/4 B gray4:
+// 48000|96000 at 800x480, 19200|38400 at 320x480) into
 // PSRAM over https. Shared by the image card and tiny_stream. No lock taken.
 esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size_t *out_len);
 // Gallery (grammar v10): dir=-1/+1 pages the stored set (wraps), 0 reopens.
@@ -23,7 +24,8 @@ esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size_t *out_len
 esp_err_t tiny_display_gallery_nav(int dir);
 int tiny_display_gallery_count(void);
 // Screenshot support: copy of the LAST RENDERED framebuffer as 8-bit grayscale
-// rows (800x480), for the screenshot verb -> PNG -> /api/media.
+// rows (panel-native: 800x480 e-ink, 320x480 FNK0104S), for the screenshot
+// verb -> PNG -> /api/media.
 esp_err_t tiny_display_snapshot_gray8(uint8_t **out, size_t *out_len);
 // Button hit-regions of the LAST rendered card (for tiny_touch + ui_tap).
 // Returns count; fills up to max entries. Regions are published atomically

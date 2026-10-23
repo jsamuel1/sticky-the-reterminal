@@ -70,14 +70,16 @@ static void display_unlock(void) {
     if (s_display_mux) xSemaphoreGive(s_display_mux);
 }
 
-// ---- layout constants (800x480 landscape) ----
-// PHYSICAL panel geometry — the framebuffer, the screenshot and the 1-bit blit
-// are always 800x480 no matter which way up the device is.
-static constexpr int kW = 800, kH = 480;
+// ---- layout constants ----
+// PHYSICAL panel geometry — the framebuffer, the screenshot and the raw blits
+// are always panel-native no matter which way up the device is: 800x480 on
+// the reTerminal e-ink, 320x480 on the FNK0104S LCD. Read from the canvas in
+// tiny_display_init(); the defaults are only what a canvas-less boot reports.
+static int s_pw = 800, s_ph = 480;
 // LOGICAL layout geometry — what the card renderer lays out against. Equal to
 // the physical pair in landscape, swapped in portrait. Refreshed from the canvas
 // at the top of every render, so every helper below sees one consistent frame.
-static int s_w = kW, s_h = kH;
+static int s_w = 800, s_h = 480;
 static constexpr int kMargin = 24;
 static constexpr int kTitleScale = 3;   // 24x48 glyphs
 static constexpr int kBodyScale = 2;    // 16x32 glyphs
@@ -643,7 +645,7 @@ extern "C" esp_err_t tiny_display_arm_wake_baseline(void) {
     s_draw_only = false;
     if (err != ESP_OK) return err;
     display_lock();
-    const size_t len = c->stride() * 480;
+    const size_t len = c->stride() * c->physical_height();
     if (!s_wake_baseline)
         s_wake_baseline = (uint8_t *)heap_caps_malloc(
             len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -1632,6 +1634,10 @@ static int render_body(Canvas &c, cJSON *root, const char *type_s, int y,
 
 extern "C" esp_err_t tiny_display_init(void) {
     esp_err_t err = sticky_display_init();
+    if (Canvas *c = sticky_display_canvas()) {
+        s_pw = s_w = c->physical_width();
+        s_ph = s_h = c->physical_height();
+    }
     if (!s_display_mux) s_display_mux = xSemaphoreCreateMutex();
     if (!s_region_mux) s_region_mux = xSemaphoreCreateMutex();
     if (!s_ack_q) {
@@ -1645,12 +1651,14 @@ extern "C" esp_err_t tiny_display_init(void) {
 // ---- image card -------------------------------------------------------
 // {"type":"image","url":"https://.../<sha16>/0.raw"} — the remote render rail
 // (docs/API_CONTRACT.md). The device is a dumb pixel-pusher: the server
-// dithers and packs CANVAS-SPACE bytes; length picks the format. 48000 B =
-// 1-bit (expand to gray4 canvas), 96000 B = gray4 (memcpy — the canvas IS
-// 2bpp packed). Fetch happens BEFORE display_lock: a network stall must
-// never hold the glass hostage. Capability URL = the secret; https only.
-static const size_t kImg1bitLen  = 800UL * 480UL / 8UL;   // 48000
-static const size_t kImgGray4Len = 800UL * 480UL / 4UL;   // 96000
+// dithers and packs CANVAS-SPACE bytes; length picks the format. W*H/8 B =
+// 1-bit (expand to gray4 canvas), W*H/4 B = gray4 (memcpy — the canvas IS
+// 2bpp packed), W x H = the panel: 48000|96000 on the 800x480 reTerminal,
+// 19200|38400 on the 320x480 FNK0104S. Fetch happens BEFORE display_lock: a
+// network stall must never hold the glass hostage. Capability URL = the
+// secret; https only.
+static size_t img_1bit_len()  { return (size_t)s_pw * s_ph / 8; }
+static size_t img_gray4_len() { return (size_t)s_pw * s_ph / 4; }
 extern "C" esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size_t *out_len) {
     if (strncmp(url, "https://", 8) != 0) return ESP_ERR_INVALID_ARG;
     esp_http_client_config_t hc = {};
@@ -1663,10 +1671,11 @@ extern "C" esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size
     if (err != ESP_OK) { esp_http_client_cleanup(c); return err; }
     int64_t clen = esp_http_client_fetch_headers(c);
     int status = esp_http_client_get_status_code(c);
-    if (status != 200 || (clen != (int64_t)kImg1bitLen &&
-                          clen != (int64_t)kImgGray4Len)) {
-        ESP_LOGE(TAG, "image fetch refused: status=%d len=%lld (want 48000|96000)",
-                 status, (long long)clen);
+    if (status != 200 || (clen != (int64_t)img_1bit_len() &&
+                          clen != (int64_t)img_gray4_len())) {
+        ESP_LOGE(TAG, "image fetch refused: status=%d len=%lld (want %u|%u)",
+                 status, (long long)clen, (unsigned)img_1bit_len(),
+                 (unsigned)img_gray4_len());
         esp_http_client_cleanup(c);
         return ESP_ERR_INVALID_SIZE;
     }
@@ -1688,12 +1697,12 @@ extern "C" esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size
 // native origin — rotation belongs to drawn cards, not server bytes.
 static void blit_raw_locked(Canvas *c, const uint8_t *buf, size_t len) {
     c->set_rotation(CanvasRotation::Landscape);
-    if (len == kImgGray4Len) {
+    if (len == img_gray4_len()) {
         memcpy((void *)c->data(), buf, len);      // canvas is 2bpp packed
     } else {
-        for (int y = 0; y < kH; ++y)
-            for (int x = 0; x < kW; ++x) {
-                size_t bit = (size_t)y * kW + x;
+        for (int y = 0; y < s_ph; ++y)
+            for (int x = 0; x < s_pw; ++x) {
+                size_t bit = (size_t)y * s_pw + x;
                 bool black = !(buf[bit / 8] & (0x80 >> (bit % 8)));
                 c->draw_pixel(x, y, black ? GrayLevel::Black : GrayLevel::White);
             }
@@ -1752,7 +1761,7 @@ static esp_err_t render_image_card(cJSON *root) {
     display_lock();
     blit_raw_locked(c, buf, len);
     heap_caps_free(buf);
-    err = (len == kImgGray4Len) ? sticky_display_refresh()
+    err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
     s_staged_count = 0;                  // an image has no buttons
     if (err == ESP_OK) publish_regions("image");
@@ -1763,7 +1772,7 @@ static esp_err_t render_image_card(cJSON *root) {
 // ---- gallery (grammar v10, shared iOS wire contract) ---------------------
 // -------------------------------------------------------------------------
 // {"type":"gallery","urls":["https://…/a.raw",…],"index":0} — hosted raw
-// frames, same 48000|96000B contract as the image card; fetch-on-page.
+// frames, same W*H/8|W*H/4 B contract as the image card; fetch-on-page.
 // The SET persists in PSRAM so `page gallery` and the home top-bar entry
 // reopen it (RAM-persistent: survives navigation, honest about reboots).
 static constexpr int kGalMax = 10;      // iOS caps at 10; relay cap agrees
@@ -1816,7 +1825,7 @@ static uint8_t *gal_sd_read(int idx, size_t *out_len) {
     struct stat st;
     if (stat(path, &st) != 0) return nullptr;
     const size_t len = (size_t)st.st_size;
-    if (len != kImg1bitLen && len != kImgGray4Len) {
+    if (len != img_1bit_len() && len != img_gray4_len()) {
         unlink(path);  // truncated by a yank mid-write: not a frame, remove
         return nullptr;
     }
@@ -1977,7 +1986,7 @@ extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
         snprintf(pg, sizeof pg, "%d/%d", s_gal_index + 1, s_gal_count);
         const int tw = text_width(pg, 2);
         const int chip_w = tw + 24, chip_h = 40;
-        const int cx = kW - 16 - chip_w, cy = kH - 16 - chip_h;
+        const int cx = s_pw - 16 - chip_w, cy = s_ph - 16 - chip_h;
         fill_round_rect(*c, cx, cy, chip_w, chip_h, 10, GrayLevel::White);
         draw_round_rect(*c, cx, cy, chip_w, chip_h, 10, GrayLevel::Black);
         c->draw_text(cx + 12, cy + (chip_h - text_ink_h(2)) / 2, pg, 2,
@@ -1988,11 +1997,11 @@ extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
     // stay inert under the defuse rule.
     s_staged_count = 0;
     stage_region(0, 0, 88, 88, "home", "home");
-    stage_region(0, 100, 120, kH - 100, "prev", "g:prev");
-    stage_region(kW - 120, 100, 120, kH - 100, "next", "g:next");
+    stage_region(0, 100, 120, s_ph - 100, "prev", "g:prev");
+    stage_region(s_pw - 120, 100, 120, s_ph - 100, "next", "g:next");
     strlcpy(s_card_id, "gallery", sizeof s_card_id);
     strlcpy(s_card_type, "gallery", sizeof s_card_type);
-    err = (len == kImgGray4Len) ? sticky_display_refresh()
+    err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
     if (err == ESP_OK) publish_regions("gallery");
     display_unlock();
@@ -2281,8 +2290,9 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
 // Splash (owner's spec, verbatim: "only tiny and loading
 // bar ... rest can be clear"): the word and ONE bar. Version lives in
 // Settings and `status` — the glass owes the owner exactly what he asked for.
-// Bar geometry shared with the progress API below.
-static constexpr int kSplashBarX = 280, kSplashBarY = 260;
+// Bar geometry shared with the progress API below. Centred on the canvas: on
+// the 800x480 e-ink this is the original x=280 y=190/260, on a 320x480 LCD it
+// is x=40. "tiny" at scale 10 is 230 px wide, left-aligned with the bar.
 static constexpr int kSplashBarW = 240, kSplashBarH = 12;
 
 extern "C" esp_err_t tiny_display_splash(const char *version, const char *state) {
@@ -2294,8 +2304,10 @@ extern "C" esp_err_t tiny_display_splash(const char *version, const char *state)
     Canvas *c = sticky_display_canvas();
     if (!c) return ESP_ERR_INVALID_STATE;
     display_lock();
+    const int kSplashBarX = ((int)c->width() - kSplashBarW) / 2;
+    const int kSplashBarY = (int)c->height() / 2 + 20;
     c->clear(GrayLevel::White);
-    c->draw_text(280, 190, "tiny", 10, GrayLevel::Black);
+    c->draw_text(kSplashBarX, kSplashBarY - 70, "tiny", 10, GrayLevel::Black);
     // ONE hollow bar at a fixed 25%. It used to advance by partial refresh
     // at boot stages; those partials were the prime suspect in a boot-bounce
     // and were removed in 0.25.36 — the bootmark flight recorder took over.
@@ -2319,7 +2331,7 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     // already in controller RAM (same power state, valid baseline).
     Canvas *c = sticky_display_canvas();
     if (!c || !buf) return ESP_ERR_INVALID_ARG;
-    const size_t expected = (size_t)kW * kH / 8;
+    const size_t expected = (size_t)s_pw * s_ph / 8;
     if (len < expected) return ESP_ERR_INVALID_SIZE;
     display_lock();
     // Server bytes are canvas-space at the panel's native landscape origin —
@@ -2327,9 +2339,9 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     // auto-rotate on a pocket device) remaps/clips every draw_pixel and the
     // "frame" arrives as white glass: take 2's white-paint bug, convicted.
     c->set_rotation(CanvasRotation::Landscape);
-    for (int y = 0; y < kH; ++y) {
-        for (int x = 0; x < kW; ++x) {
-            size_t bit = (size_t)y * kW + x;
+    for (int y = 0; y < s_ph; ++y) {
+        for (int x = 0; x < s_pw; ++x) {
+            size_t bit = (size_t)y * s_pw + x;
             bool black = !(buf[bit / 8] & (0x80 >> (bit % 8)));
             c->draw_pixel(x, y, black ? GrayLevel::Black : GrayLevel::White);
         }
@@ -2345,7 +2357,7 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
 extern "C" esp_err_t tiny_display_snapshot_gray8(uint8_t **out, size_t *out_len) {
     Canvas *c = sticky_display_canvas();
     if (!c || !out || !out_len) return ESP_ERR_INVALID_ARG;
-    const size_t len = (size_t)kW * kH;
+    const size_t len = (size_t)s_pw * s_ph;
     uint8_t *buf = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
     if (!buf) buf = (uint8_t *)malloc(len);
     if (!buf) return ESP_ERR_NO_MEM;
@@ -2354,11 +2366,11 @@ extern "C" esp_err_t tiny_display_snapshot_gray8(uint8_t **out, size_t *out_len)
     const size_t stride = c->stride();
     static const uint8_t lut[4] = {0x00, 0x55, 0xAA, 0xFF};
     display_lock();  // a screenshot taken mid-render would be half a card
-    for (int y = 0; y < kH; ++y) {
-        for (int x = 0; x < kW; ++x) {
+    for (int y = 0; y < s_ph; ++y) {
+        for (int x = 0; x < s_pw; ++x) {
             uint8_t byte = src[y * stride + x / 4];
             uint8_t px = (byte >> (6 - 2 * (x % 4))) & 0x3;
-            buf[(size_t)y * kW + x] = lut[px];
+            buf[(size_t)y * s_pw + x] = lut[px];
         }
     }
     display_unlock();

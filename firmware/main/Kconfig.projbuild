@@ -16,9 +16,9 @@ config TINY_BOARD_RETERMINAL
 config TINY_BOARD_FNK0104S
     bool "Freenove FNK0104S 4.0\" (ST7796 LCD, 16 MB flash)"
     help
-        Phase 1: boots, joins Wi-Fi and serves the relay. Display, touch,
-        audio, battery ADC and SD are not driven yet (headless canvas,
-        absent stubs). Console is USB-Serial-JTAG (the USB-C port).
+        Display: ST7796S 320x480 portrait LCD (lcd_canvas). Touch, audio,
+        battery ADC and SD are not driven yet (absent stubs). Console is
+        USB-Serial-JTAG (the USB-C port).
 
 config TINY_BOARD_AMOLED18
     bool "Waveshare ESP32-S3-Touch-AMOLED-1.8 V2 (CO5300, 16 MB flash)"
@@ -28,6 +28,15 @@ config TINY_BOARD_AMOLED18
         touch, audio, PMU, RTC, IMU and SD are not driven yet.
 
 endchoice
+
+config TINY_LCD_SPI_MHZ
+    int "Colour LCD SPI clock (MHz)"
+    depends on TINY_BOARD_FNK0104S
+    range 10 80
+    default 40
+    help
+        ST7796 pixel clock on SPI2 IO_MUX pins. The vendor runs 80, xiaozhi
+        20; 40 is the tested middle. Drop to 20 if the glass shows noise.
 
 config TINY_DASHBOARD_URL
     string "Dashboard base URL (settings QR target)"

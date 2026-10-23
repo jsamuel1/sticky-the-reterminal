@@ -13,7 +13,12 @@ set(TINY_SHARED_SRCS
   # further tiny/* modules register here as milestones land (M3+)
 )
 
-if(CONFIG_TINY_BOARD_FNK0104S OR CONFIG_TINY_BOARD_AMOLED18)
+if(CONFIG_TINY_BOARD_FNK0104S)
+  # FNK0104S: ST7796S LCD behind the shared colour-panel canvas (lcd_canvas).
+  set(TINY_BOARD_SRCS
+    "board_generic.cpp" "sticky_power_generic.cpp" "lcd_canvas.cpp" "lcd_panel_st7796.cpp"
+    "hal_absent.cpp")
+elseif(CONFIG_TINY_BOARD_AMOLED18)
   # Colour boards, phase 1: no latch, headless canvas, absent sensors.
   set(TINY_BOARD_SRCS
     "board_generic.cpp" "sticky_power_generic.cpp" "sticky_display_headless.cpp"
@@ -31,6 +36,7 @@ idf_component_register(
   REQUIRES bt esp_wifi esp_http_server mbedtls esp_http_client esp_https_ota nvs_flash app_update json esp_netif lwip
            seeed_epaper gt911 bq27220 button driver esp_driver_ledc esp_driver_uart esp_driver_i2s vfs
            fatfs sdmmc esp_driver_sdspi esp_driver_usb_serial_jtag esp_psram spi_flash
+           esp_lcd
 )
 
 # TINY_FW_COMMIT: build-injected git sha — retires the

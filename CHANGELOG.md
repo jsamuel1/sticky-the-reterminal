@@ -28,6 +28,14 @@ release, newest first.
   `ob:portal`, `page onboard portal`.
 - **tests** — `tests/host/pair_host_test.sh`: sha256, base64url, secretHash
   (Node golden vectors), code/url, merge body, poll classifier.
+- **firmware** — FNK0104S drives its ST7796S 320×480 LCD. New board-neutral
+  `lcd_canvas` (gray4 canvas → RGB565 DMA strips; partial = dirty rows only;
+  sleep = backlight off + SLPIN) + `lcd_panel_st7796` (SPI2 IO_MUX,
+  `CONFIG_TINY_LCD_SPI_MHZ` default 40, LEDC backlight GPIO45). The canvas is
+  the panel: 320×480 portrait; `screenshot`, `tap`/`swipe` bounds and raw
+  image/gallery/stream frames follow it (19200 | 38400 B on this board). No
+  verb or reply shape changed; reTerminal output unchanged. AMOLED stays
+  headless.
 
 ## 0.30.0 — grammar v13 — board variants (phase 1)
 

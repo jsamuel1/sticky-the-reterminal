@@ -4,8 +4,8 @@
 
 class Canvas;
 
-constexpr uint16_t kStickyDisplayWidth = 800;
-constexpr uint16_t kStickyDisplayHeight = 480;
+constexpr uint16_t kStickyDisplayWidth = 800;   // reTerminal SSD1677 only;
+constexpr uint16_t kStickyDisplayHeight = 480;  // colour boards: Canvas dims
 
 // Initializes SPI2, powers the SSD1677 panel, and creates the framebuffer.
 esp_err_t sticky_display_init();

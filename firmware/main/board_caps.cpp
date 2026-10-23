@@ -27,16 +27,16 @@ constexpr tiny_board_caps_t kCaps = {
     .flash_mb = 32,
 };
 #elif defined(CONFIG_TINY_BOARD_FNK0104S)
-// Phase 1: only the radio and the BOOT button are real. ST7796, FT6336,
-// ES8311, battery ADC and SDMMC land in later phases and flip their fields.
+// Phase 2: ST7796S LCD (lcd_canvas) and FT6336U touch are driven. ES8311,
+// battery ADC and SDMMC land in later phases and flip their fields.
 // The board has no RTC, IMU, env sensor, fuel gauge, buzzer or power latch.
 constexpr tiny_board_caps_t kCaps = {
     .id = "fnk0104s",
     .name = "Freenove FNK0104S",
-    .display = "none (phase 1 headless canvas)",
-    .display_short = "headless",
+    .display = "320x480 LCD (4-gray canvas)",
+    .display_short = "320x480",
     .eink = false,
-    .panel = false,
+    .panel = true,
     .touch = true,  // FT6336U, tiny_touch.cpp (P3)
     .mic = false,
     .buzzer = false,

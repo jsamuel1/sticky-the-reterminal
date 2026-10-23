@@ -1,7 +1,8 @@
 // tiny_screenshot — what is ON the panel, as a PNG, from the device itself.
 // The canvas is 2 bits/pixel (4 grays) so the PNG is written EXACTLY as
 // 2-bit grayscale with STORED deflate blocks: no compression library, fully
-// deterministic, 800x480 → ~96.6KB (base64 ~129KB, far under the 6MB media
+// deterministic. Size follows the panel: 800x480 → ~96.6KB on the e-ink,
+// 320x480 → ~38.7KB on the FNK0104S LCD (base64 far under the 6MB media
 // cap). crc32 comes from ROM (esp_rom_crc32_le(0,…) == zlib crc32); adler32
 // is 8 lines. Upload goes through the same tiny_upload_media path the mic
 // uses, so the reply is a hosted URL the owner's surfaces can already show.
@@ -13,15 +14,12 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
+#include "canvas.h"
+#include "sticky_display.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_upload.h"
 
 static const char *TAG = "tiny_shot";
-
-#define W 800
-#define H 480
-#define ROW_BYTES (W * 2 / 8)          /* 200 */
-#define RAW_LEN ((size_t)H * (ROW_BYTES + 1)) /* +1 filter byte per row */
 
 static void put_u32(uint8_t *p, uint32_t v) {
     p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
@@ -45,6 +43,12 @@ extern "C" void tiny_node_crumb_step(const char *step);
 
 extern "C" esp_err_t tiny_screenshot_png(uint8_t **out, size_t *out_len) {
     if (!out || !out_len) return ESP_ERR_INVALID_ARG;
+    // Panel-native size, from the canvas the snapshot copies.
+    const Canvas *cv = sticky_display_canvas();
+    if (!cv) return ESP_ERR_INVALID_STATE;
+    const int W = cv->physical_width(), H = cv->physical_height();
+    const int ROW_BYTES = W * 2 / 8;                       // 200 at 800 wide
+    const size_t RAW_LEN = (size_t)H * (ROW_BYTES + 1);    // +1 filter byte/row
     uint8_t *g8 = NULL; size_t g8_len = 0;
     tiny_node_crumb_step("snapshot");
     esp_err_t err = tiny_display_snapshot_gray8(&g8, &g8_len);

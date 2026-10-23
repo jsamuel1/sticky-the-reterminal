@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "pin_config.h"
+#include "sticky_display.h"
 #include "sticky_sdcard.h"
 
 namespace {
@@ -45,6 +46,9 @@ void sticky_power_log_wakeup_reason()
 [[noreturn]] void sticky_power_enter_deep_sleep()
 {
     sticky_sdcard_prepare_sleep();
+    // LCD boards: backlight off + panel SLPIN, so a sleeping board is dark
+    // rather than a lit white page (headless boards answer ESP_OK).
+    sticky_display_sleep();
     wait_for_release();
 
     gpio_set_direction(kWakePin, GPIO_MODE_INPUT);

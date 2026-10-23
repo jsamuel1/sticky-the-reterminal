@@ -10,3 +10,6 @@
 # Adding this file makes the component manager re-resolve firmware/dependencies.lock.
 dependencies:
   espressif/qrcode: "^0.2.0"
+  # ST7796S panel driver for the FNK0104S (lcd_panel_st7796.cpp). Pinned:
+  # 1.5.0 is the version the vendor-init review was done against.
+  espressif/esp_lcd_st7796: "==1.5.0"
