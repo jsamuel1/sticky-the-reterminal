@@ -17,6 +17,11 @@ esp_err_t tiny_provision_start_rescue(void);  // APSTA overlay + "re-provision m
                                               // the 401-revoked recovery path
 const char *tiny_provision_ssid(void);  // "tiny-xxxx" (computed on first call)
 const char *tiny_provision_key(void);   // the softAP passphrase
+// Give a freshly created netif the board's own name ("tiny-xxxx", the softAP
+// SSID) as its DHCP hostname, so routers list the board as that name instead
+// of IDF's default "espressif". Call after esp_netif_create_default_wifi_*
+// and before the interface starts DHCP. NULL is a no-op.
+void tiny_provision_name_netif(void *netif);
 #ifdef __cplusplus
 }
 #endif

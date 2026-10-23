@@ -55,6 +55,13 @@ static void make_ssid(void) {
     snprintf(s_ssid, sizeof s_ssid, "tiny-%04x", (unsigned)(h & 0xFFFF));
 }
 
+extern "C" void tiny_provision_name_netif(void *netif) {
+    if (!netif) return;
+    const esp_err_t e = esp_netif_set_hostname(static_cast<esp_netif_t *>(netif),
+                                               tiny_provision_ssid());
+    ESP_LOGI(TAG, "hostname %s: %s", tiny_provision_ssid(), esp_err_to_name(e));
+}
+
 // ---------- handlers ----------
 
 static esp_err_t info_get(httpd_req_t *req) {
@@ -313,7 +320,7 @@ esp_err_t tiny_provision_start(void) {
     esp_err_t el = esp_event_loop_create_default();
     if (el != ESP_OK && el != ESP_ERR_INVALID_STATE) return el;  // may exist
     esp_netif_create_default_wifi_ap();
-    esp_netif_create_default_wifi_sta();
+    tiny_provision_name_netif(esp_netif_create_default_wifi_sta());
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&init), TAG, "init");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "mode");

@@ -289,7 +289,7 @@ static esp_err_t render_ready(void) {
     // Lines are sized to the body width (~46 glyphs) — measured on glass.
     char b[120];
     snprintf(b, sizeof b, "I'm %s, paired and online. How I work:",
-             cfg.name[0] ? cfg.name : "sticky");
+             cfg.name[0] ? cfg.name : tiny_provision_ssid());
     cJSON *p = cJSON_CreateObject();
     cJSON_AddStringToObject(p, "type", "text");
     cJSON_AddStringToObject(p, "body", b);

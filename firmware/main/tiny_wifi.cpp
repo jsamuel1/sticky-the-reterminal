@@ -1,6 +1,7 @@
 // tiny_wifi — STA bring-up. Ordered roaming list, 15s per network (the same
 // per-attempt bound the Nicla uses; a hung join must never brick boot).
 #include "tiny/tiny_wifi.h"
+#include "tiny/tiny_provision.h"
 
 #include <string.h>
 
@@ -73,7 +74,8 @@ esp_err_t tiny_wifi_connect(const tiny_config_t *cfg) {
     if (!inited) {
         ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
         ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "evloop");
-        esp_netif_create_default_wifi_sta();
+        // DHCP hostname = the softAP SSID (tiny-xxxx), not IDF's "espressif".
+        tiny_provision_name_netif(esp_netif_create_default_wifi_sta());
         wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
         ESP_RETURN_ON_ERROR(esp_wifi_init(&init), TAG, "init");
         s_events = xEventGroupCreate();

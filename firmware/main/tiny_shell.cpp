@@ -9,6 +9,7 @@
 #include "tiny/tiny_sensors.h"
 #include "tiny/tiny_version.h"
 #include "tiny/tiny_wifi.h"
+#include "tiny/tiny_provision.h"
 #include "tiny/tiny_ble.h"
 #include "tiny/tiny_button.h"
 #include "tiny/tiny_agent.h"
@@ -191,7 +192,7 @@ static esp_err_t render_settings(void) {
     if (have_cfg && cfg.device_id[0])
         snprintf(dev_short, sizeof dev_short, "%.8s...", cfg.device_id);
     const char *pairs[][2] = {
-        { "name",    have_cfg && cfg.name[0] ? cfg.name : "sticky" },
+        { "name",    have_cfg && cfg.name[0] ? cfg.name : tiny_provision_ssid() },
         { "fw",      TINY_FW_VERSION },
         { "channel", "sticky-dev" },
         { "wifi",    rssis },
