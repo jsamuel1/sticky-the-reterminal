@@ -33,6 +33,10 @@ release, newest first.
 - **firmware** — colour boards remap BOOT: click = home, hold = push-to-talk
   (records until release; 15 s cap). The reTerminal keeps click = ask and
   hold = home.
+- **firmware** — a voice ask that fails before it is sent (record or media
+  upload) now replaces the home stream with a card naming the reason. Before
+  this fix the glass stayed on "(( thinking ))". The upload error carries the
+  free internal heap.
 
 ## 0.31.0 — grammar v14 — on-device pairing code (onboarding Phase B)
 

@@ -515,6 +515,25 @@ static SemaphoreHandle_t s_ask_mux = NULL;
 static bool s_askq_draining = false;
 static bool s_ask_backend_spoke = false;
 
+// A voice ask that fails BEFORE the request leaves (record or media upload)
+// must still release the glass: the home stream opened for "(( listening ))"
+// would otherwise sit on "(( thinking ))" forever. render_card ends the open
+// stream, and the card names the real reason.
+static void voice_fail_card(const char *title, const char *why, esp_err_t r) {
+    cJSON *ec = cJSON_CreateObject();
+    if (!ec) return;
+    cJSON_AddStringToObject(ec, "type", "text");
+    cJSON_AddStringToObject(ec, "card_id", "askfail");
+    cJSON_AddStringToObject(ec, "title", title);
+    cJSON_AddStringToObject(ec, "body", why);
+    char ef[64];
+    snprintf(ef, sizeof ef, "%s - tiny sticky", esp_err_to_name(r));
+    cJSON_AddStringToObject(ec, "footer", ef);
+    char *ecs = cJSON_PrintUnformatted(ec);
+    cJSON_Delete(ec);
+    if (ecs) { tiny_display_render_card(ecs); free(ecs); }
+}
+
 extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
                                       char *out, size_t out_cap) {
     if (!s_ask_mux) s_ask_mux = xSemaphoreCreateMutex();
@@ -546,13 +565,20 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
                          "(S11) - unlock (UP+DOWN 1s) or send unlock");
             else
                 snprintf(out, out_cap, "record failed: %s", esp_err_to_name(r));
+            voice_fail_card("couldn't record", out, r);
             return r;
         }
         tiny_audio_chime("ack");  // "heard you" — upload+think takes a while
         tiny_display_stream_note("(( thinking ))");
         r = tiny_upload_media(wav, wlen, "audio/wav", audio_url, sizeof audio_url);
         free(wav);
-        if (r != ESP_OK) { snprintf(out, out_cap, "media upload failed"); return r; }
+        if (r != ESP_OK) {
+            snprintf(out, out_cap, "media upload failed: %s (internal heap %u B)",
+                     esp_err_to_name(r),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            voice_fail_card("couldn't send that", out, r);
+            return r;
+        }
     }
     cJSON *b = base_body();
     if (audio_url[0]) cJSON_AddStringToObject(b, "audioUrl", audio_url);
