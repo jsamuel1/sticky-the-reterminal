@@ -79,10 +79,15 @@ tests/run.sh                                 # host tests: askq, bootmark, sleep
 - Serial card console: any `{json}` line on UART0 renders as a card;
   `tools/render_card.py '{"type":"text","title":"hi","body":"…"}'`. A line
   containing `"config"` is a bench provisioning blob → NVS → reboot.
-- CI: `.github/workflows/firmware-build.yml` (container `espressif/idf:v5.4`
-  + `tests/run.sh`) and `release.yml` are **workflow_dispatch only** — Actions
-  billing was off; the docs site publishes via `mkdocs gh-deploy` to
-  `gh-pages` (legacy Pages). Do not assume a push builds anything.
+- CI: `.github/workflows/firmware-build.yml` runs on every push to `main`
+  and every PR: it builds all three boards in `espressif/idf:v5.4` via
+  `tools/build_board.sh`, refuses a `-dirty`/`nogit` stamp, runs
+  `tests/run.sh`, and uploads one devbench image set per board
+  (`devbench-<board>`, made by `tools/devbench/mkset.py`).
+  `tools/devbench/fetch_ci.sh [board…]` pulls the latest green `main` run
+  into `tools/devbench/images/ci-<board>/` — flash those, not local builds.
+  `release.yml` and `docs.yml` stay workflow_dispatch only; the docs site
+  publishes via `mkdocs gh-deploy` to `gh-pages` (legacy Pages).
 
 ## 3. Boot sequence — the contract (`tiny_main.cpp`)
 

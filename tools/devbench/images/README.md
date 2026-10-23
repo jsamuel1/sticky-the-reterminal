@@ -19,3 +19,4 @@ parts. The bench page lists every set, and `firmware/build` (via ESP-IDF's
 - `boards` is checked against the bench label; a mismatch needs a second confirm.
 - `flash_settings` rewrites the bootloader header (esptool behaviour). Omit it to keep the image's own header.
 - The binaries are gitignored: only this README is tracked.
+- `ci-<board>` sets come from GitHub Actions: `tools/devbench/fetch_ci.sh` downloads the latest green `firmware-build` run on `main` (`RUN=<id>` for a specific one). Prefer these over hand-staged sets.
