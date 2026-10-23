@@ -4,6 +4,7 @@
 // only after an explicit confirm naming board, image set and erase mode.
 import { ESPLoader, Transport } from "./vendor/esptool-js-0.7.0.bundle.js";
 import { md5hex } from "./md5.js";
+import { boardName, softapMac, buildCfg, tinyNvs, readNvsStrings, NVS_OFFSET, NVS_SIZE, showCode, redact } from "./provision.js";
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -30,12 +31,56 @@ addEventListener("pagehide", () => {
   logBuf = "";
 });
 async function flushLog() {
-  if (!logBuf) return;
-  const body = logBuf; logBuf = "";
+  if (!logBuf || flushing) return;
+  const body = logBuf; logBuf = ""; flushing = true;
   try {
-    const r = await fetch("api/log", { method: "POST", headers: { "X-Devbench-Session": session, "X-Devbench-Label": $("label").value, "Content-Type": "text/plain" }, body });
+    const r = await send("log", body, { query: { s: session, l: $("label").value } });
     if (!r.ok && r.status !== 413) logBuf = body + logBuf;  // 413 = rejected, don't retry forever
-  } catch { logBuf = body + logBuf; }
+  } catch { logBuf = body + logBuf; } finally { flushing = false; }
+}
+let flushing = false;
+
+// ---- talking to the bench server --------------------------------------------------
+// Reached through the Kermes browser pane over the AWS tunnel, every POST with a
+// body answers 502 "browser upstream unreachable": the tunnel edge re-sends the
+// body chunked and the pane proxy forwards Transfer-Encoding into undici fetch,
+// which refuses it. That is why job results and console logs stopped arriving
+// on 10-18. send() tries the POST once; on that 502 (or a network error) it
+// switches to GET api/x/<path>?b=<base64url piece>, which carries no body, for
+// the rest of the session. Dumps still need a real POST (MiB-sized chunks).
+let postBroken = false;
+const X_PIECE = 6000;  // base64url chars per GET; the proxy took 12 KB URLs in testing
+const b64url = (bytes) => {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+async function send(path, body, { query = {} } = {}) {
+  const bytes = body instanceof Uint8Array ? body : new TextEncoder().encode(typeof body === "string" ? body : JSON.stringify(body));
+  const qs = new URLSearchParams(query).toString();
+  if (!postBroken) {
+    try {
+      const r = await fetch(`api/${path}${qs ? "?" + qs : ""}`, { method: "POST", headers: { "X-Devbench": "1" }, body: bytes });
+      if (r.status !== 502 || !/browser upstream unreachable/.test(await r.clone().text())) return r;
+    } catch { /* network error: try the GET channel */ }
+    postBroken = true;
+    log("POST bodies are not reaching the bench server (pane proxy over the tunnel); switching to the GET upload channel", "warn");
+  }
+  const enc = b64url(bytes), n = Math.max(1, Math.ceil(enc.length / X_PIECE));
+  const u = `${session}-${Math.random().toString(36).slice(2, 10)}`;
+  let r;
+  for (let i = 0; i < n; i++) {
+    const q = new URLSearchParams({ ...query, u, i, n, b: enc.slice(i * X_PIECE, (i + 1) * X_PIECE) });
+    r = await fetch(`api/x/api/${path}?${q}`, { headers: { "X-Devbench": "1" } });
+    if (i < n - 1 && r.status !== 202) return r;
+  }
+  return r;
+}
+async function sendJson(path, body) {
+  const r = await send(path, body);
+  let j = {};
+  try { j = await r.json(); } catch { j = { error: `${r.status} (not JSON)` }; }
+  return { ok: r.ok, status: r.status, j };
 }
 
 // ---- environment ----------------------------------------------------------
@@ -54,7 +99,7 @@ function envCheck() {
 
 function setBusy(b) {
   busy = b;
-  for (const id of ["probe", "boot", "mon", "rst", "forget", "dump", "flash"]) $(id).disabled = b || !port;
+  for (const id of ["probe", "boot", "mon", "rst", "forget", "dump", "flash", "plan"]) $(id).disabled = b || !port;
   $("pick").disabled = b;
   $("send").disabled = b || !report;
   $("line").disabled = !monitor;
@@ -373,8 +418,8 @@ $("line").onkeydown = async (e) => {
 $("clear").onclick = () => logEl.replaceChildren();
 
 $("boot").onclick = () => runBoot();
-async function runBoot(secsArg) {
-  setBusy(true);
+async function runBoot(secsArg, { quietReport = false } = {}) {
+  if (!quietReport) setBusy(true);
   const secs = Math.max(2, Math.min(120, secsArg ?? (+$("bootsecs").value || 8)));
   let text = "";
   const collect = (t) => { text += t; };
@@ -396,13 +441,13 @@ async function runBoot(secsArg) {
     report.boot_facts = bootFacts(text);
     renderFacts(report);
     if (report.boot_facts) log(JSON.stringify(report.boot_facts, null, 2), "ok");
-    await sendReport();
+    if (!quietReport) await sendReport();
     if (!text.trim()) log("No console output. The firmware may log to UART0 (header pins) instead of USB, or it may be silent.", "warn");
-    setBusy(false);
-    return { ok: true, chars: text.length, report: `latest-${report.label}.json`, boot_facts: report.boot_facts };
+    if (!quietReport) setBusy(false);
+    return { ok: true, chars: text.length, text, report: `latest-${report.label}.json`, boot_facts: report.boot_facts };
   } catch (e) {
     log(`boot capture failed: ${e.message}`, "bad");
-    setBusy(false);
+    if (!quietReport) setBusy(false);
     return { ok: false, error: String(e.message ?? e) };
   }
 }
@@ -433,7 +478,7 @@ async function sendReport() {
   report.label = $("label").value;
   report.session = session;
   try {
-    const r = await fetch("api/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(report) });
+    const r = await send("report", report);
     const j = await r.json();
     $("sent").textContent = r.ok ? `stored ${j.stored}` : `error: ${j.error}`;
     $("sent").className = r.ok ? "ok" : "bad";
@@ -550,7 +595,7 @@ async function runDump(what) {
     const local = md5hex(data);
     const chipMd5 = await step("flash md5", loader.flashMd5sum(addr, len), 120000);
     const meta = { label: $("label").value, mac: id.chip.mac, chip: id.chip.description, flash: id.flash, what, partition: part, offset: "0x" + addr.toString(16), size: len, md5: local, chip_md5: chipMd5, verified_on_chip: local === chipMd5, retries, page, pause_ms: pauseMs, seconds: +((performance.now() - t0) / 1000).toFixed(1), baud: loader.baudrate };
-    const done = await (await fetch(`api/dump/${name}/done`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(meta) })).json();
+    const done = await (await send(`dump/${name}/done`, meta)).json();
     if (local !== chipMd5) log(`MD5 MISMATCH: read ${local}, chip ${chipMd5}. The dump is corrupt; retry at a lower baud.`, "bad");
     else if (!done.verified) log(`server copy mismatch: ${JSON.stringify(done.server)}`, "bad");
     else log(`dump verified (${len} bytes, md5 ${local}${retries ? `, ${retries} resumed chunk(s)` : ""}) → dumps/${name}.bin`, "ok");
@@ -571,44 +616,133 @@ async function runDump(what) {
 // can read reports/<tag>.log; capped to the last 256 KiB.
 async function shipTrace(text, tag) {
   const body = text.length > 262144 ? text.slice(-262144) : text;
-  try { await fetch("api/log", { method: "POST", headers: { "X-Devbench-Session": `trace-${tag}`.slice(0, 48), "X-Devbench-Label": $("label").value, "Content-Type": "text/plain" }, body }); } catch {}
+  try { await send("log", body, { query: { s: `trace-${tag}`.slice(0, 48), l: $("label").value } }); } catch {}
   log(`wire trace (${(body.length / 1024).toFixed(0)} KiB) sent to the agent`, "muted");
 }
 
-// ---- flash -------------------------------------------------------------------
+// ---- flash (+ provisioning) ---------------------------------------------------------
+// With "provision" ticked this is `npx tiny-tech flash --body sticky-the-reterminal`
+// in the browser: read the MAC over the ROM loader, name the board as its
+// firmware does, get a device credential (this host's tiny session, else a
+// pairing code the owner approves), build the NVS image the firmware reads and
+// write bootloader + table + otadata + app + NVS in ONE session, then watch the
+// first boot. The device token lives only in this page's memory and the NVS
+// image; it is never logged, reported or kept by the server.
 let sets = [];
 async function loadSets() {
   try {
     sets = await (await fetch("api/sets")).json();
     const sel = $("flashset"), keep = sel.value;
-    sel.replaceChildren(...(sets.length ? sets.map((s) => new Option(s.error ? `⚠ ${s.error}` : `${s.name} — ${s.chip || "?"} — ${s.parts.length} parts${s.version ? " — " + s.version : ""}`, s.name)) : [new Option("no image sets (build firmware or add images/<set>/manifest.json)", "")]));
+    sel.replaceChildren(...(sets.length ? sets.map((s) => new Option(s.error ? `⚠ ${s.error}` : `${s.name} — ${s.boards?.join("/") || "any board"} — ${s.flash_settings?.flash_size || "?"} — ${s.parts.length} parts${s.version ? " — " + s.version : ""}`, s.name)) : [new Option("no image sets (build firmware or add images/<set>/manifest.json)", "")]));
     if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
     renderSet();
   } catch { $("flashparts").textContent = "server unreachable"; }
 }
 function renderSet() {
   const s = sets.find((x) => x.name === $("flashset").value);
-  $("flashparts").textContent = s ? (s.note ? s.note + "\n" : "") + s.parts.map((p) => `0x${p.offset.toString(16).padStart(6, "0")}  ${p.file}  ${(p.size / 1024).toFixed(0)} KiB  md5 ${p.md5}`).join("\n") + `\nsource: ${s.source}` : "";
+  $("flashparts").textContent = s ? (s.note ? s.note + "\n" : "") + s.parts.map((p) => `0x${p.offset.toString(16).padStart(6, "0")}  ${p.file}  ${(p.size / 1024).toFixed(0)} KiB  md5 ${p.md5}`).join("\n") +
+    `\nflash ${s.flash_settings?.flash_mode || "keep"} / ${s.flash_settings?.flash_size || "keep"} / ${s.flash_settings?.flash_freq || "keep"}   source: ${s.source}` : "";
 }
 $("flashset").onchange = renderSet;
 $("reloadsets").onclick = loadSets;
-$("flash").onclick = () => runFlash($("flashset").value, $("eraseall").checked);
+$("provision").onchange = () => { $("provbox").hidden = !$("provision").checked; };
+const provOpts = () => ({ provision: $("provision").checked, adopt: $("adopt").checked, ssid: $("ssid").value.trim(), key: $("wifikey").value });
+$("flash").onclick = () => runFlash($("flashset").value, $("eraseall").checked, provOpts());
+$("plan").onclick = () => runFlash($("flashset").value, $("eraseall").checked, { ...provOpts(), dryRun: true });
 
-async function runFlash(setName, eraseAll, { preconfirmed = false } = {}) {
+// The label in the bench's picker → the TINY_BOARD a set declares.
+const BOARD_OF_LABEL = { "fnk0104s": "fnk0104s", "amoled18-v2": "amoled18", "reterminal-sticky": "reterminal" };
+const SIZE_BYTES = (s) => (/^(\d+)MB$/.exec(s || "") ? +RegExp.$1 << 20 : null);
+
+async function tinyApi(path, body) {
+  const { ok, status, j } = await sendJson(`tiny/${path}`, body ?? {});
+  if (!ok && !j.status) throw new Error(j.error || `tiny/${path}: ${status}`);
+  return j;
+}
+
+function showPairing(code, url, ttl) {
+  const box = $("pairbox");
+  box.hidden = false;
+  $("paircode").textContent = showCode(code);
+  const a = $("pairlink"); a.href = url; a.textContent = url;
+  // qrcode-generator 1.4.4 (MIT, vendor/); loaded on demand so a broken vendor
+  // file never stops a plain flash.
+  import("./vendor/qrcode-generator-1.4.4.js").then(({ default: qrcode }) => {
+    const qr = qrcode(0, "M"); qr.addData(url); qr.make();
+    $("pairqr").innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: false, alt: `QR code for ${url}` });
+  }).catch(() => { $("pairqr").textContent = "(QR unavailable; use the link)"; });
+  $("pairstate").textContent = `waiting for approval… (code valid ${Math.round(ttl / 60)} min)`;
+}
+
+// The credential, tiny-tech acquireChildIdentity: session (duplicate guard /
+// adopt / re-key a stale row) or headless pairing. Returns {device_id, device_token, name, api, via, adopted}.
+async function acquireCredential(name, adopt) {
+  const st = await tinyApi("status");
+  if (st.session) {
+    log(`credential: this host's tiny session (@${st.login}) → ${st.api}/api/devices`, "muted");
+    const r = await tinyApi("enroll", { name, adopt });
+    if (!r.device_token) throw new Error(r.error || "enroll returned no token");
+    log(`✓ ${r.adopted ? "re-keyed existing row" : "enrolled"} ${r.name} (${String(r.device_id).slice(0, 8)}…) with the session`, "ok");
+    return r;
+  }
+  log(`credential: no tiny session on the bench host → pairing code via ${st.api}`, "muted");
+  const s = await tinyApi("pair/start", { name });
+  showPairing(s.code, s.url, s.ttl_s);
+  log(`pair this board: code ${showCode(s.code)} — approve at ${s.url}`, "warn");
+  const deadline = Date.now() + s.ttl_s * 1000;
+  try {
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (pairCancelled) throw new Error("pairing cancelled");
+      const p = await tinyApi("pair/poll", { code: s.code });
+      if (p.status === "approved" && p.device_token) {
+        $("pairstate").textContent = `approved — enrolled as ${p.name}`;
+        log(`✓ approved — enrolled as ${p.name} (${String(p.device_id).slice(0, 8)}…)`, "ok");
+        return p;
+      }
+      if (p.status === "denied") throw new Error("the owner denied this device");
+      if (p.status === "expired") throw new Error("pairing code expired — start again");
+      if (p.status === "claimed") throw new Error("this code was already claimed by another process");
+      if (p.status === "vanished") throw new Error("pairing code vanished (bench server restarted, or registry reset) — start again");
+      $("pairstate").textContent = `waiting for approval… ${Math.max(0, Math.round((deadline - Date.now()) / 1000))} s left`;
+    }
+    throw new Error("pairing timed out — start again");
+  } finally { if (!$("pairstate").textContent.startsWith("approved")) $("pairstate").textContent += "  (stopped)"; }
+}
+let pairCancelled = false;
+$("paircancel").onclick = () => { pairCancelled = true; };
+
+function bootVerdict(text, name) {
+  const lines = text.split("\n").filter((l) => /tiny_config|tiny_provision|provision|wifi|got ip|heartbeat|hostname|panic|abort|Guru|node loop/i.test(l));
+  return {
+    lines: lines.slice(0, 40).map((l) => l.trim().slice(0, 200)),
+    got_ip: /got ip/i.test(text),
+    hostname: new RegExp(`hostname ${name}`).test(text),
+    heartbeat: /heartbeat[^\n]*(ok|200)/i.test(text),
+    crashed: /Guru Meditation|panic|abort\(\)/.test(text),
+    waiting_for_identity: /waiting for device_id\+token/.test(text),
+  };
+}
+
+async function runFlash(setName, eraseAll, { provision = false, adopt = false, ssid = "", key = "", dryRun = false, preconfirmed = false } = {}) {
   await loadSets();
   const s = sets.find((x) => x.name === setName);
   if (!s || s.error || !s.parts.length) { log(`no usable image set "${setName}"`, "bad"); return { ok: false, error: "no such set" }; }
   const label = $("label").value;
-  if (s.boards?.length && !s.boards.includes(label)) {
+  const board = BOARD_OF_LABEL[label];
+  if (s.boards?.length && !s.boards.includes(label) && !s.boards.includes(board)) {
+    // Provisioning writes a credential: a board/set mismatch is a refusal, not a question.
+    if (provision || dryRun) { log(`refused: set "${s.name}" is for ${s.boards.join(", ")}, bench label is "${label}"`, "bad"); return { ok: false, error: "board label mismatch" }; }
     if (!confirm(`Image set "${s.name}" is declared for ${s.boards.join(", ")}, but the board label is "${label}". Flash anyway?`)) return { ok: false, error: "label mismatch declined" };
   }
-  const summary = `Write ${s.parts.length} part(s) from "${s.name}" to the board labelled "${label}"` +
-    (eraseAll ? ", ERASING THE WHOLE CHIP FIRST (NVS: Wi-Fi, pairing token, settings all lost)" : " (regions outside these parts are kept)") +
-    `?\n\n${s.parts.map((p) => `0x${p.offset.toString(16)}  ${p.file}  ${(p.size / 1024).toFixed(0)} KiB`).join("\n")}`;
-  if (!preconfirmed && !confirm(summary)) { log("flash cancelled", "muted"); return { ok: false, error: "cancelled by owner" }; }
+  if (provision && !ssid) { log("provision needs the Wi-Fi network the board should join (SSID)", "bad"); return { ok: false, error: "no ssid" }; }
+  if (provision && s.parts.some((p) => p.offset < NVS_OFFSET + NVS_SIZE && p.offset + p.size > NVS_OFFSET)) { log(`set "${s.name}" already writes the NVS range 0x9000+0x6000`, "bad"); return { ok: false, error: "set overlaps nvs" }; }
   setBusy(true);
+  pairCancelled = false;
+  $("pairbox").hidden = true;
   const t0 = performance.now();
-  log(`── flash ${s.name}${eraseAll ? " (erase all)" : ""} ──`, "muted");
+  log(`── ${dryRun ? "plan" : "flash"} ${s.name}${provision ? " + provision" : ""}${eraseAll ? " (erase all)" : ""} ──`, "muted");
+  let token = null;
   try {
     // Fetch and verify every part BEFORE touching the board.
     const files = [];
@@ -621,31 +755,106 @@ async function runFlash(setName, eraseAll, { preconfirmed = false } = {}) {
       files.push({ data, address: p.offset, name: p.file });
     }
     log(`fetched ${files.length} part(s), md5 verified`, "ok");
-    const res = await withLoader(async (loader) => {
-      const id = await identify(loader);
+    const fs = s.flash_settings || {};
+    // Checks every write must pass, run in each ROM session.
+    const check = (id) => {
       if (s.chip && s.chip.toUpperCase() !== id.chip.name.toUpperCase()) throw new Error(`image set is for ${s.chip}, board is ${id.chip.name}`);
-      const end = Math.max(...files.map((f) => f.address + f.data.length));
+      const want = SIZE_BYTES(fs.flash_size);
+      if (want && id.flash.bytes && want !== id.flash.bytes) throw new Error(`image set is built for ${fs.flash_size} flash, this board has ${id.flash.detected_size}`);
+      const end = Math.max(...files.map((f) => f.address + f.data.length), provision ? NVS_OFFSET + NVS_SIZE : 0);
       if (id.flash.bytes && end > id.flash.bytes) throw new Error(`image ends at 0x${end.toString(16)}, past ${id.flash.detected_size} flash`);
       const bl = files.find((f) => f.address === blOffset(id.chip.name));
       if (!bl && files.some((f) => f.address < 0x8000)) throw new Error(`a part sits below 0x8000 but not at this chip's bootloader offset 0x${blOffset(id.chip.name).toString(16)}`);
-      const fs = s.flash_settings || {};
+    };
+    // Session 1: identify + plan. Closed again before any credential exists, so
+    // a pairing approval that takes minutes never leaves a ROM session idle.
+    const { id, name, plan } = await withLoader(async (loader) => {
+      const id = await identify(loader);
+      check(id);
+      const name = boardName(id.chip.mac);
+      log(`board ${id.chip.mac} (softAP ${softapMac(id.chip.mac)}) → ${name}`, "ok");
+      const plan = {
+        set: s.name, boards: s.boards, flash: `${fs.flash_mode || "keep"} / ${fs.flash_size || "keep"} / ${fs.flash_freq || "keep"}`, erase_all: eraseAll,
+        board: { mac: id.chip.mac, softap_mac: softapMac(id.chip.mac), name, chip: id.chip.description, flash: id.flash.detected_size },
+        parts: [...files.map((f) => `0x${f.address.toString(16)} ${f.name} ${f.data.length} B`), ...(provision ? [`0x${NVS_OFFSET.toString(16)} nvs.bin ${NVS_SIZE} B (tiny/cfg: identity + 1 network)`] : [])],
+      };
+      if (provision) {
+        const st = await tinyApi("status");
+        plan.credential = st.session ? `host session @${st.login} → POST ${st.api}/api/devices (duplicate guard${adopt ? ", adopt if online" : ""})` : `no session on the bench host → pairing code via ${st.api}/api/devices/pair/*`;
+        if (st.session) {
+          const look = await tinyApi("lookup", { name });
+          plan.existing_rows = look.rows;
+          const live = look.rows?.find((r) => r.online === true);
+          if (live && !adopt) throw new Error(`"${name}" is ONLINE as ${String(live.id).slice(0, 8)}… — this board (or its twin) is heartbeating. Tick "adopt" to re-key that row.`);
+        }
+        plan.wifi = ssid;
+      }
+      log(JSON.stringify(plan, null, 2));
+      try { await loader.after("hard_reset"); } catch {}
+      return { id, name, plan };
+    });
+    if (dryRun) {
+      log("dry run — nothing written to the board, nothing enrolled", "ok");
+      await send("report", { label, kind: "flash-plan", session, ok: true, plan });
+      setBusy(false);
+      return { ok: true, dry_run: true, plan };
+    }
+    const summary = `Write ${plan.parts.length} part(s) from "${s.name}" to the board labelled "${label}" (${name}, ${id.chip.mac})` +
+      (eraseAll ? ", ERASING THE WHOLE CHIP FIRST (Wi-Fi, pairing token, settings all lost)" : provision ? " (its NVS is REPLACED: identity + this Wi-Fi only)" : " (regions outside these parts are kept)") +
+      (provision ? `\n\nIt will be enrolled as ${name}: ${plan.credential}.` : "") +
+      `\n\n${plan.parts.join("\n")}`;
+    if (!preconfirmed && !confirm(summary)) { log("flash cancelled", "muted"); setBusy(false); return { ok: false, error: "cancelled by owner" }; }
+    const fileArray = files.map(({ data, address }) => ({ data, address }));
+    let cred = null;
+    if (provision) {
+      // The token exists once: get it only after the owner confirmed and every
+      // check passed, so a refusal never leaves an enrolled row with no board.
+      cred = await acquireCredential(name, adopt);
+      token = cred.device_token;
+      const cfg = buildCfg({ device_id: cred.device_id, token, api: cred.api, name, networks: [{ ssid, key }] });
+      const nvs = tinyNvs(cfg);
+      const back = JSON.parse(readNvsStrings(nvs)["tiny/cfg"]);
+      if (back.device_id !== cfg.device_id || back.token !== token) throw new Error("NVS image did not read back");
+      fileArray.push({ data: nvs, address: NVS_OFFSET });
+      files.push({ data: nvs, address: NVS_OFFSET, name: "nvs.bin" });
+      log(`NVS image built: ${NVS_SIZE} B at 0x${NVS_OFFSET.toString(16)} (device ${String(cfg.device_id).slice(0, 8)}…, Wi-Fi "${ssid}")`, "ok");
+    }
+    fileArray.sort((a, b) => a.address - b.address);
+    // Session 2: the ONE write. Same board? (A swapped cable would enrol the wrong chip.)
+    const res = await withLoader(async (loader) => {
+      const id2 = await identify(loader);
+      if (id2.chip.mac !== id.chip.mac) throw new Error(`board changed: planned ${id.chip.mac}, now ${id2.chip.mac}. Not writing ${name}'s identity to it.${cred ? ` Re-run with "adopt" to re-key ${name}.` : ""}`);
+      check(id2);
       await loader.writeFlash({
-        fileArray: files.map(({ data, address }) => ({ data, address })),
+        fileArray,
         flashMode: fs.flash_mode || "keep", flashFreq: fs.flash_freq || "keep", flashSize: fs.flash_size || "keep",
         eraseAll, compress: true,
-        reportProgress: (i, written, total) => { $("flashprog").textContent = `${files[i].name}: ${((100 * written) / total).toFixed(0)}%`; },
+        reportProgress: (i, written, total) => { $("flashprog").textContent = `part ${i + 1}/${fileArray.length}: ${((100 * written) / total).toFixed(0)}%`; },
         calculateMD5Hash: (img) => md5hex(img),   // esptool-js re-hashes on chip after each part
       });
       log(`flash written and verified on chip in ${((performance.now() - t0) / 1000).toFixed(1)} s; resetting`, "ok");
       try { await loader.after("hard_reset"); } catch {}
-      return { ok: true, set: s.name, parts: files.map((f) => ({ file: f.name, offset: "0x" + f.address.toString(16), md5: md5hex(f.data) })), erase_all: eraseAll, mac: id.chip.mac, seconds: +((performance.now() - t0) / 1000).toFixed(1) };
+      return { ok: true, set: s.name, name, mac: id.chip.mac, erase_all: eraseAll,
+               parts: files.map((f) => ({ file: f.name, offset: "0x" + f.address.toString(16), md5: f.name === "nvs.bin" ? "(holds the token; not reported)" : md5hex(f.data) })),
+               provisioned: !!cred, device_id: cred?.device_id, via: cred?.via, adopted: cred?.adopted, wifi: provision ? ssid : undefined,
+               seconds: +((performance.now() - t0) / 1000).toFixed(1) };
     });
-    await fetch("api/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label, kind: "flash", session, ...res }) });
+    token = null;  // last reference outside the closures above
+    if (res.ok && res.provisioned) {
+      log("── first boot (40 s): looking for tiny_config / wifi / got ip / heartbeat ──", "muted");
+      const boot = await runBoot(40, { quietReport: true });
+      res.boot = bootVerdict(boot.text || "", res.name);
+      log(JSON.stringify(res.boot, null, 2), res.boot.crashed ? "bad" : res.boot.got_ip ? "ok" : "warn");
+      if (res.boot.got_ip) log(`${res.name} joined Wi-Fi. tiny.technology/devices should show it online within a minute.`, "ok");
+      else log("No 'got ip' in 40 s: check the SSID/key, or that the board logs to this USB port.", "warn");
+    }
+    await send("report", redact({ label, kind: dryRun ? "flash-plan" : "flash", session, ...res }));
     setBusy(false);
-    return res;
+    return redact(res);
   } catch (e) {
-    log(`flash failed: ${e.message ?? e}`, "bad");
-    log("A failed write leaves the board unbootable until a flash succeeds. The ROM loader is in mask ROM and cannot be damaged: retry, lower the baud, or hold BOOT while plugging in.", "warn");
+    token = null;
+    log(`${dryRun ? "plan" : "flash"} failed: ${e.message ?? e}`, "bad");
+    if (!dryRun && !/cancelled|refused|ONLINE|mismatch|built for|denied|expired|claimed|vanished|timed out/.test(String(e.message))) log("A failed write leaves the board unbootable until a flash succeeds. The ROM loader is in mask ROM and cannot be damaged: retry, lower the baud, or hold BOOT while plugging in.", "warn");
     setBusy(false);
     return { ok: false, error: String(e.message ?? e) };
   }
@@ -653,8 +862,24 @@ async function runFlash(setName, eraseAll, { preconfirmed = false } = {}) {
 
 // ---- agent-queued jobs -----------------------------------------------------------
 // The agent drops jobs/*.json via tools/devbench/job.py. Each one shows as a
-// banner; nothing runs until the owner clicks Run (flash also confirms).
+// banner; nothing runs until the owner clicks Run (flash also confirms). A job's
+// result goes back through send(), so Run and Decline both work behind the
+// tunnel, and a failed post shows on the banner instead of vanishing.
 const seenJobs = new Set();
+async function postResult(j, res, div) {
+  try {
+    const r = await send(`jobs/${j.id}/result`, redact(res ?? { ok: false }));
+    if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 160)}`);
+    log(`job ${j.id}: result recorded`, "muted");
+  } catch (e) {
+    const msg = `could not record the result of job ${j.id}: ${e.message ?? e}`;
+    log(msg, "bad");
+    if (div) { const err = document.createElement("div"); err.className = "bad small"; err.textContent = msg; div.append(err); }
+    return false;
+  }
+  pollJobs();
+  return true;
+}
 async function pollJobs() {
   let jobs = [];
   try { jobs = await (await fetch("api/jobs")).json(); } catch { return; }
@@ -663,12 +888,12 @@ async function pollJobs() {
   box.replaceChildren(...jobs.map((j) => {
     const div = document.createElement("div");
     div.className = "job";
-    const what = j.kind === "flash" ? `flash set "${j.set}"${j.erase_all ? " + ERASE ALL" : ""}` : j.kind === "dump" ? `dump ${j.what}` : j.kind === "boot" ? `boot log ${j.secs}s` : j.kind;
+    const what = j.kind === "flash" ? `${j.dry_run ? "PLAN (dry run) for " : ""}flash set "${j.set}"${j.provision ? ` + PROVISION${j.adopt ? " (adopt)" : ""}` : ""}${j.erase_all ? " + ERASE ALL" : ""}` : j.kind === "dump" ? `dump ${j.what}` : j.kind === "boot" ? `boot log ${j.secs}s` : j.kind;
     div.innerHTML = `<b></b> <span></span> <span class="muted"></span> `;
     div.children[0].textContent = `Agent asks: ${what}`;
     div.children[1].textContent = `for board "${j.label}"`;
     div.children[2].textContent = j.note ? `— ${j.note}` : "";
-    const run = document.createElement("button"); run.textContent = "Run"; run.className = j.kind === "flash" ? "danger" : "primary";
+    const run = document.createElement("button"); run.textContent = "Run"; run.className = j.kind === "flash" && !j.dry_run ? "danger" : "primary";
     const skip = document.createElement("button"); skip.textContent = "Decline";
     run.disabled = busy || !port;
     run.onclick = async () => {
@@ -678,16 +903,20 @@ async function pollJobs() {
       }
       let res;
       setMode({ probe: "identify", boot: "identify", dump: "dump", flash: "flash" }[j.kind] || "console");
+      if (j.kind === "flash" && j.provision) {
+        // Wi-Fi never rides in a job file: the owner types it on the Flash tab.
+        $("provision").checked = true; $("provbox").hidden = false; $("adopt").checked = !!j.adopt;
+        if (!$("ssid").value.trim()) { log("this job provisions the board: type the Wi-Fi SSID (and key) on the Flash tab, then press Run again", "warn"); $("ssid").focus(); return; }
+      }
       if (j.kind === "probe") res = await runProbe();
-      else if (j.kind === "boot") res = await runBoot(j.secs);
+      else if (j.kind === "boot") { res = await runBoot(j.secs); delete res.text; }
       else if (j.kind === "dump") res = await runDump(j.what || "all");
-      else if (j.kind === "flash") res = await runFlash(j.set, !!j.erase_all);
+      else if (j.kind === "flash") res = await runFlash(j.set, !!j.erase_all, { ...(j.provision ? provOpts() : {}), provision: !!j.provision, adopt: !!j.adopt, dryRun: !!j.dry_run });
       else res = { ok: false, error: `unknown job kind ${j.kind}` };
       if (res?.error === "cancelled by owner") return;  // stays queued
-      await fetch(`api/jobs/${j.id}/result`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(res ?? { ok: false }) });
-      pollJobs();
+      await postResult(j, res, div);
     };
-    skip.onclick = async () => { await fetch(`api/jobs/${j.id}/result`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ok: false, declined: true }) }); pollJobs(); };
+    skip.onclick = async () => { skip.disabled = true; if (!(await postResult(j, { ok: false, declined: true }, div))) skip.disabled = false; };
     div.append(run, " ", skip);
     if (!seenJobs.has(j.id)) { seenJobs.add(j.id); log(`agent queued job ${j.id}: ${what} for "${j.label}"`, "warn"); }
     return div;

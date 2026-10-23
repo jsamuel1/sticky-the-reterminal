@@ -41,6 +41,9 @@
   .prog { font: 12px ui-monospace, Menlo, monospace; }
   details summary { cursor: pointer; }
   #empty { padding: 18px 0; }
+  .pair { display: flex; gap: 14px; align-items: center; padding: 8px; border: 1px solid var(--acc); border-radius: 6px; margin: 6px 0; }
+  .pair svg { background: #fff; display: block; }
+  .pair .code { font: 600 28px/1.2 ui-monospace, Menlo, monospace; letter-spacing: .12em; }
 </style>
 </head>
 <body>
@@ -113,9 +116,29 @@
   <pre id="flashparts"></pre>
   <div class="bar">
     <label><input type="checkbox" id="eraseall"> erase whole chip first <span class="small muted">(loses Wi-Fi + pairing)</span></label>
+    <label title="enrol this board in your tiny fleet and write its identity + Wi-Fi into NVS in the same flash"><input type="checkbox" id="provision"> provision <span class="small muted">(name, enrol, Wi-Fi)</span></label>
     <span style="flex:1"></span>
     <span id="flashprog" class="prog muted"></span>
+    <button id="plan" disabled title="identify the board and show everything a flash would do; writes nothing, enrols nothing">Plan (dry run)</button>
     <button id="flash" class="danger" disabled>Flash…</button>
+  </div>
+  <div id="provbox" hidden>
+    <div class="bar small">
+      <label>Wi-Fi <input id="ssid" placeholder="SSID" autocomplete="off" maxlength="32" style="width:14em"></label>
+      <label>key <input id="wifikey" type="password" placeholder="(empty = open network)" autocomplete="off" maxlength="64" style="width:14em"></label>
+      <label title="if a row with this board's name is online, re-key it (its old token stops working)"><input type="checkbox" id="adopt"> adopt an online row of the same name</label>
+    </div>
+    <div class="small muted">The name is the board's own (tiny-XXXX from its MAC). With a tiny session on the bench host it enrols with that; otherwise you get a pairing code to approve on tiny.technology. The Wi-Fi and device token go only into the board's NVS: never saved, logged or sent to the agent.</div>
+  </div>
+  <div id="pairbox" hidden class="pair">
+    <div id="pairqr"></div>
+    <div>
+      <div class="small muted">Pair this board — approve it on tiny.technology:</div>
+      <div id="paircode" class="code"></div>
+      <div><a id="pairlink" target="_blank" rel="noopener"></a></div>
+      <div id="pairstate" class="small muted" role="status" aria-live="polite"></div>
+      <button id="paircancel">Cancel pairing</button>
+    </div>
   </div>
 </section>
 

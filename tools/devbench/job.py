@@ -11,8 +11,16 @@ names the board, the image set and whether flash is erased.
     tools/devbench/job.py dump    --label fnk0104s --what all
     tools/devbench/job.py dump    --label fnk0104s --what 0x8000:0x1000
     tools/devbench/job.py flash   --label fnk0104s --set build-firmware [--erase-all]
+    tools/devbench/job.py flash   --label fnk0104s --set build-fnk0104s --provision [--adopt] [--dry-run]
     tools/devbench/job.py list                   # pending + recent results
     tools/devbench/job.py wait <id> [--timeout 600]
+
+--provision is `npx tiny-tech flash --body sticky-the-reterminal` on the bench:
+the page reads the MAC, names the board tiny-XXXX, enrols it (the bench host's
+tiny session, else a pairing code the owner approves) and writes its identity
++ Wi-Fi into NVS in the same flash. The owner types the Wi-Fi on the Flash tab;
+it never rides in a job file. --dry-run identifies the board and shows the plan;
+nothing is written or enrolled.
 
 Results land in jobs/done/<id>.json (and the usual reports/dumps).
 """
@@ -20,13 +28,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-JOBS = ROOT / "jobs"
+JOBS = Path(os.environ.get("DEVBENCH_JOBS", ROOT / "jobs"))  # same override as server.py
 KINDS = ("probe", "boot", "dump", "flash")
 
 
@@ -37,6 +46,9 @@ def main() -> int:
     ap.add_argument("--label", help="board label the job is for (page refuses on mismatch)")
     ap.add_argument("--set", dest="image_set", help="flash: image set name from /api/sets")
     ap.add_argument("--erase-all", action="store_true", help="flash: erase whole chip first")
+    ap.add_argument("--provision", action="store_true", help="flash: enrol + write identity/Wi-Fi NVS in the same flash")
+    ap.add_argument("--adopt", action="store_true", help="flash --provision: re-key a same-name row that is online")
+    ap.add_argument("--dry-run", action="store_true", help="flash: identify and show the plan only")
     ap.add_argument("--what", default="all", help="dump: all | partition:<name> | <offset>:<length>")
     ap.add_argument("--secs", type=int, default=10, help="boot: capture seconds")
     ap.add_argument("--note", default="", help="shown to the owner on the banner")
@@ -66,9 +78,13 @@ def main() -> int:
         ap.error("--label is required")
     if a.kind == "flash" and not a.image_set:
         ap.error("flash needs --set")
+    if a.kind != "flash" and (a.provision or a.adopt or a.dry_run):
+        ap.error("--provision/--adopt/--dry-run are flash options")
+    if a.adopt and not a.provision:
+        ap.error("--adopt needs --provision")
     job = {"kind": a.kind, "label": a.label, "note": a.note, "queued_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     if a.kind == "flash":
-        job.update(set=a.image_set, erase_all=a.erase_all)
+        job.update(set=a.image_set, erase_all=a.erase_all, provision=a.provision, adopt=a.adopt, dry_run=a.dry_run)
     if a.kind == "dump":
         job.update(what=a.what)
     if a.kind == "boot":
