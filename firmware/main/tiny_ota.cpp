@@ -94,9 +94,16 @@ static esp_err_t read_pointer(const char *channel, char *ver, size_t ver_cap,
         const cJSON *u = cJSON_GetObjectItem(bundle, "url");
         const cJSON *h = cJSON_GetObjectItem(bundle, "sha256");
         if (cJSON_IsString(v) && cJSON_IsString(u) && cJSON_IsString(h)) {
-            strlcpy(ver, v->valuestring, ver_cap);
-            strlcpy(url, u->valuestring, url_cap);
-            strlcpy(sha, h->valuestring, sha_cap);
+            // A clipped field is a different value: refuse, never fetch a
+            // truncated URL (the sha256 guard would only catch it later).
+            if (strlcpy(ver, v->valuestring, ver_cap) >= ver_cap ||
+                strlcpy(url, u->valuestring, url_cap) >= url_cap ||
+                strlcpy(sha, h->valuestring, sha_cap) >= sha_cap) {
+                ESP_LOGE(TAG, "pointer field too long (url %u B, cap %u) - refused",
+                         (unsigned)strlen(u->valuestring), (unsigned)url_cap);
+                cJSON_Delete(root);
+                return ESP_ERR_INVALID_SIZE;
+            }
             // Optional downgrade override — publisher writes "force":"1"
             // (string, the platform's zod idiom) or true into the bundle.
             const cJSON *f = cJSON_GetObjectItem(bundle, "force");

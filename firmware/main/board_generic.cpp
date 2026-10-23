@@ -108,18 +108,30 @@ esp_err_t amoled_expander_up()
     constexpr uint8_t kDriven = (1U << TCA_BIT_LCD_RST) |
                                 (1U << TCA_BIT_DSI_PWR_EN) |
                                 (1U << TCA_BIT_TOUCH_RST);
+    const char *step = "output low";
     esp_err_t err = tca_write(dev, kTcaOutput, static_cast<uint8_t>(0xFF & ~kDriven));
-    if (err == ESP_OK) err = tca_write(dev, kTcaConfig, static_cast<uint8_t>(0xFF & ~kDriven));
     if (err == ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-        err = tca_write(dev, kTcaOutput, 0xFF);
+        step = "direction";
+        err = tca_write(dev, kTcaConfig, static_cast<uint8_t>(0xFF & ~kDriven));
+    }
+    if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(20));
+    // Release the lines whatever happened above: a write that failed halfway
+    // must not leave the panel rail off and touch/LCD held in reset.
+    const esp_err_t rel = tca_write(dev, kTcaOutput, 0xFF);
+    if (err == ESP_OK && rel != ESP_OK) {
+        step = "release";
+        err = rel;
     }
     i2c_master_bus_rm_device(dev);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "tca9554: bring-up failed at %s: %s (release write: %s)",
+                 step, esp_err_to_name(err), esp_err_to_name(rel));
+        return err;
+    }
     // CST820 needs time after reset release before it answers on the bus.
     vTaskDelay(pdMS_TO_TICKS(100));
-    ESP_LOGI(kTag, "tca9554: DSI_PWR_EN + LCD_RST + TOUCH_RST released: %s",
-             esp_err_to_name(err));
-    return err;
+    ESP_LOGI(kTag, "tca9554: DSI_PWR_EN + LCD_RST + TOUCH_RST released");
+    return ESP_OK;
 }
 #endif
 
