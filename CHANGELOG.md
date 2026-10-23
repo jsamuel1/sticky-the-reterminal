@@ -22,6 +22,18 @@ release, newest first.
   `npx tiny-tech flash --body sticky-the-reterminal` still calls it with the
   port alone (board via `STICKY_BOARD`).
 
+- **firmware** — FNK0104S + AMOLED-1.8: one ES8311 + I²S std module
+  (`audio_es8311.cpp`). Pins and amp polarity come from the board pin map
+  (FNK: MCLK 4/BCLK 5/WS 7/DIN 6/DOUT 8, amp GPIO1 active-LOW; AMOLED: MCLK
+  16/BCLK 9/WS 45/DIN 10/DOUT 8, amp GPIO46 active-HIGH). Codec control via
+  `espressif/esp_codec_dev` 1.6.2 on the shared I²C bus. The voice capture
+  contract is unchanged: 16 kHz/16-bit mono WAV, 15 s cap. Chime names and
+  RTTTL play as PCM tones. The `sticky_buzzer_*` beeps keep the reTerminal
+  timings, and the amp is on only while a tone plays.
+- **firmware** — colour boards remap BOOT: click = home, hold = push-to-talk
+  (records until release; 15 s cap). The reTerminal keeps click = ask and
+  hold = home.
+
 ## 0.31.0 — grammar v14 — on-device pairing code (onboarding Phase B)
 
 - **firmware** — FNK0104S touch: FT6336U polled on the shared I2C bus
