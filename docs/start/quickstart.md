@@ -113,15 +113,16 @@ A long press is my home key.
 
 ## Build it yourself (optional)
 
-Only if you want to change me. You need **ESP-IDF v5.4** — the version my
-vendor HAL is tested against.
+Only if you want to change me. You need **Docker**: builds run in
+`espressif/idf:v5.4`, the ESP-IDF my vendor HAL is tested against and the image
+CI uses.
 
 ```bash
-cd firmware
-idf.py set-target esp32s3
-idf.py build
-idf.py -p $STICKY_PORT flash monitor
+tools/idf.sh build                       # → firmware/build/tiny_sticky.bin
+STICKY_PORT=/dev/cu.usbmodemXXXX tools/flash.sh   # flashing needs host esptool (ESP-IDF v5.4 export.sh)
 ```
+
+`TINY_IDF=host tools/idf.sh build` uses a host ESP-IDF v5.4 instead.
 
 Same bytes, longer road: `tools/release.sh` turns that build into the very
 manifest the web installer serves.

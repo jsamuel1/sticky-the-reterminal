@@ -2,7 +2,7 @@
 # playground_package.sh — turn firmware/build into a Sticky Playground registry entry.
 #
 #   tools/playground_package.sh                 # package firmware/build as-is
-#   tools/playground_package.sh --build         # idf.py build first (ESP-IDF exported or at ~/esp/esp-idf-v5.4)
+#   tools/playground_package.sh --build         # build first (tools/idf.sh: the pinned ESP-IDF image)
 #   tools/playground_package.sh --validate      # …then copy into a registry clone and run its validator
 #   tools/playground_package.sh --registry DIR  # where the registry clone lives (default /tmp/sticky-registry)
 #
@@ -45,11 +45,8 @@ build_matches() {
 }
 
 if [ "$DO_BUILD" = 1 ] || ! build_matches; then
-  echo "package: building $VER"
-  # shellcheck disable=SC1090
-  [ -n "${IDF_PATH:-}" ] || source ~/esp/esp-idf-v5.4/export.sh >/dev/null 2>&1 \
-    || { echo "package: ESP-IDF not exported and ~/esp/esp-idf-v5.4 missing" >&2; exit 1; }
-  ( cd "$DIR/firmware" && idf.py reconfigure >/dev/null && idf.py build )
+  echo "package: building $VER (tools/idf.sh)"
+  "$DIR/tools/idf.sh" reconfigure >/dev/null && "$DIR/tools/idf.sh" build
   build_matches || { echo "package: build does not contain $VER" >&2; exit 1; }
 fi
 

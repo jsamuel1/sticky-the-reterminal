@@ -2,7 +2,7 @@
 # release.sh — turn firmware/build into a web-installable release.
 #
 #   tools/release.sh            # reuse firmware/build if its version matches tiny_version.h
-#   tools/release.sh --build    # force `idf.py build` first (needs ESP-IDF exported)
+#   tools/release.sh --build    # force a build first (tools/idf.sh: the pinned ESP-IDF image)
 #   tools/release.sh --deploy   # …then `mkdocs gh-deploy --force` (binaries ride along)
 #   tools/release.sh --vendor-ewt  # refresh docs/js/esp-web-tools from npm (Apache-2.0)
 #
@@ -47,11 +47,8 @@ build_matches() {
 }
 
 if [ "$DO_BUILD" = 1 ] || ! build_matches; then
-  echo "release: building $VER (idf.py build)"
-  # shellcheck disable=SC1090
-  [ -n "${IDF_PATH:-}" ] || source ~/esp/esp-idf-v5.4/export.sh >/dev/null 2>&1 \
-    || { echo "release: ESP-IDF not exported and ~/esp/esp-idf-v5.4 missing" >&2; exit 1; }
-  ( cd "$DIR/firmware" && idf.py reconfigure >/dev/null && idf.py build )
+  echo "release: building $VER (tools/idf.sh: espressif/idf:v5.4 unless TINY_IDF=host)"
+  "$DIR/tools/idf.sh" reconfigure >/dev/null && "$DIR/tools/idf.sh" build
   build_matches || { echo "release: build does not contain $VER" >&2; exit 1; }
 else
   echo "release: firmware/build already carries $VER — reusing"

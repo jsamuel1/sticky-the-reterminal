@@ -7,17 +7,18 @@
 #
 # Each variant gets its own build dir AND its own sdkconfig, so building a
 # colour board never rewrites firmware/sdkconfig (the reTerminal's).
-# Needs ESP-IDF v5.4 exported, or run it inside espressif/idf:v5.4.
+# Builds run in espressif/idf:v5.4 via tools/idf.sh (TINY_IDF=host to opt out).
 set -euo pipefail
-cd "$(dirname "$0")/../firmware"
+IDF="$(cd "$(dirname "$0")" && pwd)/idf.sh"
 board="${1:-reterminal}"
 shift || true
 case "$board" in
   reterminal)
-    exec idf.py "$@" build ;;
+    exec "$IDF" "$@" build ;;
   fnk0104s|amoled18)
-    [ -f "sdkconfig.defaults.$board" ] || { echo "no sdkconfig.defaults.$board" >&2; exit 2; }
-    exec idf.py -B "build-$board" -DSDKCONFIG="build-$board/sdkconfig" \
+    [ -f "$(dirname "$IDF")/../firmware/sdkconfig.defaults.$board" ] \
+      || { echo "no sdkconfig.defaults.$board" >&2; exit 2; }
+    exec "$IDF" -B "build-$board" -DSDKCONFIG="build-$board/sdkconfig" \
       -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.$board" "$@" build ;;
   *)
     echo "unknown board '$board' (reterminal | fnk0104s | amoled18)" >&2; exit 2 ;;

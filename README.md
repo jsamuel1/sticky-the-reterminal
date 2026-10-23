@@ -101,10 +101,12 @@ recovery/      factory-dump manifest (the 32 MB dump is gitignored)
 ## Build
 
 ```sh
-source ~/esp/esp-idf-v5.4/export.sh
-cd firmware && idf.py build                         # → build/tiny_sticky.bin
-STICKY_PORT=/dev/cu.usbmodemXXXX ../tools/flash.sh
+tools/idf.sh build                                  # → firmware/build/tiny_sticky.bin, built in espressif/idf:v5.4
+STICKY_PORT=/dev/cu.usbmodemXXXX tools/flash.sh     # needs host esptool (source ~/esp/esp-idf-v5.4/export.sh)
 ```
+
+Builds run in Docker by default, so you only need Docker. `TINY_IDF=host` uses an
+exported host ESP-IDF v5.4 instead.
 
 [AGENTS.md](AGENTS.md) is the map of the codebase; [CONTRIBUTING.md](CONTRIBUTING.md)
 has the workflow. Firmware is Apache-2.0 ([LICENSE](LICENSE)); `vendor/`

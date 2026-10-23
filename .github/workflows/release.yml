@@ -29,11 +29,11 @@ jobs:
       - id: ver
         shell: bash
         run: echo "version=$(sed -n 's/.*TINY_FW_VERSION *"\([^"]*\)".*/\1/p' firmware/main/tiny/tiny_version.h)" >> "$GITHUB_OUTPUT"
-      - name: idf.py build
+      - name: idf.py build (tools/idf.sh — same entry point as local builds)
         shell: bash
         run: |
           . $IDF_PATH/export.sh
-          cd firmware && idf.py build
+          tools/idf.sh build
       - name: manifest + sha256sums
         shell: bash
         run: tools/release.sh

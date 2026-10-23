@@ -41,14 +41,23 @@ Live truth about a device is never in a file. Ask it: `status` over the relay
 ## 2. Build, flash, test — the exact commands
 
 ```sh
-source ~/esp/esp-idf-v5.4/export.sh          # ESP-IDF v5.4, target esp32s3
-cd firmware && idf.py build                  # → build/tiny_sticky.bin (+ bootloader, table, ota_data)
-STICKY_PORT=/dev/cu.usbmodemXXXX ../tools/flash.sh        # app only, 460800 then 115200 fallback
-STICKY_PORT=/dev/cu.usbmodemXXXX ../tools/first_flash.sh  # blank board: all four parts, 45 s boot log
-STICKY_PORT=/dev/cu.usbmodemXXXX ../tools/monitor.sh
-tests/run.sh                                 # host tests: askq, bootmark, sleep/wake — must stay green
+tools/idf.sh build                           # ESP-IDF v5.4 in espressif/idf:v5.4 (default; same image as CI)
+                                             # → firmware/build/tiny_sticky.bin (+ bootloader, table, ota_data)
 tools/build_board.sh fnk0104s                # board variant → firmware/build-fnk0104s (also: amoled18)
+TINY_IDF=host tools/idf.sh build             # opt out: use a host IDF (source ~/esp/esp-idf-v5.4/export.sh)
+source ~/esp/esp-idf-v5.4/export.sh          # flashing/monitoring only: they need the host's USB + esptool
+STICKY_PORT=/dev/cu.usbmodemXXXX tools/flash.sh        # app only, 460800 then 115200 fallback
+STICKY_PORT=/dev/cu.usbmodemXXXX tools/first_flash.sh  # blank board: all four parts, 45 s boot log
+STICKY_PORT=/dev/cu.usbmodemXXXX tools/monitor.sh
+tests/run.sh                                 # host tests: askq, bootmark, sleep/wake — must stay green
 ```
+
+- Builds go through `tools/idf.sh`, which runs `idf.py` in the pinned
+  `espressif/idf:v5.4` image. The repo is mounted at its own host path, and in
+  a worktree so is the shared `.git`, so `fw_commit` is the real sha. Do not
+  call a bare host `idf.py build` in scripts. `release.sh`,
+  `playground_package.sh` and `build_board.sh` all go through `idf.sh`. Inside
+  the image (CI) it runs `idf.py` directly.
 
 - Board variants: `choice TINY_BOARD` (Kconfig.projbuild) = reterminal
   (default) | fnk0104s | amoled18. Pins per board in `pin_config_<board>.h`,

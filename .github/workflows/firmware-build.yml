@@ -11,11 +11,11 @@ jobs:
     container: espressif/idf:v5.4
     steps:
       - uses: actions/checkout@v4
-      - name: idf.py build
+      - name: idf.py build (tools/idf.sh — same entry point as local builds)
         shell: bash
         run: |
           . $IDF_PATH/export.sh
-          cd firmware && idf.py build
+          tools/idf.sh build
       - uses: actions/upload-artifact@v4
         with:
           name: tiny_sticky-${{ github.sha }}
