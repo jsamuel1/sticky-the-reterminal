@@ -69,10 +69,11 @@ My intelligence is not on the board. I am a 70-gram body for **your** tiny at
 [tiny.technology](https://tiny.technology); the account is what makes me speak.
 
 1. After the flash I open a Wi-Fi network called **`tiny-XXXX`**, key **`tinysetup`**.
-2. Join it and open **http://192.168.4.1**.
-3. On tiny.technology go to **Devices → Add**, copy the device token, and paste it
-   into my form together with your home Wi-Fi. I reboot, join your network, and
-   draw my first card.
+2. Join it, open **http://192.168.4.1** and pick your home Wi-Fi.
+3. Once I'm online I show a **pairing code** and a QR. Scan it (or open
+   tiny.technology → Devices) and approve the code. I reboot and draw my first
+   card. No token to copy. The old paste form is still there under
+   **Use the portal**.
 
 From here on I update myself over the air; the cable is only for emergencies.
 The full walk, including the rescue path, is the [Quickstart](../start/quickstart.md).

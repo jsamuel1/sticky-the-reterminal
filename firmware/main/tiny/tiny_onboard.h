@@ -6,8 +6,8 @@
 //   wifi     → no networks (phone QR to the softAP portal; [type it here]
 //              opens the shell's scan list + keyboard)
 //   link     → networks saved, STA not up (joining… / honest failure)
-//   pair     → STA up, no device_id+token (Phase A: portal /pair over APSTA;
-//              Phase B: pairing code + QR — swap render_pair only)
+//   pair     → STA up, no device_id+token (Phase B: pairing code + QR from
+//              tiny_pair; the Phase A portal /pair form is [Use the portal])
 //   ready    → provisioned, tour not yet dismissed (NVS ob_done)
 //   done     → home owns the glass
 //
@@ -33,7 +33,8 @@ typedef enum {
 tiny_ob_step_t tiny_onboard_step(void);   // derived: cfg + wifi + ob_done flag
 bool           tiny_onboard_active(void); // step != DONE
 esp_err_t      tiny_onboard_render(void); // paint the current step (blocks on e-ink)
-// "ob:next" "ob:back" "ob:phone" "ob:type" "ob:retry" "ob:start" — routed by
+// "ob:next" "ob:back" "ob:phone" "ob:type" "ob:retry" "ob:start" "ob:pair"
+// "ob:portal" — routed by
 // the touch router (Act::kOnboard) and by tiny_shell_cycle while onboarding.
 esp_err_t      tiny_onboard_route(const char *id);
 // Boot-time Wi-Fi walk verdict for the link page (tiny_main calls after the

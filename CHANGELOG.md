@@ -4,7 +4,7 @@ Firmware versions come from `firmware/main/tiny/tiny_version.h`; the verb
 grammar version (`TINY_GRAMMAR_VERSION`) is what clients gate on. One line per
 release, newest first.
 
-## Unreleased
+## 0.31.0 — grammar v14 — on-device pairing code (onboarding Phase B)
 
 - **firmware** — FNK0104S touch: FT6336U polled on the shared I2C bus
   (`board_sensor_i2c_bus()`), one finger, raw-point log on finger-down, same
@@ -12,6 +12,22 @@ release, newest first.
   physical-canvas axis map is one function (`tiny/tiny_touch_map.h`,
   host-tested against `Canvas::to_logical`). `tap`/`swipe` bounds follow the
   physical canvas on colour boards. Caps `touch` on. No verb or reply change.
+- **firmware** — new `tiny_pair`: an unprovisioned board with Wi-Fi enrols
+  itself through tiny.technology's headless pairing API (the contract
+  `tiny-tech enroll` uses): `POST /api/devices/pair/start` with the sha256 of
+  a 32-byte RAM-only base64url secret → a code; the owner approves it at
+  `tiny.technology/devices/pair?code=…`; the board polls `/pair/poll` every
+  3 s (backoff on errors), merges `device_id` + token + name and reboots.
+  Expired/claimed codes renew by themselves; a denial waits for [New code].
+  Own task, 15 s timeouts, IDF cert bundle; the secret is never logged.
+- **onboarding** — the pair page shows the code (3+3) and a QR of the
+  approval link; the Phase A paste portal stays as [Use the portal]. One INFO
+  console line names the code and link (headless boards).
+- **grammar v14** — `status` gains `pair_code`, `pair_url`, `pair_expires_s`,
+  `pair`; portal `GET /info` gains `pair_code` + `pair_url`; `ob:pair`,
+  `ob:portal`, `page onboard portal`.
+- **tests** — `tests/host/pair_host_test.sh`: sha256, base64url, secretHash
+  (Node golden vectors), code/url, merge body, poll classifier.
 
 ## 0.30.0 — grammar v13 — board variants (phase 1)
 

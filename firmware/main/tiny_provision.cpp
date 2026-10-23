@@ -25,6 +25,7 @@
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_version.h"
 #include "tiny/tiny_onboard.h"
+#include "tiny/tiny_pair.h"
 #include "tiny/tiny_wifi.h"
 
 #include <string.h>
@@ -69,14 +70,20 @@ static esp_err_t info_get(httpd_req_t *req) {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     tiny_config_t cfg;
     bool prov = tiny_config_load(&cfg) == ESP_OK && tiny_config_is_provisioned(&cfg);
-    char body[320];
+    // v14: the live pairing code (public by design; it is on the glass) and
+    // its approval link. tiny_pair gates the code to [A-Za-z0-9]{4,16} and
+    // builds the URL from it, so neither can break this hand-built JSON.
+    char pc[24] = "", pl[160] = "", pair[220] = "";
+    if (tiny_pair_code(pc, sizeof pc) && tiny_pair_url(pl, sizeof pl))
+        snprintf(pair, sizeof pair, ",\"pair_code\":\"%s\",\"pair_url\":\"%s\"", pc, pl);
+    char body[560];
     snprintf(body, sizeof body,
              "{\"device\":\"reterminal_sticky\",\"board\":\"XIAO_ESP32S3_STICKY\","
              "\"uid\":\"%02x%02x%02x%02x%02x%02x\",\"ssid\":\"%s\",\"fw\":\"%s\","
              "\"capabilities\":[\"display\",\"touch\",\"mic\",\"buzzer\",\"sensors\","
-             "\"wifi\"],\"provisioned\":%s}",
+             "\"wifi\"],\"provisioned\":%s%s}",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], s_ssid,
-             TINY_FW_VERSION, prov ? "true" : "false");
+             TINY_FW_VERSION, prov ? "true" : "false", pair);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }

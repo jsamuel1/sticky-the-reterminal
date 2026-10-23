@@ -45,6 +45,7 @@
 #include "tiny/tiny_provision.h"
 #include "tiny/tiny_shell.h"
 #include "tiny/tiny_onboard.h"
+#include "tiny/tiny_pair.h"
 #include <string.h>
 #include "esp_system.h"
 
@@ -235,6 +236,11 @@ extern "C" void app_main(void)
                 // Phone path stays open while the shell owns the glass.
                 ESP_LOGI(TAG, "portal over sta: %s",
                          esp_err_to_name(tiny_provision_portal_apsta()));
+                // Phase B: ask for a pairing code now, whatever the glass
+                // shows — headless boards have only the console and /info.
+                // The task waits for the STA itself and ends once paired.
+                ESP_LOGI(TAG, "pairing code task: %s",
+                         esp_err_to_name(tiny_pair_start()));
                 tiny_onboard_render();
             } else if (just_failed) {
                 ESP_LOGW(TAG, "boot confession: \"%s\" failed, reason %d",

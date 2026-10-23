@@ -179,11 +179,16 @@ while a phone uses the AP; its page is two independent forms, Wi-Fi and
 pair). `tiny_main.cpp` feeds the Wi-Fi walk verdict to `tiny_onboard_note_link`
 instead of painting the old confession card when the device is unprovisioned.
 
-Known limits (Phase A): pairing still means "mint a device on
-tiny.technology/devices, then paste id + token at `192.168.4.1/pair`". The
-planned Phase B is an RFC 8628-style pairing code (`POST /api/devices/pair/begin`
-on the device, `/pair?code=` for the owner's phone, device polls for the
-token); `render_pair()` is the only function that changes.
+Pairing (Phase B, 0.31.0): on the pair step the board asks
+`POST /api/devices/pair/start` (tiny-tech enroll's headless contract; the old
+note here said `/pair/begin`, which does not exist) for a code, shows it 3+3
+with a QR of `tiny.technology/devices/pair?code=`, logs one INFO line, and
+reports it as `pair_code` in `status` and portal `GET /info`. It polls
+`/pair/poll` every 3 s and reboots provisioned on approval. Module:
+`tiny_pair.cpp` (own task); pure half `tiny/tiny_pair_util.h` (host test
+`tests/host/pair_host_test.sh`). The secret (32 B, base64url) stays in RAM and
+is never logged; `secretHash` is sha256 of the base64url STRING. The Phase A
+paste path (`192.168.4.1/pair`) remains as [Use the portal].
 
 The flow was tested end to end on 0.28.0 from an erased NVS (welcome → portal
 → Wi-Fi → link → pair → ready → home). One thing it found: `POST /setup`

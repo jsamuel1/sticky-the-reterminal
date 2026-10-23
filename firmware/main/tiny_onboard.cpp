@@ -12,6 +12,8 @@
 //   * cJSON everywhere a human/network string enters a card (SSID injection,
 //     0.15.1). No snprintf into JSON.
 #include "tiny/tiny_onboard.h"
+#include "tiny/tiny_pair.h"
+#include "tiny/tiny_pair_util.h"
 #include "tiny/tiny_config.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_provision.h"
@@ -28,6 +30,8 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "nvs.h"
 
 static const char *TAG = "tiny_onboard";
@@ -73,10 +77,25 @@ extern "C" const char *tiny_onboard_step_name(tiny_ob_step_t s) {
 }
 
 extern "C" tiny_ob_step_t tiny_onboard_step(void) {
-    static tiny_config_t cfg;   // 1 KB+; never on the caller's stack
+    // The cfg is static (1 KB+; never on the caller's stack) and the step is
+    // now read from more than one task (the pair task repaints this flow), so
+    // the load-and-read is serialised: a reader must never see the struct
+    // half-zeroed by another task's tiny_config_load.
+    static SemaphoreHandle_t mux = NULL;
+    static portMUX_TYPE init = portMUX_INITIALIZER_UNLOCKED;
+    if (!mux) {
+        SemaphoreHandle_t m = xSemaphoreCreateMutex();
+        taskENTER_CRITICAL(&init);
+        if (!mux) { mux = m; m = NULL; }
+        taskEXIT_CRITICAL(&init);
+        if (m) vSemaphoreDelete(m);
+    }
+    if (mux) xSemaphoreTake(mux, portMAX_DELAY);
+    static tiny_config_t cfg;
     const bool have = tiny_config_load(&cfg) == ESP_OK;
     const bool nets = have && cfg.network_count > 0;
     const bool prov = have && tiny_config_is_provisioned(&cfg);
+    if (mux) xSemaphoreGive(mux);
     if (!nets) return s_welcome_seen ? TINY_OB_WIFI : TINY_OB_WELCOME;
     if (!prov) return tiny_wifi_is_up() ? TINY_OB_PAIR : TINY_OB_LINK;
     if (!ob_done_flag()) return TINY_OB_READY;
@@ -242,10 +261,77 @@ static void sta_ip(char *out, size_t cap) {
         snprintf(out, cap, IPSTR, IP2STR(&ip.ip));
 }
 
-// Phase A pair page: the portal, over APSTA, with a /pair form. Phase B
-// replaces the body + QR with a pairing code (RFC 8628 style); the surface
-// and the [Back]/[Use my phone] contract stay.
+// Phase B pair page: the board asked tiny.technology for a pairing code
+// (tiny_pair, its own task) and shows it with a QR to the approval page. The
+// Phase A portal stays up underneath as the fallback ([Use the portal]).
+// tiny_pair repaints this page when the code or its state changes, but only
+// while this card is on the glass.
+static esp_err_t render_pair_portal(void);
+
 static esp_err_t render_pair(void) {
+    tiny_pair_start();  // idempotent; refuses on a provisioned device
+    const tiny_pair_state_t ps = tiny_pair_state();
+    char code[24] = {0}, split[24] = {0}, url[160] = {0};
+    const bool live = tiny_pair_code(code, sizeof code) && tiny_pair_url(url, sizeof url);
+    if (live) tiny_pair_util::code_split(code, split, sizeof split);
+    cJSON *c = composite("ob-pair", "2/3 - pair me to your tiny");
+    cJSON *parts = cJSON_AddArrayToObject(c, "parts");
+    cJSON *btns = cJSON_AddArrayToObject(c, "buttons");
+    char b[200];
+    if (live) {
+        // Two lines (QR budget, see render_wifi). The code is the part title
+        // so it reads first; the QR is the approval link itself.
+        snprintf(b, sizeof b,
+                 "Scan, or open tiny.technology/devices and approve this "
+                 "code. It lasts %d min.",
+                 (tiny_pair_expires_in_s() + 59) / 60);
+        cJSON_AddItemToArray(parts, part_text(split, b));
+        cJSON *qr = cJSON_CreateObject();
+        cJSON_AddStringToObject(qr, "type", "qr");
+        cJSON_AddStringToObject(qr, "text", url);
+        char cap[48];
+        snprintf(cap, sizeof cap, "pair code %s", split);
+        cJSON_AddStringToObject(qr, "caption", cap);
+        cJSON_AddItemToArray(parts, qr);
+        add_button(btns, "Back", "ob:back");
+        add_button(btns, "New code", "ob:pair");
+        add_button(btns, "Use the portal", "ob:portal");
+        return paint(c);
+    }
+    if (ps == TINY_PAIR_DENIED) {
+        cJSON_AddItemToArray(parts, part_text("not approved",
+            "That code was turned down on tiny.technology. Ask for a new "
+            "one when you're ready."));
+        add_button(btns, "Back", "ob:back");
+        add_button(btns, "New code", "ob:pair");
+        add_button(btns, "Use the portal", "ob:portal");
+        return paint(c);
+    }
+    if (ps == TINY_PAIR_ERROR) {
+        const int st = tiny_pair_last_http();
+        if (st > 0)
+            snprintf(b, sizeof b, "tiny.technology answered %d when I asked for a "
+                     "pairing code. I keep retrying.", st);
+        else
+            snprintf(b, sizeof b, "I couldn't reach tiny.technology for a pairing "
+                     "code. I keep retrying.");
+        cJSON_AddItemToArray(parts, part_text("no code yet", b));
+        add_button(btns, "Back", "ob:back");
+        add_button(btns, "Retry now", "ob:pair");
+        add_button(btns, "Use the portal", "ob:portal");
+        return paint(c);
+    }
+    // Asking: painted before the first code exists. Say so, don't pretend.
+    cJSON_AddItemToArray(parts, part_text(NULL,
+        "Online. Asking tiny.technology for a pairing code..."));
+    add_button(btns, "Back", "ob:back");
+    add_button(btns, "Use the portal", "ob:portal");
+    return paint(c);
+}
+
+// Phase A pair page, kept as the fallback: the portal, over APSTA, with a
+// /pair form for a device id + token minted on tiny.technology.
+static esp_err_t render_pair_portal(void) {
     static tiny_config_t cfg;
     tiny_config_load(&cfg);
     const char *ssid = tiny_provision_ssid();
@@ -277,6 +363,7 @@ static esp_err_t render_pair(void) {
     cJSON_AddItemToArray(parts, qr);
     cJSON *btns = cJSON_AddArrayToObject(c, "buttons");
     add_button(btns, "Back", "ob:back");
+    add_button(btns, "Pairing code", "ob:phone");
     return paint(c);
 }
 
@@ -325,6 +412,7 @@ extern "C" esp_err_t tiny_onboard_preview(const char *step_name) {
     if (!strncmp(step_name, "wifi", 4))    return render_wifi();
     if (!strncmp(step_name, "link", 4))    return render_link();
     if (!strncmp(step_name, "pair", 4))    return render_pair();
+    if (!strncmp(step_name, "portal", 6))  return render_pair_portal();
     if (!strncmp(step_name, "ready", 5))   return render_ready();
     return ESP_ERR_INVALID_ARG;
 }
@@ -351,6 +439,17 @@ extern "C" esp_err_t tiny_onboard_route(const char *id) {
     // "phone": show the portal QR for whatever this step needs — the pair page
     // carries its own QR; every earlier step uses the wifi page's.
     if (!strcmp(a, "phone")) return s == TINY_OB_PAIR ? render_pair() : render_wifi();
+    // Pair page: [New code] / [Retry now] (a fresh code now, also after a
+    // denial) and [Use the portal] (the Phase A paste fallback).
+    if (!strcmp(a, "pair")) {
+        if (s != TINY_OB_PAIR) return tiny_onboard_render();
+        // No paint here: the pair task repaints once the new code exists
+        // (one e-ink refresh, not a stale one followed by the real one).
+        tiny_pair_retry();
+        return ESP_OK;
+    }
+    if (!strcmp(a, "portal"))
+        return s == TINY_OB_PAIR ? render_pair_portal() : tiny_onboard_render();
     if (!strcmp(a, "type") || !strcmp(a, "retry")) {
         // The shell's scan list + keyboard. Its [Back] pops to us.
         return tiny_shell_open(TINY_PAGE_WIFI);

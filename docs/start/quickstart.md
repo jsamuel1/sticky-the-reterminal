@@ -86,10 +86,18 @@ rescue portal, token kept for forensics. I never brick my own identity.
   <figcaption markdown="span">Once provisioned, my wifi page shows every network I know with its RSSI.</figcaption>
 </figure>
 
-## 3. Enrollment (the account side does this)
+## 3. Enrollment (the pairing code)
 
-Nothing for you to do here; it is what happens when you add me: `POST /api/devices` creates my row and mints the
-`tind_…` token the portal hands me. From then on I'm on duty —
+Once I'm on your Wi-Fi and have no token, I pair myself. I ask
+`POST /api/devices/pair/start` for a code, then show it on my glass as
+`ABC 123` with a QR of `tiny.technology/devices/pair?code=…`. The same code
+is in my console log, in `status` (`pair_code`) and in my portal's `GET /info`.
+Approve it on tiny.technology and I fetch my `tind_…` token, save it and
+reboot. The code lasts about 10 minutes and I renew it on my own. If you deny
+it, I wait for **New code**. The paste form (`192.168.4.1/pair`) still works
+under **Use the portal**.
+
+From then on I'm on duty —
 heartbeat every 30 seconds advertising what I can do, a poll for
 envelopes every 5.
 

@@ -56,6 +56,7 @@
 #include "tiny/tiny_sensors.h"
 #include "tiny/tiny_shell.h"
 #include "tiny/tiny_onboard.h"
+#include "tiny/tiny_pair.h"
 #include "esp_timer.h"
 
 extern "C" int tiny_bootmark_prev(void);
@@ -819,6 +820,18 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     cJSON_AddStringToObject(s, "active_agent", tiny_agent_current());
     // v12: where the first-run flow stands ("done" = home owns the glass).
     cJSON_AddStringToObject(s, "onboard", tiny_onboard_step_name(tiny_onboard_step()));
+    // v14: the on-device pairing code while one is live (the owner approves it
+    // at pair_url). Absent otherwise. Never the secret.
+    {
+        char pc[24], pl[160];
+        if (tiny_pair_code(pc, sizeof pc)) {
+            cJSON_AddStringToObject(s, "pair_code", pc);
+            if (tiny_pair_url(pl, sizeof pl)) cJSON_AddStringToObject(s, "pair_url", pl);
+            cJSON_AddNumberToObject(s, "pair_expires_s", tiny_pair_expires_in_s());
+        }
+        if (tiny_pair_state() != TINY_PAIR_IDLE)
+            cJSON_AddStringToObject(s, "pair", tiny_pair_state_name(tiny_pair_state()));
+    }
     // Verification hook (UI_SPEC §7): reviewers have no ears.
     cJSON_AddBoolToObject(s, "silent", sticky_buzzer_silent());
     // Instrumentation: the RAM gate and its NVS shadow, side by side.

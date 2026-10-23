@@ -1,5 +1,5 @@
 #pragma once
-#define TINY_FW_VERSION "0.30.0"
+#define TINY_FW_VERSION "0.31.0"
 
 // The verb grammar is a 3-consumer contract (dashboard, iOS StickyPanel,
 // relay agents) held together by string prefixes. Bump this on ANY change to
@@ -89,4 +89,17 @@
 //        4-gray" on the reTerminal, unchanged).
 //      + `ota` on a board no channel carries replies "OTA refused: no channel
 //        carries images for this board" and stages nothing.
-#define TINY_GRAMMAR_VERSION 13  // v13: board + absent in status
+// v14 = on-device pairing code (0.31.0, onboarding Phase B):
+//      + the unprovisioned board enrols itself: POST /api/devices/pair/start
+//        {name, platform:"esp32s3", kind:"daemon", capabilities[] +
+//        "body:sticky-the-reterminal", secretHash} -> {code, ttl_s}; polls
+//        /pair/poll {code, secret} every 3 s; approved -> merge + reboot.
+//      + status reply gains, while a code is live, pair_code, pair_url,
+//        pair_expires_s, and pair:"asking|waiting|denied|error|approved"
+//        while the pairing task runs. Portal GET /info gains pair_code +
+//        pair_url. The secret is never exposed.
+//      + ob-pair card shape: code (3+3) as the part title + QR of pair_url;
+//        denied/error variants. ob: namespace gains ob:pair (new code now)
+//        and ob:portal (the Phase A paste page, kept as the fallback);
+//        `page onboard portal` previews it.
+#define TINY_GRAMMAR_VERSION 14  // v14: pair_code in status + /info

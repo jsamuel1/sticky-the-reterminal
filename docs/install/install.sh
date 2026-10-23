@@ -10,7 +10,7 @@
 #      (macOS /dev/cu.usbmodem*, Linux /dev/ttyACM*)
 #      0 or >1 candidates → it prints the list and stops. It never guesses.
 #   4. flashes at 460800, falls back to 115200
-#   5. tells you the three next steps (join tiny-XXXX · open 192.168.4.1 · paste your token)
+#   5. tells you the three next steps (join tiny-XXXX · open 192.168.4.1 · approve the pairing code)
 #
 # Knobs:
 #   STICKY_PORT=/dev/cu.usbmodemXXXX   skip auto-detect, use this port
@@ -136,8 +136,8 @@ cat <<EOF
   Sticky is rebooting with $VER. Give it a brain — three steps:
 
   1. Join the Wi-Fi it opens:   tiny-XXXX   (key: tinysetup)
-  2. Open                        http://192.168.4.1
-  3. Paste a device token from   https://tiny.technology → Devices → Add
+  2. Open                        http://192.168.4.1   and pick your Wi-Fi
+  3. Approve the pairing code it shows at  https://tiny.technology/devices
 
   Manual: ${BASE%/install}/start/quickstart/
 EOF
