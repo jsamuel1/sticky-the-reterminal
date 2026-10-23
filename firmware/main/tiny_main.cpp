@@ -168,7 +168,9 @@ extern "C" void app_main(void)
 
     // M11: the UI follows the body. Started AFTER the shell so its first commit
     // has a cached card to turn, and after the IMU so the first sample is real.
-    ESP_LOGI(TAG, "auto-rotate: %s", esp_err_to_name(tiny_orient_start()));
+    ESP_LOGI(TAG, "auto-rotate: %s",
+             esp_err_to_name(tiny_board_caps()->imu ? tiny_orient_start()
+                                                    : ESP_ERR_NOT_SUPPORTED));
 
     // MicroSD (gallery + photo library). AFTER first paint so the 100ms power
     // sequencing + mount never touch the glance budget; after display init so
