@@ -441,6 +441,10 @@ int main(int argc, char **argv) {
                                              [] { return g_panel_blocked; }),
                       "serialization: first render reached blocked panel");
             }
+            // Baseline is snapshotted only after `held` owns the render lock
+            // and is parked at the panel, so earlier acquisitions (init,
+            // prior cases, held's own) cannot offset it: each ++attempts
+            // below counts exactly one new waiter.
             int attempts;
             {
                 std::lock_guard<std::mutex> lock(g_attempt_mutex);
