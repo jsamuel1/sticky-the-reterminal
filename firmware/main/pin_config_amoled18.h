@@ -5,8 +5,8 @@
 // every pin and polarity here is vendor-code evidence (BSP
 // waveshare/esp32_s3_touch_amoled_1_8 2.0.3 + the Arduino pin_config.h) and
 // must be confirmed on hardware. Driven so far: BOOT button, the shared I2C
-// bus, the TCA9554 expander, the CO5300 panel (lcd_panel_co5300.cpp) and the
-// ES8311 codec.
+// bus, the TCA9554 expander, the CO5300 panel (lcd_panel_co5300.cpp), the
+// ES8311 codec and the CST820 touch (tiny_touch.cpp).
 
 // Buttons: BOOT is OK/AI. The PWR key is an AXP2101 event (not wired yet).
 #define PIN_BTN_OK          0
@@ -39,7 +39,7 @@
 #define PIN_LCD_D2          6
 #define PIN_LCD_D3          7
 
-#define PIN_TOUCH_INT       21
+#define PIN_TOUCH_INT       21   // CST820 INT, active low; logged only (polled)
 
 // Audio: ES8311. DIN = mic into the ESP, DOUT = ESP to the DAC.
 #define PIN_I2S_MCLK        16

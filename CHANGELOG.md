@@ -6,6 +6,23 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware** — AMOLED-1.8 V2: CST820 touch is driven (P3b). Polled every
+  30 ms at 0x15 on the shared I²C bus (SCL 14 / SDA 15, INT 21 logged only),
+  CST816-protocol frame from register 0x01; reset is TCA9554 bit 2, pulsed by
+  a new `board_touch_reset()` that read-modify-writes the expander so the LCD
+  lines never move. Auto-sleep is disabled at init (0xFE); a silent chip gets
+  one reset at init and one recovery reset after ~3 s of failed polls. The
+  FNK0104S FT6336 path and this one now share one polling task: only frame
+  decode, bring-up and the axis map differ, so hit-test, swipe classification,
+  card-generation guard and the §11 lockout are one code path. Calibration
+  `amoled18_touch_axis_map()` is the identity on the 368×448 canvas (BSP
+  2.0.3: no swap/mirror, x-gap is panel-only); unverified on glass, the
+  `CST820 raw=… -> screen=…` log is the evidence. Caps `touch=true`. No verb
+  or reply-shape change, so no grammar bump.
+- **tests** — `touchmap` pins the CST816 parser and the AMOLED calibration and
+  round-trips a button through `Canvas::to_logical` on 368×448 and 448×368 in
+  all four rotations.
+
 - **status buffer cap** — both `tiny_node_status_json` callers (the
   `status` verb and the settings page) declare their PSRAM buffer with one
   `TINY_STATUS_JSON_CAP` (2048) from `tiny/tiny_node.h`. A 1024 B caller made

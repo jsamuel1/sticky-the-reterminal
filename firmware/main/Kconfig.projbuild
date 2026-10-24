@@ -24,8 +24,8 @@ config TINY_BOARD_AMOLED18
     bool "Waveshare ESP32-S3-Touch-AMOLED-1.8 V2 (CO5300, 16 MB flash)"
     help
         Display: CO5300 368x448 QSPI AMOLED (lcd_canvas), after the TCA9554
-        rails/resets come up. ES8311 audio is driven; touch (CST820 at
-        0x15), PMU, RTC, IMU and SD are not driven yet.
+        rails/resets come up. ES8311 audio and CST820 touch (0x15, reset on
+        TCA9554 bit 2) are driven; PMU, RTC, IMU and SD are not driven yet.
 
 endchoice
 

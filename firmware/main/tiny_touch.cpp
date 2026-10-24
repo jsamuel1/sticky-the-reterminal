@@ -29,16 +29,22 @@
 #include "pin_config.h"
 #include "sdkconfig.h"
 #if defined(CONFIG_TINY_BOARD_RETERMINAL)
-// GT911 is the reTerminal's controller. The colour boards (FNK0104S FT6336,
-// AMOLED CST820) get theirs in a later phase; until then they keep the action
-// task and the synthetic tap/swipe path, but sample no finger.
+// GT911 is the reTerminal's controller.
 #define TINY_TOUCH_GT911 1
 #include "gt911.h"
-#elif defined(CONFIG_TINY_BOARD_FNK0104S)
-// FNK0104S: FT6336U single-contact controller on the shared I2C bus that
-// board_generic.cpp owns (ES8311 lives on it too). board_init already pulsed
-// RST; this file only adds a device to that bus.
+#elif defined(CONFIG_TINY_BOARD_FNK0104S) || defined(CONFIG_TINY_BOARD_AMOLED18)
+// Colour boards: one single-contact controller on the shared I2C bus that
+// board_generic.cpp owns (ES8311 lives on it too). FNK0104S = FT6336U, whose
+// RST board_init already pulsed; AMOLED-1.8 V2 = CST820 (CST816 protocol),
+// whose RST is TCA9554 bit 2 and is pulsed again here. This file only adds a
+// device to that bus; the polling task, frame decode and axis map are chosen
+// per board below and everything after a decoded point is shared.
+#define TINY_TOUCH_PANEL 1
+#if defined(CONFIG_TINY_BOARD_FNK0104S)
 #define TINY_TOUCH_FT6336 1
+#else
+#define TINY_TOUCH_CST820 1
+#endif
 #include "board.h"
 #include "canvas.h"
 #include "sticky_display.h"
@@ -84,10 +90,10 @@ constexpr uint16_t kMinTrustedSize = 1;
 int s_touch_streak = 0;
 TickType_t s_init_tick = 0;
 #endif
-#if TINY_TOUCH_FT6336
-i2c_master_dev_handle_t s_ft = nullptr;
-bool s_ft_touching = false;
-TickType_t s_ft_init_tick = 0;
+#if TINY_TOUCH_PANEL
+i2c_master_dev_handle_t s_tp = nullptr;
+bool s_tp_touching = false;
+TickType_t s_tp_init_tick = 0;
 #endif
 // Card generation sampled at finger-DOWN. If a render commits a different card
 // while the finger is still down, the button under it is not the one the human
@@ -526,23 +532,21 @@ void touch_task(void *) {
 }
 #endif  // TINY_TOUCH_GT911
 
-#if TINY_TOUCH_FT6336
-// FT6336U: polled at the same 30 ms as the GT911. G_MODE is set to polling
-// (INT held low while a finger is down); INT is read only for the bench log,
-// so a board whose INT trace misbehaves still samples fingers.
-constexpr uint8_t kFtRegGMode = 0xA4;
-constexpr uint8_t kFtRegChipId = 0xA3;
-constexpr uint8_t kFtRegVendorId = 0xA8;
-constexpr uint8_t kFtRegFirmware = 0xA6;
-constexpr int kFtTimeoutMs = 20;
+#if TINY_TOUCH_PANEL
+// Colour-board controllers: polled at the same 30 ms as the GT911, on the
+// shared bus. INT is read only for the bench log, so a board whose INT trace
+// misbehaves still samples fingers. Per board below: the device address, one
+// frame read + decode (tp_sample), bring-up (tp_init) and the axis map. The
+// task after that is one function for both boards.
+constexpr int kTpTimeoutMs = 20;
 
-esp_err_t ft_read(uint8_t reg, uint8_t *buf, size_t len) {
-    return i2c_master_transmit_receive(s_ft, &reg, 1, buf, len, kFtTimeoutMs);
+esp_err_t tp_read(uint8_t reg, uint8_t *buf, size_t len) {
+    return i2c_master_transmit_receive(s_tp, &reg, 1, buf, len, kTpTimeoutMs);
 }
 
-esp_err_t ft_write(uint8_t reg, uint8_t value) {
+esp_err_t tp_write(uint8_t reg, uint8_t value) {
     const uint8_t b[2] = {reg, value};
-    return i2c_master_transmit(s_ft, b, sizeof b, kFtTimeoutMs);
+    return i2c_master_transmit(s_tp, b, sizeof b, kTpTimeoutMs);
 }
 
 // Physical canvas size: the frame tap hit-regions are published in. Asked on
@@ -553,77 +557,8 @@ void canvas_physical(uint16_t &w, uint16_t &h) {
     h = c ? c->physical_height() : kH;
 }
 
-void ft_to_screen(uint16_t rx, uint16_t ry, uint16_t &sx, uint16_t &sy) {
-    uint16_t cw = 0, ch = 0;
-    canvas_physical(cw, ch);
-    touch_map_point(fnk0104s_touch_axis_map(cw, ch), rx, ry, cw, ch, sx, sy);
-}
-
-void ft6336_task(void *) {
-    TickType_t next = xTaskGetTickCount();
-    int bad_frames = 0;
-    while (true) {
-        uint8_t f[kFt6336FrameLen] = {};
-        Ft6336Point p = {};
-        if (ft_read(kFt6336RegTdStatus, f, sizeof f) == ESP_OK) {
-            p = ft6336_parse(f);
-        } else {
-            p.count = -1;
-        }
-        if (p.count < 0) {
-            // Log the first bus error of a run, not 33 per second.
-            if (bad_frames++ == 0) ESP_LOGW(kTag, "ft6336: read failed / busy frame");
-        } else {
-            bad_frames = 0;
-        }
-        const bool in_grace = (xTaskGetTickCount() - s_ft_init_tick) <
-                              pdMS_TO_TICKS(kBootGraceMs);
-        // §11 pocket lockout: same single gate as the GT911 task.
-        if (tiny_lock_is_locked()) {
-            if (p.count > 0 && !s_ft_touching)
-                ESP_LOGW(kTag, "locked: touch point discarded (§11)");
-            s_ft_touching = false;
-            vTaskDelayUntil(&next, kPoll);
-            continue;
-        }
-        if (p.count > 0) {
-            uint16_t sx = 0, sy = 0;
-            ft_to_screen(p.x, p.y, sx, sy);
-            if (!s_ft_touching) {
-                // Raw point on the down transition: the calibration evidence.
-                printf("FT6336 raw=%u,%u ev=%u id=%u w=%u n=%d int=%d -> "
-                       "screen=%u,%u%s\n",
-                       p.x, p.y, p.event, p.id, p.weight, p.count,
-                       gpio_get_level(static_cast<gpio_num_t>(PIN_TOUCH_INT)),
-                       sx, sy, in_grace ? " (boot grace)" : "");
-            }
-            if (in_grace) {
-                s_ft_touching = false;
-            } else {
-                s_last_x = sx;
-                s_last_y = sy;
-                if (!s_ft_touching) {
-                    s_start_x = sx;
-                    s_start_y = sy;
-                    s_gen_at_down = tiny_display_card_gen();
-                    tiny_lock_note_activity();
-                }
-                s_ft_touching = true;
-            }
-        } else if (p.count == 0) {
-            if (s_ft_touching) on_tap_up();
-            s_ft_touching = false;
-        } else if (bad_frames > 3) {
-            // A finger "held" across a dead bus is not a tap: drop it.
-            s_ft_touching = false;
-        }
-        if ((xTaskGetTickCount() - next) > pdMS_TO_TICKS(300))
-            next = xTaskGetTickCount();
-        vTaskDelayUntil(&next, kPoll);
-    }
-}
-
-esp_err_t ft6336_init() {
+// Adds the controller to the shared bus and configures INT as an input.
+esp_err_t tp_attach(uint8_t addr) {
     i2c_master_bus_handle_t bus = board_sensor_i2c_bus();
     if (!bus) return ESP_ERR_INVALID_STATE;
     gpio_config_t in = {};
@@ -631,43 +566,212 @@ esp_err_t ft6336_init() {
     in.mode = GPIO_MODE_INPUT;
     in.pull_up_en = GPIO_PULLUP_ENABLE;
     ESP_RETURN_ON_ERROR(gpio_config(&in), kTag, "int gpio");
-
     i2c_device_config_t dc = {};
     dc.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-    dc.device_address = FT6336_I2C_ADDR;
+    dc.device_address = addr;
     dc.scl_speed_hz = 400000;
-    ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(bus, &dc, &s_ft), kTag,
-                        "ft6336 add");
+    return i2c_master_bus_add_device(bus, &dc, &s_tp);
+}
+
+void tp_detach() {
+    if (s_tp) i2c_master_bus_rm_device(s_tp);
+    s_tp = nullptr;
+}
+
+#if TINY_TOUCH_FT6336
+// FT6336U. G_MODE is set to polling (INT held low while a finger is down).
+constexpr char kTpName[] = "FT6336";
+constexpr uint8_t kFtRegGMode = 0xA4;
+constexpr uint8_t kFtRegChipId = 0xA3;
+constexpr uint8_t kFtRegVendorId = 0xA8;
+constexpr uint8_t kFtRegFirmware = 0xA6;
+
+TouchAxisMap tp_axis_map(uint16_t cw, uint16_t ch) {
+    return fnk0104s_touch_axis_map(cw, ch);
+}
+
+esp_err_t tp_sample(TouchPoint &p) {
+    uint8_t f[kFt6336FrameLen] = {};
+    const esp_err_t r = tp_read(kFt6336RegTdStatus, f, sizeof f);
+    if (r == ESP_OK) p = ft6336_parse(f);
+    return r;
+}
+
+// No recovery reset on this board: RST is a plain GPIO that board_init owns.
+void tp_recover() {}
+
+esp_err_t tp_init() {
+    ESP_RETURN_ON_ERROR(tp_attach(FT6336_I2C_ADDR), kTag, "ft6336 add");
     uint8_t chip = 0, vendor = 0, fw = 0;
-    const esp_err_t r = ft_read(kFtRegChipId, &chip, 1);
+    const esp_err_t r = tp_read(kFtRegChipId, &chip, 1);
     if (r != ESP_OK) {
         ESP_LOGE(kTag, "FT6336 not answering at 0x%02X: %s", FT6336_I2C_ADDR,
                  esp_err_to_name(r));
-        i2c_master_bus_rm_device(s_ft);
-        s_ft = nullptr;
+        tp_detach();
         return r;
     }
-    ft_read(kFtRegVendorId, &vendor, 1);
-    ft_read(kFtRegFirmware, &fw, 1);
-    const esp_err_t gm = ft_write(kFtRegGMode, 0x00);  // polling: INT low while touched
+    tp_read(kFtRegVendorId, &vendor, 1);
+    tp_read(kFtRegFirmware, &fw, 1);
+    const esp_err_t gm = tp_write(kFtRegGMode, 0x00);  // polling: INT low while touched
     uint16_t cw = 0, ch = 0;
     canvas_physical(cw, ch);
-    const TouchAxisMap m = fnk0104s_touch_axis_map(cw, ch);
+    const TouchAxisMap m = tp_axis_map(cw, ch);
     ESP_LOGI(kTag,
              "FT6336 ready: chip=0x%02X vendor=0x%02X fw=0x%02X g_mode=%s; "
              "sensor %ux%u -> canvas %ux%u (mirror_x=%d mirror_y=%d swap=%d)",
              chip, vendor, fw, esp_err_to_name(gm), m.sensor_w, m.sensor_h, cw,
              ch, m.mirror_x, m.mirror_y, m.swap_xy);
-    s_ft_init_tick = xTaskGetTickCount();
     return ESP_OK;
 }
-#endif  // TINY_TOUCH_FT6336
+#elif TINY_TOUCH_CST820
+// CST820 (CST816 protocol), AMOLED-1.8 V2. RST is TCA9554 bit 2
+// (board_touch_reset). The chip auto-sleeps after a few idle seconds and then
+// NACKs every poll until a finger wakes it, so DisAutoSleep is written at
+// init and again after any recovery reset.
+constexpr char kTpName[] = "CST820";
+
+TouchAxisMap tp_axis_map(uint16_t cw, uint16_t ch) {
+    return amoled18_touch_axis_map(cw, ch);
+}
+
+esp_err_t tp_sample(TouchPoint &p) {
+    uint8_t f[kCst816FrameLen] = {};
+    const esp_err_t r = tp_read(kCst816RegGesture, f, sizeof f);
+    if (r == ESP_OK) p = cst816_parse(f);
+    return r;
+}
+
+esp_err_t cst_keep_awake() { return tp_write(kCst816RegDisAutoSleep, 0x01); }
+
+// Reset pulse + keep-awake. Used when the chip stops answering (asleep before
+// keep-awake landed, or wedged).
+void tp_recover() {
+    const esp_err_t r = board_touch_reset();
+    const esp_err_t a = r == ESP_OK ? cst_keep_awake() : r;
+    ESP_LOGW(kTag, "CST820 recovery: reset %s, keep-awake %s",
+             esp_err_to_name(r), esp_err_to_name(a));
+}
+
+esp_err_t tp_init() {
+    ESP_RETURN_ON_ERROR(tp_attach(CST820_I2C_ADDR), kTag, "cst820 add");
+    // board_init released the reset long ago; the chip may have gone to sleep
+    // since (display bring-up + splash). One reset pulse wakes it.
+    uint8_t chip = 0;
+    esp_err_t r = tp_read(kCst816RegChipId, &chip, 1);
+    if (r != ESP_OK) {
+        ESP_LOGI(kTag, "CST820 silent at 0x%02X (%s): pulsing TCA9554 reset",
+                 CST820_I2C_ADDR, esp_err_to_name(r));
+        board_touch_reset();
+        r = tp_read(kCst816RegChipId, &chip, 1);
+    }
+    if (r != ESP_OK) {
+        ESP_LOGE(kTag, "CST820 not answering at 0x%02X: %s", CST820_I2C_ADDR,
+                 esp_err_to_name(r));
+        tp_detach();
+        return r;
+    }
+    uint8_t fw = 0;
+    tp_read(kCst816RegFwVersion, &fw, 1);
+    const esp_err_t ka = cst_keep_awake();
+    uint16_t cw = 0, ch = 0;
+    canvas_physical(cw, ch);
+    const TouchAxisMap m = tp_axis_map(cw, ch);
+    ESP_LOGI(kTag,
+             "CST820 ready: chip=0x%02X fw=0x%02X keep_awake=%s; "
+             "sensor %ux%u -> canvas %ux%u (mirror_x=%d mirror_y=%d swap=%d)",
+             chip, fw, esp_err_to_name(ka), m.sensor_w, m.sensor_h, cw, ch,
+             m.mirror_x, m.mirror_y, m.swap_xy);
+    return ESP_OK;
+}
+#endif
+
+void tp_to_screen(uint16_t rx, uint16_t ry, uint16_t &sx, uint16_t &sy) {
+    uint16_t cw = 0, ch = 0;
+    canvas_physical(cw, ch);
+    touch_map_point(tp_axis_map(cw, ch), rx, ry, cw, ch, sx, sy);
+}
+
+// ~3 s of consecutive failed polls: one recovery attempt per failure run.
+constexpr int kRecoverAfterBadFrames = 100;
+
+void panel_touch_task(void *) {
+    TickType_t next = xTaskGetTickCount();
+    int bad_frames = 0;
+    uint8_t gesture = 0;  // controller's own gesture code, bench log only
+    while (true) {
+        TouchPoint p = {};
+        if (tp_sample(p) != ESP_OK) p.count = -1;
+        if (p.count < 0) {
+            // Log the first bus error of a run, not 33 per second.
+            if (bad_frames++ == 0)
+                ESP_LOGW(kTag, "%s: read failed / busy frame", kTpName);
+            if (bad_frames == kRecoverAfterBadFrames) tp_recover();
+        } else {
+            bad_frames = 0;
+        }
+        const bool in_grace = (xTaskGetTickCount() - s_tp_init_tick) <
+                              pdMS_TO_TICKS(kBootGraceMs);
+        // §11 pocket lockout: same single gate as the GT911 task.
+        if (tiny_lock_is_locked()) {
+            if (p.count > 0 && !s_tp_touching)
+                ESP_LOGW(kTag, "locked: touch point discarded (§11)");
+            s_tp_touching = false;
+            vTaskDelayUntil(&next, kPoll);
+            continue;
+        }
+        if (p.count >= 0 && p.gesture) gesture = p.gesture;
+        if (p.count > 0) {
+            uint16_t sx = 0, sy = 0;
+            tp_to_screen(p.x, p.y, sx, sy);
+            if (!s_tp_touching) {
+                // Raw point on the down transition: the calibration evidence.
+                printf("%s raw=%u,%u ev=%u id=%u w=%u n=%d int=%d -> "
+                       "screen=%u,%u%s\n",
+                       kTpName, p.x, p.y, p.event, p.id, p.weight, p.count,
+                       gpio_get_level(static_cast<gpio_num_t>(PIN_TOUCH_INT)),
+                       sx, sy, in_grace ? " (boot grace)" : "");
+                gesture = p.gesture;
+            }
+            if (in_grace) {
+                s_tp_touching = false;
+            } else {
+                s_last_x = sx;
+                s_last_y = sy;
+                if (!s_tp_touching) {
+                    s_start_x = sx;
+                    s_start_y = sy;
+                    s_gen_at_down = tiny_display_card_gen();
+                    tiny_lock_note_activity();
+                }
+                s_tp_touching = true;
+            }
+        } else if (p.count == 0) {
+            if (s_tp_touching) {
+                // The controller's gesture verdict beside ours: swipe
+                // calibration evidence (0 on the FT6336, which has none).
+                if (gesture)
+                    printf("%s up at=%u,%u gesture=0x%02X\n", kTpName, s_last_x,
+                           s_last_y, gesture);
+                on_tap_up();
+            }
+            s_tp_touching = false;
+            gesture = 0;
+        } else if (bad_frames > 3) {
+            // A finger "held" across a dead bus is not a tap: drop it.
+            s_tp_touching = false;
+        }
+        if ((xTaskGetTickCount() - next) > pdMS_TO_TICKS(300))
+            next = xTaskGetTickCount();
+        vTaskDelayUntil(&next, kPoll);
+    }
+}
+#endif  // TINY_TOUCH_PANEL
 
 // Physical canvas bounds for the synthetic verbs. 800x480 on the reTerminal
 // (and before the display is up); the colour boards follow their canvas, so a
 // panel-sized canvas does not leave the verbs checking a frame that is gone.
 void inject_bounds(int &w, int &h) {
-#if TINY_TOUCH_FT6336
+#if TINY_TOUCH_PANEL
     uint16_t cw = 0, ch = 0;
     canvas_physical(cw, ch);
     w = cw;
@@ -751,10 +855,11 @@ extern "C" esp_err_t tiny_touch_init(void) {
              s_ctl.address());
     s_init_tick = xTaskGetTickCount();
 #endif  // TINY_TOUCH_GT911
-#if TINY_TOUCH_FT6336
+#if TINY_TOUCH_PANEL
     // A dead controller still leaves the synthetic verbs working: build the
     // act task first, report the failure after.
-    const esp_err_t ft = ft6336_init();
+    const esp_err_t tp = tp_init();
+    s_tp_init_tick = xTaskGetTickCount();
 #endif
 
     // Depth 1: one pending action. A second tap while an ask is running is
@@ -775,10 +880,10 @@ extern "C" esp_err_t tiny_touch_init(void) {
                    pdPASS
                ? ESP_OK
                : ESP_ERR_NO_MEM;
-#elif TINY_TOUCH_FT6336
-    if (ft != ESP_OK) return ft;
-    return xTaskCreate(ft6336_task, "tiny_touch", 4096, nullptr, 6, &s_task) ==
-                   pdPASS
+#elif TINY_TOUCH_PANEL
+    if (tp != ESP_OK) return tp;
+    return xTaskCreate(panel_touch_task, "tiny_touch", 4096, nullptr, 6,
+                       &s_task) == pdPASS
                ? ESP_OK
                : ESP_ERR_NO_MEM;
 #else

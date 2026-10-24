@@ -57,10 +57,12 @@ static bool sensor_for_physical(const TouchAxisMap &m, uint16_t cw, uint16_t ch,
     return best <= 2;
 }
 
-static void map_cases(uint16_t cw, uint16_t ch, const char *label) {
+static void map_cases(uint16_t cw, uint16_t ch, const char *label,
+                      TouchAxisMap (*map_for)(uint16_t, uint16_t) =
+                          fnk0104s_touch_axis_map) {
     static uint8_t buf[800 / 4 * 480];
     Canvas c(cw, ch, buf, sizeof buf);
-    const TouchAxisMap m = fnk0104s_touch_axis_map(cw, ch);
+    const TouchAxisMap m = map_for(cw, ch);
     char name[160];
 
     // Corners -> corners, and every sensor point lands on the canvas.
@@ -117,8 +119,39 @@ static void map_cases(uint16_t cw, uint16_t ch, const char *label) {
     }
 }
 
+static void cst816_parse_cases() {
+    {   // gesture none, one finger, contact, x=0x16F (367) y=0x1BF (447)
+        const uint8_t f[6] = {0x00, 0x01, 0x81, 0x6F, 0x01, 0xBF};
+        const TouchPoint p = cst816_parse(f);
+        CHECK("cst816: count 1", p.count == 1);
+        CHECK("cst816: x 12-bit", p.x == 367);
+        CHECK("cst816: y 12-bit", p.y == 447);
+        CHECK("cst816: event contact", p.event == 2);
+    }
+    {   // down event, upper nibble of YposH is not part of Y
+        const uint8_t f[6] = {0x00, 0x01, 0x00, 0x10, 0xF0, 0x20};
+        const TouchPoint p = cst816_parse(f);
+        CHECK("cst816: down event is a finger", p.count == 1 && p.event == 0);
+        CHECK("cst816: YposH high nibble masked", p.y == 0x20 && p.x == 0x10);
+    }
+    {   const uint8_t f[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        CHECK("cst816: no finger", cst816_parse(f).count == 0);
+    }
+    {   // FingerNum still 1, event lift-up, gesture swipe-left: not a finger,
+        // gesture code carried for the bench log
+        const uint8_t f[6] = {0x03, 0x01, 0x40, 0x20, 0x00, 0x40};
+        const TouchPoint p = cst816_parse(f);
+        CHECK("cst816: lift event is not a finger", p.count == 0);
+        CHECK("cst816: gesture code kept", p.gesture == 0x03);
+    }
+    {   const uint8_t f[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        CHECK("cst816: 0xFF frame is garbage", cst816_parse(f).count == -1);
+    }
+}
+
 int main() {
     parse_cases();
+    cst816_parse_cases();
     // Pin today's (pre-glass) calibration: recalibrating is a deliberate edit
     // here AND in fnk0104s_touch_axis_map, never a silent drift.
     {
@@ -135,6 +168,20 @@ int main() {
     map_cases(320, 480, "portrait 320x480");
     map_cases(480, 320, "landscape 480x320");
     map_cases(800, 480, "headless 800x480");
+    // AMOLED-1.8 V2: pin the (pre-glass) CST820 calibration, then the same
+    // button round-trip on its panel-sized 368x448 canvas in all rotations.
+    {
+        uint16_t px, py;
+        touch_map_point(amoled18_touch_axis_map(368, 448), 0, 0, 368, 448, px, py);
+        CHECK("amoled calib: sensor origin -> physical top-left", px == 0 && py == 0);
+        touch_map_point(amoled18_touch_axis_map(368, 448), 367, 447, 368, 448, px, py);
+        CHECK("amoled calib: sensor far corner -> physical bottom-right",
+              px == 367 && py == 447);
+        touch_map_point(amoled18_touch_axis_map(368, 448), 200, 100, 368, 448, px, py);
+        CHECK("amoled calib: identity on the panel canvas", px == 200 && py == 100);
+    }
+    map_cases(368, 448, "amoled 368x448", amoled18_touch_axis_map);
+    map_cases(448, 368, "amoled landscape 448x368", amoled18_touch_axis_map);
     if (fails) { printf("touchmap: %d FAILED\n", fails); return 1; }
     return 0;
 }

@@ -62,7 +62,8 @@ constexpr tiny_board_caps_t kCaps = {
 };
 #elif defined(CONFIG_TINY_BOARD_AMOLED18)
 // Phase 2b: CO5300 AMOLED (lcd_canvas) and ES8311 audio code are built;
-// CST820 touch, AXP2101, PCF85063A, QMI8658 and SD land in later phases.
+// P3b: CST820 touch (tiny_touch.cpp). AXP2101, PCF85063A, QMI8658 and SD land
+// in later phases.
 // mic/buzzer/speaker stay false until a board proves them.
 constexpr tiny_board_caps_t kCaps = {
     .id = "amoled18",
@@ -73,7 +74,7 @@ constexpr tiny_board_caps_t kCaps = {
     .panel = true,
     .color = true,       // CO5300 behind lcd_canvas: accent plane + palette
     .dark_theme = true,  // AMOLED: light-on-black, no static white
-    .touch = false,
+    .touch = true,       // CST820 via TCA9554 reset, tiny_touch.cpp (P3b)
     .mic = false,
     .buzzer = false,
     .speaker = false,
