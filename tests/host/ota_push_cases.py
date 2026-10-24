@@ -7,6 +7,8 @@
    would pass them.
 2. A configured bench board that is offline fails the push (exit != 0): only
    a missing secret or map entry may skip, and that is the workflow's job.
+3. --board-override still sends when the device already reports --sha: this
+   mode proves the firmware board guard, not whether an update is needed.
 """
 import importlib.util
 import os
@@ -55,7 +57,7 @@ for needle in ("nothing staged", "OTA staged"):
     check(f"replies containing {needle!r} covered", n_tab >= n_src, True)
 
 
-# --- offline configured board ----------------------------------------------
+# --- offline configured board + same-commit override ------------------------
 class OfflineApi:
     def __init__(self, token):
         pass
@@ -65,6 +67,28 @@ class OfflineApi:
 
     def status(self, *a, **k):
         raise AssertionError("must not relay to an offline board")
+
+
+class OverrideApi:
+    sent = False
+
+    def __init__(self, token):
+        pass
+
+    def resolve(self, dev):
+        return {"id": "4e6ed293-0000", "name": "tiny-eba6", "online": True}
+
+    def status(self, *a, **k):
+        return {"board": "fnk0104s", "fw_commit": self.sha, "grammar_version": 19,
+                "absent": []}
+
+    def upload(self, data):
+        return "https://plugin.tiny.technology/media/foreign.bin"
+
+    def invoke(self, dev_id, prompt, wait_s=180):
+        type(self).sent = True
+        return "OTA refused: board guard - image is not stamped for this board " \
+               "(see log) - nothing staged, slot untouched"
 
 
 def run_main(argv):
@@ -98,6 +122,18 @@ with tempfile.TemporaryDirectory() as td:
     code = run_main(["--board", "fnk0104s", "--sha", sha, "--image", os.path.join(td, "own.bin"),
                      "--device", "4e6ed293-0000"])
     check("offline configured board exits non-zero", bool(code), True)
+
+    # A same-commit short-circuit is correct for ordinary updates, but would
+    # make the deliberate foreign-image probe a false pass. The override must
+    # upload, invoke OTA, observe the board guard, then prove the commit stayed.
+    OverrideApi.sha = sha
+    OverrideApi.sent = False
+    op.Api = OverrideApi
+    code = run_main(["--board", "fnk0104s", "--sha", sha,
+                     "--image", os.path.join(td, "foreign.bin"),
+                     "--device", "4e6ed293-0000", "--board-override"])
+    check("same-commit override exits success after guard", code, 0)
+    check("same-commit override sends OTA probe", OverrideApi.sent, True)
 
 if fails:
     print(f"ota_push cases: {fails} failed")

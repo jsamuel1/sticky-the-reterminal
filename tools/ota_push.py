@@ -290,7 +290,7 @@ def main():
         return 0
     before = str(s0.get("fw_commit", ""))
     step(f"on glass: fw {s0.get('fw')} fw_commit {before} grammar {s0.get('grammar_version')}")
-    if same_commit(before, sha) and not before.endswith("-dirty"):
+    if not a.board_override and same_commit(before, sha) and not before.endswith("-dirty"):
         step(f"already on {short(sha)} - nothing to do")
         return 0
     if not a.board_override:

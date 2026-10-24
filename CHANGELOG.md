@@ -93,9 +93,11 @@ release, newest first.
   `tools/ota_push.py` counts only
   `OTA staged` as success (`... - nothing staged` used to pass), and a
   configured bench board that is offline now fails the job instead of
-  skipping. Each CI `build` job asserts its app's board stamp
+  skipping. `--board-override` also bypasses the same-commit shortcut, so its
+  deliberate foreign-image probe always reaches the firmware board guard.
+  Each CI `build` job asserts its app's board stamp
   (`--inspect`: ok, own board, `tiny_sticky`). `tests/host/ota_push_cases.py`
-  covers the reply classes and the offline exit.
+  covers the reply classes, offline exit, and same-commit override probe.
 
 - **firmware, grammar v18** — card layouts fit the small colour panels.
   A panel whose short side is under 480 px (FNK0104S 320×480, AMOLED-1.8
