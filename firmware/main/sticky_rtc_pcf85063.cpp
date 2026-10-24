@@ -28,6 +28,7 @@ i2c_master_dev_handle_t s_dev = nullptr;
 
 esp_err_t rd(uint8_t reg, uint8_t *buf, size_t n)
 {
+    if (!s_dev) return ESP_ERR_INVALID_STATE;
     return i2c_master_transmit_receive(s_dev, &reg, 1, buf, n, kTimeoutMs);
 }
 

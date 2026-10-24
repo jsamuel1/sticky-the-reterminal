@@ -236,7 +236,10 @@ esp_err_t sticky_pmu_take_key(PmuKey &key)
     const uint8_t mine = sts & (axp2101::kIrq2PkeyShort | axp2101::kIrq2PkeyLong);
     if (!mine) return ESP_OK;
     // Write-1-to-clear, only our bits: the VBUS/battery bits stay latched.
+    // Report the press only once it is cleared: a failed clear leaves the
+    // bit latched, so the next poll reports it then - once, not every poll.
     e = wr(axp2101::kRegIntSts1 + 1, mine);
+    if (e != ESP_OK) return e;
     switch (axp2101::key_event(sts)) {
         case axp2101::KeyEvent::Long: key = PmuKey::Long; break;
         case axp2101::KeyEvent::Short: key = PmuKey::Short; break;
