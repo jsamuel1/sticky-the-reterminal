@@ -379,7 +379,7 @@ static void draw_round_rect(Canvas &c, int x, int y, int w, int h, int r,
 // is always drawn and so costs no extra refresh. Each part earns its place or
 // is omitted: time only when actually synced (and suffixed Z — it is UTC until
 // cagatay answers the timezone question, and an unlabeled wrong-zone clock is
-// a lie), battery only when the gauge answers, wifi as w+/w- (w- matters MORE
+// a lie), battery only when its active source answers, wifi as w+/w- (w- matters MORE
 // than w+ on a pocket device: it says "answers may be stale").
 static int draw_glance_cluster(Canvas &c, int y) {
     char cluster[56] = "";

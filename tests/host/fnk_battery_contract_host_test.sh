@@ -3,16 +3,18 @@
 # grammar and the GPIO 9 ADC implementation.
 set -euo pipefail
 cd "$(dirname "$0")"
-python3 - ../../firmware/main/tiny/tiny_version.h ../../firmware/main/Kconfig.projbuild ../../AGENTS.md ../../firmware/main/tiny/tiny_sensors.h <<'PY'
+python3 - ../../firmware/main/tiny/tiny_version.h ../../firmware/main/Kconfig.projbuild ../../AGENTS.md ../../firmware/main/tiny/tiny_sensors.h ../../firmware/main/tiny_display.cpp ../../firmware/main/tiny_main.cpp <<'PY'
 import pathlib
 import re
 import sys
 
-version_h, kconfig_p, agents_p, sensors_h_p = map(pathlib.Path, sys.argv[1:])
+version_h, kconfig_p, agents_p, sensors_h_p, display_p, main_p = map(pathlib.Path, sys.argv[1:])
 version_text = version_h.read_text()
 kconfig = kconfig_p.read_text()
 agents = agents_p.read_text()
 sensors_h = sensors_h_p.read_text()
+display = display_p.read_text()
+main = main_p.read_text()
 
 version_match = re.search(r"^#define\s+TINY_GRAMMAR_VERSION\s+(\d+)\b", version_text, re.M)
 if not version_match:
@@ -59,5 +61,17 @@ for required in ("BQ27220 gauge", "GPIO 9 ADC divider", "shares one judged", "1 
 if "never a stale cache" in sensors_h:
     sys.exit("FAIL tiny_sensors.h still denies intentional ADC cache")
 print("PASS tiny_sensors.h states fresh-vs-cached contract")
+
+if "battery only when its active source answers" not in display:
+    sys.exit("FAIL tiny_display.cpp still describes battery as gauge-only")
+print("PASS title-bar contract permits gauge or ADC source")
+
+for required in ("battery source (BQ27220 gauge or", "FNK GPIO 9 ADC)",
+                 "local reads — I2C or ADC"):
+    if required not in main:
+        sys.exit(f"FAIL tiny_main.cpp boot contract missing {required!r}")
+if "Both are\n    // millisecond I2C reads" in main:
+    sys.exit("FAIL tiny_main.cpp still calls both boot reads I2C")
+print("PASS boot contract names board-specific battery transport")
 PY
 echo "FNK battery contract host test: ALL GREEN"
