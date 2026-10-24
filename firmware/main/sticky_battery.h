@@ -32,6 +32,15 @@ struct BatteryDetail {
     bool full = false;
     bool present = false;
     uint16_t status_bits = 0;
+    // Where the numbers came from. "bq27220" = the gauge above (every field
+    // is real). "adc" = a divider on a gauge-less board (FNK0104S): only
+    // percent (a resting-voltage estimate) and voltage_mv are real; every
+    // other field is zero and MUST NOT be reported.
+    const char *source = "bq27220";
+    // false = the hardware cannot tell charging from discharging (a divider
+    // sees a voltage, not a current). Consumers report charging as null and
+    // must not treat the pack as discharging.
+    bool charging_known = true;
 };
 
 // Attaches the BQ27220 fuel gauge to the shared sensor I2C bus.
@@ -43,9 +52,13 @@ esp_err_t sticky_battery_read(BatteryReading &reading);
 // Reads the full gauge register set (voltage, current, health, status flags).
 esp_err_t sticky_battery_read_detail(BatteryDetail &detail);
 
-// Pack voltage alone, for boards that can measure it but have no fuel gauge
-// (FNK0104S: ADC on GPIO 9 behind a 2:1 divider). A voltage is NOT a state of
-// charge: those boards answer ESP_ERR_NOT_SUPPORTED from the two readers
-// above, so every percentage stays null. The reTerminal answers from the
-// BQ27220; boards that measure nothing answer ESP_ERR_NOT_SUPPORTED.
+// Pack voltage alone. The reTerminal answers from the BQ27220; the FNK0104S
+// from its GPIO 9 divider (always the measured value, even when it is not a
+// plausible cell voltage - a voltage is a measurement, not a claim). Boards
+// that measure nothing answer ESP_ERR_NOT_SUPPORTED.
+//
+// On a divider board the two readers above answer a percent ESTIMATED from
+// the resting-voltage curve (tiny_batt_curve.h), with BatteryDetail::source
+// "adc" and charging_known false. They answer ESP_ERR_INVALID_RESPONSE when
+// the reading is not a plausible single cell (USB with no cell fitted).
 esp_err_t sticky_battery_read_voltage(int &millivolts);

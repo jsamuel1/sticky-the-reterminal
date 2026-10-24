@@ -29,14 +29,15 @@ extern "C" {
 // low); above 4350 mV is no cell chemistry this board charges.
 #define TINY_BATT_MIN_PLAUSIBLE_MV 3000
 #define TINY_BATT_MAX_PLAUSIBLE_MV 4350
-// Max spread (max - min, in PACK millivolts) across one burst of samples.
-// A cell is a big capacitor: within ~2 ms its voltage does not move 150 mV.
-// A charger output with no cell behind it does.
+// Max spread (interquartile range of the burst, in PACK millivolts; max - min
+// below 4 samples). A cell is a big capacitor: within ~2 ms its voltage does
+// not move 150 mV. A charger output with no cell behind it does. The IQR
+// tolerates a lone ADC spike, which the median already discards.
 #define TINY_BATT_MAX_SPREAD_MV 150
 
 typedef struct {
     int pack_mv;     // median pin mV x divider; -1 if no samples
-    int spread_mv;   // (max - min) pin mV x divider across the burst
+    int spread_mv;   // IQR (n>=4) or max-min of pin mV, x divider
     int percent;     // 0..100, or -1 = implausible / unknown (report null)
     bool plausible;  // pack_mv inside the window AND spread small
 } tiny_batt_estimate_t;

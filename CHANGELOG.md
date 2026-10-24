@@ -14,6 +14,21 @@ release, newest first.
   fails on any caller not sized by the constant, or a cap under 1536 B. Reply
   shape unchanged, so the grammar is unchanged.
 
+- **firmware, grammar v20** — FNK0104S battery percent from the GPIO 9
+  divider. `sticky_battery_adc.cpp` now implements the whole battery API:
+  a 15-sample burst goes to `tiny_batt_curve` (median, ×2 after the median,
+  LiPo resting-voltage curve). No percent when the reading is outside
+  3.0–4.35 V or the burst's interquartile spread exceeds 150 mV, so `status`
+  `battery_pct` is null there and `battery_mv` still reports the measurement.
+  `charging` is null (a divider sees no current); auto-sleep treats "cannot
+  tell" as wall power. `caps.battery_gauge` is on and `absent` drops
+  `battery`, so the title-bar battery glyph and status card read real data.
+  `sensors` battery gains `source` (`bq27220`|`adc`); an `adc` object carries
+  only percent, voltage_mv, charging:null and present. `glance` battery_pct
+  is null, not 0, with no reading.
+- **tests** — `tests/host/batt_curve_host_test.sh` (33 checks):
+  median, spike tolerance, divider precision, curve, plausibility gates.
+
 - **firmware, grammar v19** — direct-artifact OTA now classifies every
   two-argument form, plus any one-argument value with a scheme (`http://`,
   `ftp://`, …), as direct. Exactly two arguments reach the strict URL/sha

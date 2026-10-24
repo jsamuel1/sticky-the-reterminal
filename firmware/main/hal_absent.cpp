@@ -16,11 +16,11 @@
 #include "sticky_sht40.h"
 
 // ---- battery gauge ----------------------------------------------------------
+#ifndef PIN_BAT_ADC
+// Boards with a pack-voltage divider build sticky_battery_adc.cpp instead.
 esp_err_t sticky_battery_init(i2c_master_bus_handle_t) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_battery_read(BatteryReading &) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_battery_read_detail(BatteryDetail &) { return ESP_ERR_NOT_SUPPORTED; }
-#ifndef PIN_BAT_ADC
-// Boards with a pack-voltage divider build sticky_battery_adc.cpp instead.
 esp_err_t sticky_battery_read_voltage(int &) { return ESP_ERR_NOT_SUPPORTED; }
 #endif
 

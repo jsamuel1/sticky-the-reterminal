@@ -31,8 +31,8 @@ constexpr tiny_board_caps_t kCaps = {
     .flash_mb = 32,
 };
 #elif defined(CONFIG_TINY_BOARD_FNK0104S)
-// ST7796S LCD (lcd_canvas), FT6336U touch and the battery-voltage ADC are
-// driven. ES8311 caps flip after hardware proof; SDMMC lands later.
+// ST7796S LCD (lcd_canvas), FT6336U touch and the GPIO 9 battery ADC are
+// driven; SDMMC lands later.
 // The board has no RTC, IMU, env sensor, fuel gauge or power latch. Mic,
 // buzzer tones and speaker are the ES8311 (P4), proven on the owner's unit:
 // chimes audible, voice ask round-trips through the agent.
@@ -49,7 +49,7 @@ constexpr tiny_board_caps_t kCaps = {
     .mic = true,      // ES8311 ADC, audio_es8311.cpp (P4)
     .buzzer = true,   // sticky_buzzer_* as ES8311 tones (P4)
     .speaker = true,  // ES8311 DAC + SC8002B amp: chimes/RTTTL (P4)
-    .battery_gauge = false,
+    .battery_gauge = true,  // ADC estimate (tiny_batt_curve): no fuel gauge
     .battery_voltage = true,  // ADC GPIO 9, 2:1 divider (sticky_battery_adc.cpp)
     .rtc = false,
     .imu = false,

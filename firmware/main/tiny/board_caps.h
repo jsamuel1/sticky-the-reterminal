@@ -28,7 +28,8 @@ typedef struct {
     bool mic;             // voice capture available
     bool buzzer;          // feedback tones available
     bool speaker;         // PCM playback available
-    bool battery_gauge;   // a real state-of-charge reading exists
+    bool battery_gauge;   // a state-of-charge reading exists (gauge, or an
+                          // ADC voltage estimate: status battery.source)
     bool battery_voltage; // pack voltage measurable (gauge or ADC divider)
     bool rtc;             // battery-backed wall clock
     bool imu;             // accelerometer (orientation + pocket lock)

@@ -157,13 +157,36 @@ extern "C" esp_err_t tiny_sensors_json(char *out, size_t cap) {
     if (sysz[0]) cJSON_AddStringToObject(s, "system_time", sysz);
     else         cJSON_AddNullToObject(s, "system_time");
 
-    // ---- BQ27220: the pack ----
+    // ---- the pack: BQ27220 gauge, or a divider (source "adc") ----
     BatteryDetail bat = {};
     const esp_err_t be = sticky_battery_read_detail(bat);
     const bool have_bat = (be == ESP_OK);
-    if (!have_bat) note_error(errors, "bq27220", be);
-    if (have_bat) {
+    const bool adc = strcmp(bat.source, "adc") == 0;  // set even on failure
+    if (!have_bat && adc && be == ESP_ERR_INVALID_RESPONSE) {
+        // Measured, but not a resting cell (USB with no cell fitted).
+        int mv = -1;
+        sticky_battery_read_voltage(mv);
+        char msg[64];
+        snprintf(msg, sizeof msg, "adc: no plausible cell (%d mV)", mv);
+        cJSON_AddItemToArray(errors, cJSON_CreateString(msg));
+    } else if (!have_bat) {
+        note_error(errors, bat.source, be);
+    }
+    if (have_bat && adc) {
+        // v19: a divider measures a voltage and nothing else. The percent is
+        // a resting-voltage estimate; there is no current, capacity, health,
+        // cycle count or temperature to report, so none is (zeros would be
+        // claims). charging is null: a divider cannot see current.
         cJSON *b = cJSON_CreateObject();
+        cJSON_AddStringToObject(b, "source", "adc");
+        cJSON_AddNumberToObject(b, "percent", bat.percent);
+        cJSON_AddNumberToObject(b, "voltage_mv", bat.voltage_mv);
+        cJSON_AddNullToObject(b, "charging");
+        cJSON_AddBoolToObject(b, "present", bat.present);
+        cJSON_AddItemToObject(s, "battery", b);
+    } else if (have_bat) {
+        cJSON *b = cJSON_CreateObject();
+        cJSON_AddStringToObject(b, "source", "bq27220");  // v19
         cJSON_AddNumberToObject(b, "percent", bat.percent);
         cJSON_AddNumberToObject(b, "voltage_mv", bat.voltage_mv);
         cJSON_AddNumberToObject(b, "current_ma", bat.current_ma);
@@ -223,7 +246,9 @@ extern "C" esp_err_t tiny_sensors_json(char *out, size_t cap) {
                (double)gyro.y_dps, (double)gyro.z_dps);
     if (have_rtc)
         append(" rtc %02d:%02dZ(%s)", now.hour, now.minute, tiny_time_source());
-    if (have_bat)
+    if (have_bat && adc)
+        append(" %d%% %dmV (est.)", bat.percent, bat.voltage_mv);
+    else if (have_bat)
         append(" %d%% %dmV %s", bat.percent, bat.voltage_mv,
                bat.charging ? "charging" : "on battery");
     if (cJSON_GetArraySize(errors) > 0)
@@ -312,16 +337,23 @@ extern "C" esp_err_t tiny_sensors_render_card(void) {
         // value loses its tail silently (health used to fall off the glass).
         // Health and cycles ride in the footer, which has a line to spare.
         char power[64];
-        snprintf(power, sizeof power, "%d%% %d mV %d mA %s", bat.percent,
-                 bat.voltage_mv, bat.current_ma,
-                 bat.charging ? "charging" : "on battery");
+        if (strcmp(bat.source, "adc") == 0)
+            snprintf(power, sizeof power, "%d%% %d mV (est.)", bat.percent,
+                     bat.voltage_mv);
+        else
+            snprintf(power, sizeof power, "%d%% %d mV %d mA %s", bat.percent,
+                     bat.voltage_mv, bat.current_ma,
+                     bat.charging ? "charging" : "on battery");
         cJSON_AddStringToObject(kv, "battery", power);
     } else {
         cJSON_AddStringToObject(kv, "battery", "no reading");
     }
     cJSON_AddItemToObject(c, "rows", kv);
     char foot[96];
-    if (have_bat)
+    if (have_bat && strcmp(bat.source, "adc") == 0)
+        snprintf(foot, sizeof foot,
+                 "battery from GPIO 9 voltage - percent is an estimate");
+    else if (have_bat)
         snprintf(foot, sizeof foot,
                  "read live over I2C1 - pack health %d%%, %d cycles, gauge %.0fC",
                  bat.health_pct, bat.cycle_count, (double)bat.temperature_c);

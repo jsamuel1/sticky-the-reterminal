@@ -57,10 +57,16 @@ extern "C" tiny_batt_estimate_t tiny_batt_estimate(int *pin_mv, size_t n,
 {
     tiny_batt_estimate_t e = {-1, 0, -1, false};
     if (pin_mv == nullptr || n == 0 || divider <= 0) return e;
-    const int med = tiny_batt_median_mv(pin_mv, n);  // sorts: [0]=min [n-1]=max
+    const int med = tiny_batt_median_mv(pin_mv, n);  // sorts ascending
     // Divider undone on the median itself - no integer division in between.
     e.pack_mv = med * divider;
-    e.spread_mv = (pin_mv[n - 1] - pin_mv[0]) * divider;
+    // Spread = interquartile range, so ONE spike (which the median already
+    // ignores) cannot veto the percent either; a charger hunting with no cell
+    // moves the whole burst and still trips it. Below 4 samples there are no
+    // quartiles to speak of: max - min.
+    const size_t lo = n >= 4 ? n / 4 : 0;
+    const size_t hi = n >= 4 ? (3 * n) / 4 : n - 1;
+    e.spread_mv = (pin_mv[hi] - pin_mv[lo]) * divider;
     e.plausible = e.pack_mv >= TINY_BATT_MIN_PLAUSIBLE_MV &&
                   e.pack_mv <= TINY_BATT_MAX_PLAUSIBLE_MV &&
                   e.spread_mv <= TINY_BATT_MAX_SPREAD_MV;

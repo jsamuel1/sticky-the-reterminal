@@ -918,8 +918,9 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     if (have_batt) cJSON_AddNumberToObject(s, "battery_pct", br.percent);
     else           cJSON_AddNullToObject(s, "battery_pct");
     // v18: pack voltage wherever it is measurable — the gauge on the
-    // reTerminal, the GPIO 9 divider on the FNK0104S. A voltage is not a
-    // percentage: battery_pct stays null on a board with no gauge.
+    // reTerminal, the GPIO 9 divider on the FNK0104S. v19: on the FNK,
+    // battery_pct above is the divider's resting-voltage estimate (null when
+    // the reading is not a plausible cell); battery_mv stays the measurement.
     {
         int mv = 0;
         if (have_batt) cJSON_AddNumberToObject(s, "battery_mv", bd.voltage_mv);
@@ -928,9 +929,10 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
         else cJSON_AddNullToObject(s, "battery_mv");
     }
     // charging comes from the BQ27220 DSG status bit; still null (not false)
-    // when the gauge did not answer, because "not charging" is a claim.
-    if (have_batt) cJSON_AddBoolToObject(s, "charging", bd.charging);
-    else           cJSON_AddNullToObject(s, "charging");
+    // when the gauge did not answer, because "not charging" is a claim. A
+    // divider (FNK0104S) cannot see current at all: null there too.
+    if (have_batt && bd.charging_known) cJSON_AddBoolToObject(s, "charging", bd.charging);
+    else                                cJSON_AddNullToObject(s, "charging");
     cJSON_AddBoolToObject(s, "wifi", wifi_up);
     if (have_ap) {
         cJSON_AddNumberToObject(s, "rssi_dbm", ap.rssi);
@@ -1869,11 +1871,15 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         if (g == ESP_OK) {
             char out[192];
             BatteryReading batt = {};
-            sticky_battery_read(batt);
+            // null, not 0, when there is no reading (FNK on USB with no
+            // cell; any board whose gauge did not answer).
+            char pct[8] = "null";
+            if (sticky_battery_read(batt) == ESP_OK)
+                snprintf(pct, sizeof pct, "%d", batt.percent);
             snprintf(out, sizeof out,
-                     "{\"refresh\":\"partial\",\"battery_pct\":%d,"
+                     "{\"refresh\":\"partial\",\"battery_pct\":%s,"
                      "\"wifi\":%s,\"unread\":%d,\"locked\":%s}",
-                     batt.percent, tiny_wifi_is_up() ? "true" : "false",
+                     pct, tiny_wifi_is_up() ? "true" : "false",
                      tiny_node_unread(), tiny_lock_is_locked() ? "true" : "false");
             reply(envelope_id, out);
         } else {
@@ -2775,11 +2781,15 @@ static void node_task(void *) {
         // verb that just arrived always executes before the due-check runs.
         if (autosleep_due() && !s_crumb_inflight && !tiny_stream_playing()) {
             BatteryDetail bd = {};
-            // No fuel gauge (colour boards, phase 1) = no evidence of running
-            // on battery: treat as wall power and stay on the relay.
+            // No evidence of running on battery = wall power: stay on the
+            // relay. That is: no gauge at all; a divider that sees no
+            // plausible cell (INVALID_RESPONSE: USB only); or a divider that
+            // sees a cell but cannot tell charging (charging_known false).
+            const esp_err_t be = sticky_battery_read_detail(bd);
             const bool charging =
                 !tiny_board_caps()->battery_gauge ||
-                (sticky_battery_read_detail(bd) == ESP_OK && bd.charging);
+                be == ESP_ERR_INVALID_RESPONSE ||
+                (be == ESP_OK && (!bd.charging_known || bd.charging));
             tiny_config_t cfg = {};
             const bool enrolled = tiny_config_load(&cfg) == ESP_OK &&
                                   tiny_config_is_provisioned(&cfg);

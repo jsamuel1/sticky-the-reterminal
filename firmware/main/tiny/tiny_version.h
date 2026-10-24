@@ -152,4 +152,14 @@
 //        the direct form. Bare one-argument channel names and bare `ota` keep
 //        the channel behavior. This prevents malformed URLs and channel plus
 //        extra-argument forms from silently discarding argument 2.
-#define TINY_GRAMMAR_VERSION 19  // v19: strict direct-artifact OTA arguments
+// v20 = FNK0104S battery percent from the GPIO 9 divider:
+//      + `sensors` battery object gains source:"bq27220"|"adc". An "adc"
+//        object carries ONLY source, percent (resting-voltage estimate),
+//        voltage_mv, charging:null and present — no current/mAh/health/
+//        cycles/temperature (a divider cannot measure them).
+//      + FNK0104S: caps.battery_gauge true, `absent` drops "battery";
+//        status battery_pct is the estimate (null when the reading is not
+//        a plausible resting cell), charging null. battery_mv is unchanged
+//        (the measurement, plausible or not).
+//      + `glance` reply battery_pct is null (was 0) when there is no reading.
+#define TINY_GRAMMAR_VERSION 20  // v20: sensors battery.source; FNK battery_pct
