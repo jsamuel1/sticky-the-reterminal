@@ -114,7 +114,11 @@ esp_err_t amoled_expander_up()
         step = "direction";
         err = tca_write(dev, kTcaConfig, static_cast<uint8_t>(0xFF & ~kDriven));
     }
-    if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(20));
+    // Either transmit may have reached the expander despite returning an error.
+    // Hold the minimum reset/power-low time before release on every path after
+    // the output-low attempt; otherwise an ambiguous write can create only a
+    // sub-millisecond edge on LCD_RST, TOUCH_RST, or DSI_PWR_EN.
+    vTaskDelay(pdMS_TO_TICKS(20));
     // Release the lines whatever happened above: a write that failed halfway
     // must not leave the panel rail off and touch/LCD held in reset.
     const esp_err_t rel = tca_write(dev, kTcaOutput, 0xFF);
