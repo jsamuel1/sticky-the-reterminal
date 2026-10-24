@@ -198,7 +198,9 @@ same critical section as the paint.
 `s_glass_gen`. The order is fixed and has one direction: **`s_stream_mux` →
 `s_display_mux` → `s_region_mux`**. No path takes `s_stream_mux` while it
 holds either of the others, and no path holds any of them across a network
-fetch.
+fetch. The media store's `s_media_mux` ("Media store across a fetch"
+below) sits after `s_stream_mux` and is never held with the display or
+region locks.
 
 To keep that order, today's re-entry goes. `stream_render` calls the public
 `tiny_display_render_card` and `tiny_display_scroll` and tells them apart
@@ -248,21 +250,104 @@ an impl, names a public painting entry point.
   redraw of either) runs in three phases: (1) under `s_stream_mux`: claim
   `my = ++s_glass_gen`, reset the stream, cache the spec (`s_card_cache` is
   written here, so a concurrent rotation redraws *this* card, not the one
-  it replaced); (2) release `s_stream_mux` and fetch (PSRAM LRU, SD, then
-  network), holding no lock; (3) retake `s_stream_mux`, and paint through
+  it replaced), and build the claim's **immutable fetch record** from the
+  media store ("Media store across a fetch" below); (2) release
+  `s_stream_mux` and fetch from SD or the network into a buffer the claim
+  owns, using only the record; (3) retake `s_stream_mux`, and paint through
   the impl only if `s_glass_gen == my`. If a newer claim landed during the
   fetch — a new stream begin, another takeover of either kind, a redraw —
-  the fetched frame is **superseded**: it is not painted, the buffer goes to
-  the frame cache as today (frames are immutable bytes) or is freed, the
-  gallery page index and its NVS save are not advanced, and the call
-  returns `TINY_ERR_GLASS_SUPERSEDED` (a distinct code, mapped onto
+  the fetched frame is **superseded**: it is not painted, the gallery page
+  index and its NVS save are not advanced, its buffer enters the PSRAM LRU
+  only if its set is still the current set (otherwise it is freed), and the
+  call returns `TINY_ERR_GLASS_SUPERSEDED` (a distinct code, mapped onto
   `ESP_ERR_NOT_FINISHED`). The image card's network fetch therefore never
   holds `s_stream_mux`, an old stream cannot repaint during it (its token
   died at the claim), and a late fetch cannot overwrite a newer owner. Two
   fetching takeovers resolve the same way regardless of which fetch
   finishes first: the earlier claim either paints and is then painted over,
   or finds itself superseded and drops; the final frame is always the later
-  claim's.
+  claim's. A gallery frame already in the PSRAM LRU is not a fetch: the
+  claim paints it in phase 1, in the same critical section, and never drops
+  `s_stream_mux`.
+- **Media store across a fetch.** Paint generation fences only the glass.
+  The gallery and photo state that a fetch reads or writes is a separate
+  shared store, and a superseded claim must not change it. That store is:
+  the gallery set (`s_gal_urls`, `s_gal_count`), the page indices
+  (`s_gal_index`, the painted page, and `s_gal_target` with its owner
+  `s_gal_target_gen`, the page the latest gallery claim asked for), a new
+  set epoch `s_gal_set` (`uint32_t`, never
+  0, bumped by every set commit), the two-slot PSRAM LRU, the SD files
+  `/sdcard/gallery/NNN.raw` and `manifest.json`, the NVS manifest and page
+  index, the photos archive `/sdcard/photos/NNNNN.raw`, and
+  `s_photo_last_url`. The rules:
+    - **Two guards.** A new non-recursive `s_media_mux` guards every SD
+      gallery or photos file operation, `s_photo_last_url` and the NVS
+      gallery writes. `s_stream_mux` guards the set, both indices, the LRU
+      and the lazy NVS restore. `s_gal_set`, `s_gal_urls` and `s_gal_count`
+      change only with **both** held, so either one is enough to read them.
+      The order extends one way: `s_stream_mux` → `s_media_mux` → the SD
+      driver lock and NVS (leaves). `s_media_mux` is never held together
+      with `s_display_mux` or `s_region_mux`, and never across a network
+      fetch.
+    - **Set commit.** A gallery spec that is a new set (not a re-layout)
+      commits in phase 1 with both locks held: write the URLs and count,
+      bump `s_gal_set`, clear the LRU, reset the SD gallery directory and
+      rewrite its manifest, save the NVS manifest, and set the target page.
+      A spec is a re-layout only when the claim is a replay **and** its URLs
+      equal the current set slot for slot; today's count-only test would
+      let a replayed old spec of the same length keep a newer set's frames.
+      The lazy NVS restore runs in the same place. A commit is bounded file
+      work (at most 2 × `kGalMax` unlinks plus two manifest writes) and no
+      network, so a stream op waits at most one paint, or one SD frame read
+      or write plus that reset when a commit lands behind one.
+    - **Immutable fetch record.** Phase 1 copies everything the fetch
+      needs into a per-claim record: `{glass = my, set = s_gal_set,
+      idx, count, url[256], replay}`. `idx` is computed from
+      `s_gal_target` (not the painted page), and the claim sets
+      `s_gal_target = idx` and `s_gal_target_gen = my`, so two quick flips
+      land on two pages, not the same one twice. `url` is a copy, never a
+      pointer into `s_gal_urls`; an image card's record likewise holds its
+      own URL copy, so no pointer into `s_card_cache`, a caller's JSON or a
+      cJSON tree that a newer claim can free crosses phase 2. `replay`
+      replaces the `s_rerendering` global, which another task can flip
+      while the lock is down. Phase 2 reads nothing from the store except
+      under `s_media_mux`, as below.
+    - **Buffer lifetime.** No pointer into the LRU leaves a critical section
+      of `s_stream_mux`: an LRU hit is painted in phase 1, and the LRU frees
+      a buffer (eviction, replacement, set commit) only under
+      `s_stream_mux`. A buffer fetched in phase 2 belongs to its claim until
+      phase 3 either hands it to the LRU or frees it. A claim frees only
+      buffers it owns, so no claim can free a frame another claim is
+      painting.
+    - **SD under a set check.** A phase-2 SD read takes `s_media_mux`,
+      proceeds only if `record.set == s_gal_set`, reads the frame into a
+      claim-owned buffer and releases. A network-fetched gallery frame is
+      written to `NNN.raw` the same way: take `s_media_mux`, write only if
+      `record.set == s_gal_set`, release. A commit holds `s_media_mux`
+      while it resets the directory, so no read sees a half-reset directory
+      and no old-set frame lands under a new set's name. An SD read or write
+      never holds `s_stream_mux`.
+    - **Phase 3 side effects.** With `s_stream_mux` retaken: if
+      `record.set != s_gal_set`, the frame belongs to a dead set and is
+      freed; no LRU, SD, index or NVS change. If the set is current, the
+      frame enters the LRU keyed by `(set, idx)`. Only a claim that paints
+      advances `s_gal_index` and saves the NVS page index (it takes
+      `s_media_mux` after its paint has released `s_display_mux`, still
+      under `s_stream_mux`, which keeps the stream → media order). A
+      superseded claim resets `s_gal_target` to `s_gal_index` only if
+      `s_gal_target_gen == my`; a newer gallery claim has already taken the
+      target over.
+    - **Photos archive.** An image card is archived only if it painted:
+      after phase 3 releases `s_stream_mux`, the claim takes `s_media_mux`,
+      skips the archive if `record.replay` or the URL equals
+      `s_photo_last_url`, scans for the next sequence number, writes
+      `NNNNN.raw`, updates `s_photo_last_url` and releases. Two image cards
+      can no longer both pick the same sequence number, and a superseded
+      picture that never reached the glass is not archived. The claim keeps
+      its buffer until the archive step and frees it after.
+    - `tiny_display_gallery_count` takes `s_stream_mux` (it may run the lazy
+      restore, which also takes `s_media_mux`) instead of reading the count
+      bare.
 - Callers treat `TINY_ERR_GLASS_SUPERSEDED` as "a newer picture already owns
   the glass", never as an empty or failed set: the empty-gallery fallback
   cards (`tiny_touch.cpp` `kGallery`, the relay `page gallery` branch) test
@@ -285,7 +370,9 @@ an impl, names a public painting entry point.
 The token, the generation, the takeover decision and the lock calls go into
 a pure `tiny_stream_owner` with injected lock, fetch and paint callbacks, so
 the host can test them; on the device the callbacks are the real mutexes,
-the real fetch and the impls.
+the real fetch and the impls. The media-store rules go into a pure
+`tiny_media_store` beside it, with injected SD, NVS, network and allocator
+callbacks, for the same reason.
 
 **Ask-side token lifecycle.** The stream API changes shape so no call can
 run before a token exists:
@@ -1030,6 +1117,42 @@ speech-to-text.
    must fail (i), (ii) and (v)/(vi) respectively; a static census check
    fails if any `*_impl` or impl-reachable shell function names a public
    painting entry point.
+   `tiny_media_store`, with a fake SD (a map of path → bytes, plus
+   pausable read and write), a fake NVS, a pausable fake network and a
+   tracking allocator that fails on a double free, a free of a buffer it
+   did not hand out, or a read of a freed buffer. Gallery A (set `a0..a3`)
+   and gallery B (set `b0..b3`, same length, different bytes) throughout:
+   (ix) network path: an A flip pauses in its network fetch of `a2`, B
+   commits and paints `b0`, then the fetch completes: A returns
+   `superseded`, `/sdcard/gallery/002.raw` is absent (or still B's bytes),
+   the manifest and the NVS manifest name B's URLs, the NVS page index is
+   B's, the LRU holds only B-set entries, and a later B flip to page 2
+   fetches B's URL, not A's; (x) SD path: the same with A paused inside its
+   SD read of `002.raw`: B's commit waits for that read to finish, then
+   resets the directory; A's buffer is freed by A, and nothing of A is in
+   the LRU; and the reverse order, B's commit holding the media lock while
+   A's read arrives, makes A's read miss (set changed) without touching a
+   file; (xi) LRU path: A's page is an LRU hit and B commits during A's
+   paint: A paints, B's commit runs after it and frees the LRU entries, and
+   the tracking allocator sees no read of a freed buffer; (xii) a fetch
+   paused across two commits (A → B → A again, same URLs as the first A)
+   is still superseded, since the set epoch, not the URL list, names the
+   set; (xiii) two quick flips on one set, the first paused in its fetch,
+   land on pages +1 and +2, and the superseded first flip neither advances
+   `s_gal_index` nor its NVS save; (xiv) a replay of an old cached gallery
+   spec of the same length as the current set commits a new set rather than
+   keeping the current set's frames; (xv) two image cards whose fetches
+   finish together archive under two distinct sequence numbers, a
+   superseded image is not archived, and an image claim whose source spec
+   is freed by a newer `render_card` during its fetch still fetches,
+   archives and frees only its own URL copy and buffer; (xvi) a
+   lock-order checker over all of
+   the above fails on any `media` → `stream`, `media` + `display` or
+   `media` held across a fake network call. Mutations that read
+   `s_gal_urls` after phase 1, drop the set check before an SD write or LRU
+   insert, let a superseded claim save the page index, or free an LRU
+   entry outside `s_stream_mux` must fail (ix), (x)/(ix), (xiii) and (xi)
+   respectively.
    Ask-side tokens, with fake display seams: (a) a voice ask runs
    listening begin → `(( thinking ))` note → SSE continuation begin →
    deltas → `text_done`, and every call carries one token that the
