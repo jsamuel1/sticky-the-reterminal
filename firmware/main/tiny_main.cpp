@@ -10,6 +10,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
@@ -200,9 +201,17 @@ extern "C" void app_main(void)
         bc.battery = true;
         bc.caps = tiny_board_beacon_caps();  // reTerminal: speaker display imu wifi env touch eink = 0x391c (fixtures.json sticky_full)
         bc.rssi1m = -61;
+        // BLE's controller + host pools are allocated HERE, not in .bss, so
+        // idf.py size cannot see them: log the internal-RAM cost the start
+        // actually took (colour boards size BLE down in their sdkconfig).
+        const size_t ble_before =
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         esp_err_t berr = tiny_beacon_start(&bc);
         if (berr == ESP_OK) berr = tiny_ble_start();
-        ESP_LOGI(TAG, "ble beacon: %s", esp_err_to_name(berr));
+        const size_t ble_after =
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        ESP_LOGI(TAG, "ble beacon: %s (internal %d B, %u B free)", esp_err_to_name(berr),
+                 (int)ble_after - (int)ble_before, (unsigned)ble_after);
     }
     if (cfg_ok && cfg.network_count > 0) {
         esp_err_t werr = tiny_wifi_connect(&cfg);
