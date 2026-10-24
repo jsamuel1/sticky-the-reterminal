@@ -18,7 +18,9 @@ if(CONFIG_TINY_BOARD_FNK0104S)
   set(TINY_BOARD_SRCS
     "board_generic.cpp" "sticky_power_generic.cpp" "lcd_canvas.cpp" "lcd_panel_st7796.cpp"
     "hal_absent.cpp" "sticky_battery_adc.cpp"
-    "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp")
+    "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp"
+    # WS2812 status light (empty unless CONFIG_TINY_STATUS_LED).
+    "tiny_led.cpp")
 elseif(CONFIG_TINY_BOARD_AMOLED18)
   # AMOLED-1.8 V2: CO5300 QSPI AMOLED behind the shared colour-panel canvas.
   set(TINY_BOARD_SRCS

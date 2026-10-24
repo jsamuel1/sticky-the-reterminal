@@ -12,6 +12,7 @@
 #include "pin_config.h"
 #include "sticky_buzzer.h"
 #include "tiny/tiny_display.h"
+#include "tiny/tiny_led.h"
 #include "tiny/tiny_node.h"
 
 static const char *TAG = "tiny_lock";
@@ -84,6 +85,9 @@ extern "C" esp_err_t tiny_lock_set(bool locked, const char *reason) {
     if (was == locked) return ESP_OK;  // idempotent, no ceremony
     ESP_LOGI(TAG, "%s (%s)", locked ? "LOCKED" : "UNLOCKED",
              reason ? reason : "unspecified");
+    // Status light (FNK0104S): dark while locked, back to the live state on
+    // unlock. No-op on boards without the light.
+    tiny_led_sync();
     if (locked) {
         // Two blips = "input refused" in the sound vocabulary — here it means
         // "inputs are now refused", audible through a pocket. The glass keeps

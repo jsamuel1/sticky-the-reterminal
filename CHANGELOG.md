@@ -6,6 +6,18 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware (FNK0104S)** — the board's WS2812 (GPIO 42) is a status light:
+  blue while the mic captures, amber while the upload and ask are in flight,
+  red for 5 s after an askfail card (not for "saved for later" or a backend
+  refusal sentence), off otherwise. Dark while pocket-locked, and latched
+  black before deep sleep. espressif/led_strip 3.0.3 over one RMT channel
+  (48 symbols, no DMA); boot logs its internal-RAM cost. Static DIRAM on
+  the fnk0104s image +2952 B (145508 → 148460), mostly the RMT TX ISR and
+  encoders, which IDF 5.4 places in IRAM unconditionally. Behind
+  `CONFIG_TINY_STATUS_LED` (FNK0104S only, default on) and
+  `CONFIG_TINY_STATUS_LED_BRIGHTNESS` (default 12/255). No verb or reply
+  change; the reTerminal and AMOLED-1.8 images do not carry it.
+
 - **status buffer cap** — both `tiny_node_status_json` callers (the
   `status` verb and the settings page) declare their PSRAM buffer with one
   `TINY_STATUS_JSON_CAP` (2048) from `tiny/tiny_node.h`. A 1024 B caller made

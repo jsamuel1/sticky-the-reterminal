@@ -22,3 +22,8 @@ dependencies:
   # over the new i2c_master driver on the shared bus. Linked only where
   # referenced, so the reTerminal image does not carry it.
   espressif/esp_codec_dev: "==1.6.2"
+  # WS2812 status light on the FNK0104S (tiny_led.cpp, CONFIG_TINY_STATUS_LED).
+  # Pinned: 3.0.3 is the newest release older than a few weeks; 3.1.x were
+  # days old when this landed. RMT backend only, no DMA. Linked only where
+  # referenced, so boards without the light do not carry it.
+  espressif/led_strip: "==3.0.3"
