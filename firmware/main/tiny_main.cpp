@@ -101,9 +101,9 @@ extern "C" void app_main(void)
     // itself — a bar that parks for three seconds is a loading bar lying
     // about loading. The splash now lives exactly as long as boot does.
 
-    // The paint's ONLY data dependencies: battery (glance cluster reads the
-    // gauge) and the RTC clock (cluster time before wifi exists). Both are
-    // millisecond I2C reads — they stay ahead of the paint on every path.
+    // The paint's ONLY data dependencies: battery source (BQ27220 gauge or
+    // FNK GPIO 9 ADC) and, where present, the RTC clock. These are millisecond
+    // local reads — I2C or ADC — and stay ahead of the paint on every path.
     ESP_LOGI(TAG, "battery init: %s",
              esp_err_to_name(sticky_battery_init(board_sensor_i2c_bus())));
     // The PCF8563 is battery-backed, so it can hand us a clock before wifi
