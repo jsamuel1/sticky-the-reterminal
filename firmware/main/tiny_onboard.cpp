@@ -12,6 +12,7 @@
 //   * cJSON everywhere a human/network string enters a card (SSID injection,
 //     0.15.1). No snprintf into JSON.
 #include "tiny/tiny_onboard.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_pair.h"
 #include "tiny/tiny_pair_util.h"
 #include "tiny/tiny_config.h"
@@ -91,7 +92,7 @@ extern "C" tiny_ob_step_t tiny_onboard_step(void) {
         if (m) vSemaphoreDelete(m);
     }
     if (mux) xSemaphoreTake(mux, portMAX_DELAY);
-    static tiny_config_t cfg;
+    EXT_RAM_BSS_ATTR static tiny_config_t cfg;
     const bool have = tiny_config_load(&cfg) == ESP_OK;
     const bool nets = have && cfg.network_count > 0;
     const bool prov = have && tiny_config_is_provisioned(&cfg);
@@ -211,7 +212,7 @@ static esp_err_t render_wifi(void) {
 }
 
 static esp_err_t render_link(void) {
-    static tiny_config_t cfg;
+    EXT_RAM_BSS_ATTR static tiny_config_t cfg;
     tiny_config_load(&cfg);
     const char *ssid = s_link_ssid[0] ? s_link_ssid
                      : (cfg.network_count > 0 ? cfg.networks[0].ssid : "your network");
@@ -332,7 +333,7 @@ static esp_err_t render_pair(void) {
 // Phase A pair page, kept as the fallback: the portal, over APSTA, with a
 // /pair form for a device id + token minted on tiny.technology.
 static esp_err_t render_pair_portal(void) {
-    static tiny_config_t cfg;
+    EXT_RAM_BSS_ATTR static tiny_config_t cfg;
     tiny_config_load(&cfg);
     const char *ssid = tiny_provision_ssid();
     char ip[20];
@@ -368,7 +369,7 @@ static esp_err_t render_pair_portal(void) {
 }
 
 static esp_err_t render_ready(void) {
-    static tiny_config_t cfg;
+    EXT_RAM_BSS_ATTR static tiny_config_t cfg;
     tiny_config_load(&cfg);
     cJSON *c = composite("ob-ready", "3/3 - you're set");
     cJSON *parts = cJSON_AddArrayToObject(c, "parts");

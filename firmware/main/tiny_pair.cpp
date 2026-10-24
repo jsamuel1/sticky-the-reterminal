@@ -12,6 +12,7 @@
 //     shell/touch tasks; the glass is repainted only while it shows ob-pair,
 //     so a human on the Wi-Fi keyboard page is never yanked away.
 #include "tiny/tiny_pair.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_pair_util.h"
 #include "tiny/tiny_config.h"
 #include "tiny/tiny_display.h"
@@ -279,7 +280,7 @@ static pu::Poll poll_once(const char *code) {
 }
 
 static bool provisioned(void) {
-    static tiny_config_t cfg;  // ~1 KB: off this task's stack
+    EXT_RAM_BSS_ATTR static tiny_config_t cfg;  // ~1 KB: off this task's stack
     return tiny_config_load(&cfg) == ESP_OK && tiny_config_is_provisioned(&cfg);
 }
 
@@ -353,7 +354,7 @@ extern "C" esp_err_t tiny_pair_start(void) {
     static std::atomic<bool> s_claim{false};
     bool expect = false;
     if (!s_claim.compare_exchange_strong(expect, true)) return ESP_OK;
-    static tiny_config_t cfg;
+    EXT_RAM_BSS_ATTR static tiny_config_t cfg;
     if (tiny_config_load(&cfg) != ESP_OK || tiny_config_is_provisioned(&cfg)) {
         s_claim.store(false);
         return ESP_ERR_INVALID_STATE;

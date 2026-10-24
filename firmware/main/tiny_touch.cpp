@@ -9,6 +9,7 @@
 // something — the local action runs on this file's action task, and the ui_tap
 // event goes upstream. A button that does nothing is a lie on the screen.
 #include "tiny/tiny_touch.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_lock.h"
 
 #include <algorithm>
@@ -425,7 +426,7 @@ void on_tap_up() {
         return;
     }
 
-    static tiny_button_region_t regions[48];  // touch task only; keyboard = 41
+    EXT_RAM_BSS_ATTR static tiny_button_region_t regions[48];  // touch task only; keyboard = 41
     const int n = tiny_display_button_regions(regions, 48);
     for (int i = 0; i < n; ++i) {
         const tiny_button_region_t &r = regions[i];

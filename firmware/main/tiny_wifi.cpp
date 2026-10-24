@@ -1,6 +1,7 @@
 // tiny_wifi — STA bring-up. Ordered roaming list, 15s per network (the same
 // per-attempt bound the Nicla uses; a hung join must never brick boot).
 #include "tiny/tiny_wifi.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_provision.h"
 
 #include <string.h>
@@ -145,7 +146,7 @@ extern "C" esp_err_t tiny_wifi_scan(tiny_scan_ap_t *out, int max, int *count,
     esp_wifi_scan_get_ap_num(&n);
     if (n == 0) return ESP_OK;
     if (n > 24) n = 24;
-    static wifi_ap_record_t recs[24];
+    EXT_RAM_BSS_ATTR static wifi_ap_record_t recs[24];
     err = esp_wifi_scan_get_ap_records(&n, recs);
     if (err != ESP_OK) return err;
     // Strongest-first, dedupe by ssid (APs advertise per-band duplicates).

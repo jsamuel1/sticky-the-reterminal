@@ -21,6 +21,7 @@
 // honestly (prints the payload) if a future layout squeezes it below 3
 // px/module.
 #include "tiny/tiny_provision.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_config.h"
 #include "cJSON.h"
 #include "tiny/tiny_display.h"
@@ -229,7 +230,7 @@ static esp_err_t form_to_json(char *body, char *out, size_t cap) {
 }
 
 static esp_err_t setup_post(httpd_req_t *req) {
-    static char body[2048];  // portal is single-user; static beats stack here
+    EXT_RAM_BSS_ATTR static char body[2048];  // portal is single-user; static beats stack here
     int total = req->content_len;
     if (total <= 0 || total >= (int)sizeof body) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -245,7 +246,7 @@ static esp_err_t setup_post(httpd_req_t *req) {
     body[total] = 0;
 
     esp_err_t err;
-    static char json[2048];
+    EXT_RAM_BSS_ATTR static char json[2048];
     const char *payload = body;
     if (body[0] != '{') {                       // urlencoded form path
         err = form_to_json(body, json, sizeof json);
@@ -268,7 +269,7 @@ static esp_err_t setup_post(httpd_req_t *req) {
     httpd_resp_send(req, "{\"ok\":true,\"reboot\":true}", HTTPD_RESP_USE_STRLEN);
 
     {
-        static tiny_config_t cfg;
+        EXT_RAM_BSS_ATTR static tiny_config_t cfg;
         const bool prov = tiny_config_load(&cfg) == ESP_OK && tiny_config_is_provisioned(&cfg);
         tiny_display_render_card(prov
             ? "{\"type\":\"text\",\"title\":\"paired\",\"card_id\":\"provisioned\","

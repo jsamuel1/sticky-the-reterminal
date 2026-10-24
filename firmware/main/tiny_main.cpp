@@ -6,6 +6,7 @@
 // then (M2) the card renderer demo so the renderer is proven on hardware.
 // Wi-Fi provisioning + the node loop land in M3.
 #include <cstdio>
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "cJSON.h"
@@ -325,7 +326,7 @@ extern "C" void app_main(void)
     uart_vfs_dev_use_driver(UART_NUM_0);
 #endif
     ESP_LOGI(TAG, "card console ready: send {json} line over serial");
-    static char line[2048];
+    EXT_RAM_BSS_ATTR static char line[2048];
     size_t pos = 0;
     for (;;) {
         int ch = getchar();

@@ -2,6 +2,7 @@
 // Whole-body buffering in PSRAM: b64 of a 15s WAV (~480KB) is ~640KB — fine
 // against 8MB PSRAM, and esp_http_client sets Content-Length for us.
 #include "tiny/tiny_upload.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 
 #include <string.h>
 
@@ -102,7 +103,7 @@ extern "C" esp_err_t tiny_upload_media(const uint8_t *data, size_t len,
 
     char url[160];
     snprintf(url, sizeof url, "%s/api/media", cfg.api);
-    static char resp[1024];
+    EXT_RAM_BSS_ATTR static char resp[1024];
     sink_t sink = { resp, 0, sizeof resp };
     resp[0] = 0;
 

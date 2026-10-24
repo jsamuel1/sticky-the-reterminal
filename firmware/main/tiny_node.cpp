@@ -63,7 +63,7 @@ extern "C" int tiny_bootmark_prev(void);
 extern "C" void tiny_bootmark_stage(uint8_t stage);
 static const char *TAG = "tiny_node";
 static TaskHandle_t s_task = NULL;
-static tiny_config_t s_cfg;
+EXT_RAM_BSS_ATTR static tiny_config_t s_cfg;  // PSRAM .bss
 static volatile bool s_stop = false;
 
 // ---------- event queue (producer: touch/button tasks; consumer: node loop) ----

@@ -13,6 +13,7 @@
 // Refresh policy: mono full refresh per card (the panel's own 1-2s is the
 // bottleneck; policy hooks for partial land with the stream type).
 #include "tiny/tiny_display.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_askq.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -436,9 +437,9 @@ static constexpr int kMaxRegions = 48;
 static uint8_t s_btn_accent_staged[5];
 static uint8_t s_btn_accent[5];
 
-static tiny_button_region_t s_regions[kMaxRegions];
+EXT_RAM_BSS_ATTR static tiny_button_region_t s_regions[kMaxRegions];  // PSRAM .bss
 static int s_region_count = 0;
-static tiny_button_region_t s_staged[kMaxRegions];
+EXT_RAM_BSS_ATTR static tiny_button_region_t s_staged[kMaxRegions];  // PSRAM .bss
 static int s_staged_count = 0;
 // Orientation state. The canvas owns the transform; this is the copy the render
 // path and the touch path both read, plus the JSON of the card on the glass so a
@@ -1363,7 +1364,7 @@ static int render_chart_card(Canvas &c, cJSON *root, int y, int max_y) {
     }
     if (n > 160) n = 160;  // ~4px/point at full width is already dense
 
-    static float vals[160];  // render is single-flight (same rule as fold buf)
+    EXT_RAM_BSS_ATTR static float vals[160];  // render is single-flight (same rule as fold buf)
     float vmin = 1e30f, vmax = -1e30f;
     for (int i = 0; i < n; i++) {
         cJSON *it = cJSON_GetArrayItem(data, i);

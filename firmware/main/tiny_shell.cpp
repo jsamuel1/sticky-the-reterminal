@@ -1,5 +1,6 @@
 // tiny_shell — home screen + nav stack. See tiny_shell.h.
 #include "tiny/tiny_shell.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_onboard.h"
 #include "sticky_buzzer.h"
 #include "tiny/tiny_config.h"
@@ -82,7 +83,7 @@ static esp_err_t render_settings(void) {
     char ssid[40] = "-";
     int rssi = 0;
     bool have_rssi = false;
-    static char sj[1024];
+    EXT_RAM_BSS_ATTR static char sj[1024];
     if (tiny_node_status_json(sj, sizeof sj) == ESP_OK) {
         cJSON *o = cJSON_Parse(sj);
         if (o) {
@@ -345,7 +346,7 @@ static esp_err_t render_wifi_ex(bool force) {
     // each row a Forget affordance. ssid + "saved", dots never the password
     // — rows ride the same scroll rail as the scan list.
     {
-        static tiny_config_t cfg;  // action-task only; too big for the stack
+        EXT_RAM_BSS_ATTR static tiny_config_t cfg;  // action-task only; too big for the stack
         if (tiny_config_load(&cfg) == ESP_OK && cfg.network_count > 0) {
             cJSON *sep = cJSON_CreateObject();
             char sect[40];
@@ -832,7 +833,7 @@ esp_err_t tiny_shell_menu(const char *id) {
             ESP_LOGW(TAG, "menu id \"%s\" is not a saved-network row - refusing", id);
             return ESP_ERR_INVALID_ARG;
         }
-        static tiny_config_t cfg;  // action-task only
+        EXT_RAM_BSS_ATTR static tiny_config_t cfg;  // action-task only
         if (tiny_config_load(&cfg) != ESP_OK) return ESP_FAIL;
         int i = atoi(t);
         if (i < 0 || i >= cfg.network_count) return ESP_ERR_INVALID_ARG;
