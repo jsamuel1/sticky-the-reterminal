@@ -1,4 +1,5 @@
 #include "tiny/tiny_button.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 
 #include <stdint.h>
 #include <string.h>
@@ -41,7 +42,7 @@ static void voice_ask_task(void *) {
         tiny_admit::Work queued(tiny_admit::AdoptReserved::Yes);
         const bool typed = req.text[0] != 0;
         ESP_LOGI(TAG, "%s ask starting", typed ? "typed" : "AI button: voice");
-        static char out[512];
+        EXT_RAM_BSS_ATTR static char out[512];  // PSRAM .bss
         esp_err_t r = tiny_node_do_ask(typed ? req.text : NULL, 6, out, sizeof out);
         ESP_LOGI(TAG, "%s ask -> %s: %s", typed ? "typed" : "AI button",
                  esp_err_to_name(r), out);

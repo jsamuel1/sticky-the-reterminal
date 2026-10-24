@@ -13,6 +13,7 @@
 // the CI bench pusher (tools/ota_push.py). Both refuse an image whose board
 // stamp (tiny/tiny_ota_util.h) is not this board's, before esp_ota_begin.
 #include "tiny/tiny_ota.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 
 #include <limits.h>
 #include <stdlib.h>
@@ -71,7 +72,7 @@ static esp_err_t read_pointer(const char *channel, char *ver, size_t ver_cap,
 
     char full[160];
     snprintf(full, sizeof full, "%s/api/firmware/manifest", cfg.api);
-    static char resp[1024];
+    EXT_RAM_BSS_ATTR static char resp[1024];  // PSRAM .bss
     sink_t sink = { resp, 0, sizeof resp };
     resp[0] = 0;
 
@@ -189,7 +190,9 @@ static esp_err_t stage_from(const char *url, const char *sha_want, const char *l
         return ESP_FAIL;
     }
 
-    static char chunk[4096];
+    // PSRAM .bss: esp_ota_write bounces a non-DRAM source through a stack
+    // buffer before it disables the cache, so the chunk need not be internal.
+    EXT_RAM_BSS_ATTR static char chunk[4096];
     const int head = read_full(c, chunk, (int)tiny_ota_util::kHeadLen);
     char img_board[20];
     const tiny_ota_util::Verdict v = tiny_ota_util::parse_image(

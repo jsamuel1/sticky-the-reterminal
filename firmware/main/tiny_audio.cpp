@@ -4,6 +4,7 @@
 // deep-sleep wake, so every capture re-claims the pins first (see
 // tiny_audio_record_wav) and clean-cycles the mic rail.
 #include "tiny/tiny_audio.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_lock.h"
 
 #include <string.h>
@@ -217,7 +218,7 @@ extern "C" esp_err_t tiny_audio_record_wav(int seconds, uint8_t **wav, size_t *l
 
     // Drain what the DMA ring collected while nobody listened (~90 ms).
     {
-        static int16_t junk[2 * 256];
+        EXT_RAM_BSS_ATTR static int16_t junk[2 * 256];  // PSRAM .bss
         for (int i = 0; i < 8; ++i)
             if (audio_es8311_read(junk, 256, 20) < 256) break;
     }

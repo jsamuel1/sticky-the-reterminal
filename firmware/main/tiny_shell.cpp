@@ -277,7 +277,7 @@ static esp_err_t render_settings(void) {
 // 6 rows predates the scroll rail — an office airspace hides the
 // network you came for behind five stronger strangers. 12 scrollable rows,
 // and the row after the last one says how many the window still cut.
-static tiny_scan_ap_t s_aps[12];
+EXT_RAM_BSS_ATTR static tiny_scan_ap_t s_aps[12];
 static int s_ap_count = 0;
 static int s_ap_total = 0;
 

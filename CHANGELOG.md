@@ -6,6 +6,26 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware 0.31.1, grammar v24** — colour boards: more internal RAM for
+  the voice upload's TLS session (`tiny_upload` refuses below 60 KB free;
+  tiny-eba6 idled at 16.8 KB). Kernel and ring-buffer code moves to flash
+  (`FREERTOS_PLACE_FUNCTIONS_INTO_FLASH`, `RINGBUF_PLACE_FUNCTIONS_INTO_FLASH`
+  in both colour overlays): DIRAM .text 103523 -> 90371 B on fnk0104s.
+  Eighteen non-DMA, non-ISR statics move to PSRAM .bss on every board (OTA
+  chunk + manifest sink, I2S tone/silence/drain buffers, BLE scan table,
+  pairing sinks, Wi-Fi scan/fail tables, stream and photo URLs, agent
+  roster,
+  voice-ask summary): internal .bss 21024 -> 7648 B on fnk0104s. Boot now records
+  internal free/largest after each stage (`tiny_heapmark`, logged as
+  `heapmark:`), and `status` reports them as `internal_boot` plus
+  `internal_largest`. `TINY_STATUS_JSON_CAP` 2048 -> 3072. A larger
+  `SPIRAM_MALLOC_RESERVE_INTERNAL` was considered and rejected: the pool is
+  internal heap re-tagged DMA|INTERNAL, so it cannot raise internal free.
+  reTerminal sdkconfig unchanged.
+- **tools** — `tools/check_sdkconfig.py <board>` asserts the generated
+  sdkconfig's internal-RAM settings (colour boards) and that none leak into
+  the reTerminal; CI runs it after each board build.
+  `tests/host/heapmark_host_test.sh` covers the mark table and the checker.
 - **firmware, grammar v23** — AMOLED-1.8 V2 power and clock (P7). The
   AXP2101 reports battery percent (its fuel gauge), voltage (ADC), charging
   and USB input; `status` gains `usb_power` and `vbus_mv` (null on boards
