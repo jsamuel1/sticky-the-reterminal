@@ -145,8 +145,8 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 | `tiny_display` | card-spec JSON → canvas → refresh policy (full vs partial) · title-bar glance cluster · hit-regions published atomically at **display time** · screenshot snapshot · gallery frames · stream notes |
 | `tiny_shell` | stickyOS: ring home→status→sensors→settings, drill pages wifi/ble/cfgqr, nav stack (bottom = home), on-glass keyboard (wifi password / DM compose / typed ask), universe roster |
 | `tiny_touch` | GT911 task (prio 6) → hit-region resolution → local action or `ui_tap` event upstream |
-| `tiny_button` | GPIO4/5/6 press/hold · raw-GPIO UP+DOWN 1 s unlock chord that the gated layer cannot disable |
-| `tiny_lock` | §11 pocket lockout: manual + IMU auto (face-down ≥3 s, walking ≥5 s after 30 s idle) · gates touch/buttons/**mic capture entry** · `status.locked` |
+| `tiny_button` | board GPIO press/hold · raw-GPIO UP+DOWN 1 s unlock chord where both keys exist (reTerminal) |
+| `tiny_lock` | §11 pocket lockout: manual on every board; IMU auto only with local UP+DOWN unlock · gates touch/buttons/**mic capture entry** · `status.locked` |
 | `tiny_orient` | IMU classify → auto-rotate (1 Hz e-ink; 300 ms AMOLED; 3 agreeing samples) · per-board axis tables in `tiny/tiny_orient_map.h` (host-tested) · feeds the supported lock detector at ≤1 Hz (disabled on no-chord boards) |
 | `tiny_audio` | PDM 16 kHz WAV into PSRAM (cap 15 s) · re-claims GPIO19/20 from USB-JTAG before every capture (deep-sleep wake mutes the mic otherwise) · buzzer LEDC GPIO48, silent/soft tiers |
 | `tiny_upload` / `tiny_screenshot` | `POST /api/media` (PSRAM buffer) · framebuffer → 2-bit PNG → URL |

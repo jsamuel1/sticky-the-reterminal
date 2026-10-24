@@ -42,5 +42,12 @@ for required in ("boards with an UP+DOWN", "Boards without", "`unlock`"):
     if required not in top:
         sys.exit(f"FAIL tiny_lock.h contract missing {required!r}")
 print("PASS tiny_lock.h entry/exit contract is board-specific")
+
+main = (root / "tiny_main.cpp").read_text()
+startup = main[main.index("// §11 pocket lockout: armed"):main.index('ESP_LOGI(TAG, "lockout init:')]
+for required in ("Boards with both", "allow IMU auto-entry", "no-chord boards", "manual relay lock/unlock"):
+    if required not in startup:
+        sys.exit(f"FAIL tiny_main lock startup contract missing {required!r}")
+print("PASS tiny_main startup contract is board-specific")
 print("lock board contract host test: ALL GREEN")
 PY

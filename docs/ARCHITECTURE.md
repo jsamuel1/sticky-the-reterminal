@@ -28,9 +28,9 @@ Everything below describes the binary as built.
 │   │                   keyboard, gesture routing, edge-band nav              │
 │   ├─ tiny_touch       GT911 → staged hit-regions, published atomically at   │
 │   │                   display-time (never draw-time — the 0.9.x race)       │
-│   ├─ tiny_button      GPIO4/5/6 press/hold semantics; raw-GPIO unlock chord │
-│   ├─ tiny_lock        §11 pocket lockout: manual + IMU auto-entry, input    │
-│   │                   gates (touch/buttons/mic), status.locked truth        │
+│   ├─ tiny_button      Board GPIO press/hold; UP+DOWN chord where fitted     │
+│   ├─ tiny_lock        §11 pocket lockout: manual on every board; IMU auto   │
+│   │                   only with local chord; gates touch/buttons/mic input  │
 │   ├─ tiny_orient      IMU classify → auto-rotate (1 Hz e-ink, 300 ms AMOLED;│
 │   │                   settle before commit); feeds lock at ≤1 Hz when armed │
 │   ├─ tiny_audio       PDM capture → WAV in PSRAM (capture-entry gate, §11)  │

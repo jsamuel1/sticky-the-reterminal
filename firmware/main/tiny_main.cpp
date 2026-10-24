@@ -157,8 +157,10 @@ extern "C" void app_main(void)
         // ESP_ERROR_CHECK'd: a dead sensor must not stop the boot.
         ESP_LOGI(TAG, "sensors init: %s", esp_err_to_name(tiny_sensors_init()));
         ESP_LOGI(TAG, "buttons init: %s", esp_err_to_name(tiny_button_init()));
-        // §11 pocket lockout: armed after buttons exist (the chord reads
-        // their GPIOs raw) — boots UNLOCKED; auto-entry is IMU-driven.
+        // §11 pocket lockout: armed after buttons exist. Boards with both
+        // UP+DOWN keys read that chord from raw GPIO and allow IMU auto-entry;
+        // no-chord boards retain manual relay lock/unlock only. Every board
+        // boots UNLOCKED.
         ESP_LOGI(TAG, "lockout init: %s", esp_err_to_name(tiny_lock_init()));
         tiny_heapmark("inputs");
     };
