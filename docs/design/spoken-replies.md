@@ -161,13 +161,15 @@ order below brings them under the same rule. With speech the ask lives
 longer, so the rule becomes explicit:
 
 - `tiny_display_stream_begin` returns a **stream token** (a nonzero `uint32_t`
-  epoch). `stream_append`, `stream_commit`, `stream_note` and `stream_end`
-  take that token. The home re-begin used by voice (listening frame, then
-  the SSE begin) keeps the same token.
-- A takeover is any public glass write that replaces the card while a stream
-  is on: `tiny_display_render_card` (every card type, image included),
-  `tiny_display_gallery_nav` and `tiny_display_blit_1bit`. It retires the
-  token. Later calls with that token return `ESP_ERR_INVALID_STATE` and touch
+  epoch) through an in/out argument. `stream_append`, `stream_commit`,
+  `stream_note` and `stream_end` take that token. A voice ask's SSE begin
+  passes the token from its listening frame back in and gets the same token
+  out; the exact voice sequence is under "Ask-side token lifecycle" below.
+- A takeover is any public glass write that replaces the card, stream on or
+  not: `tiny_display_render_card` (every card type, image included),
+  `tiny_display_gallery_nav` and `tiny_display_blit_1bit`. It claims a new
+  glass generation (below), which retires any stream token. Later calls with
+  that token return `ESP_ERR_INVALID_STATE` and touch
   nothing on the glass. Today only `render_card` ends the stream; a gallery
   flip or a `play` frame paints over it and the next commit paints the
   stream back, so these two join the rule. `tiny_display_flash_button` and
@@ -176,50 +178,163 @@ longer, so the rule becomes explicit:
   stream frame through the stream path and keeps the token, instead of
   today's reset.
 
+**Glass generation.** Ownership of the glass is one monotonic
+`uint32_t s_glass_gen`, guarded by `s_stream_mux` (below), never 0 (a wrap
+skips 0). Every write that establishes a new picture **claims** the glass by
+incrementing it: a stream begin (the stream token *is* the generation that
+begin claimed), every takeover, and every redraw that is not a valid-token
+stream redraw (`rerender`, `glance`, rotation and scroll with no stream on).
+A stream op is valid only while `s_stream_on` and its token equals
+`s_glass_gen`; continuing ops of a valid stream (append, commit, note, a
+continuation begin, and rerender/glance/rotation/scroll redraws of that
+stream) do not
+claim. The rule is **latest claim wins**: a write paints only if its claim
+is still the current generation at the moment it paints, checked in the
+same critical section as the paint.
+
 **Lock order.** A new non-recursive `s_stream_mux`, created statically in
 `tiny_display_init` beside the other two (the lazy create in
-`display_lock` goes), guards the stream state and the token. The order is
-fixed and has one direction: **`s_stream_mux` → `s_display_mux` →
-`s_region_mux`**. No path takes `s_stream_mux` while it holds either of the
-others, and no path takes any of them across a network fetch.
+`display_lock` goes), guards the stream state, the token and
+`s_glass_gen`. The order is fixed and has one direction: **`s_stream_mux` →
+`s_display_mux` → `s_region_mux`**. No path takes `s_stream_mux` while it
+holds either of the others, and no path holds any of them across a network
+fetch.
 
 To keep that order, today's re-entry goes. `stream_render` calls the public
 `tiny_display_render_card` and `tiny_display_scroll` and tells them apart
-with the `s_stream_rendering` flag. Each public entry point is split into a
-thin public wrapper and an internal `*_impl` that assumes the caller already
-holds `s_stream_mux` and owns the stream decision: `render_card_impl(json,
-from_stream)`, `scroll_impl`, `rerender_impl`. The `*_impl` functions take
-`s_display_mux` themselves as today and never touch `s_stream_mux`.
-`stream_render` calls only `*_impl`; `s_stream_rendering` is deleted.
+with the `s_stream_rendering` flag. Each public entry point that paints is
+split into a thin public **wrapper** and an internal **`*_impl`**. The
+wrapper's whole job is: take `s_stream_mux`, call the impl, give
+`s_stream_mux`. Every impl is **entered and exited with `s_stream_mux`
+held**, takes `s_display_mux` itself as today, and never calls a public
+display or shell entry point. The two impls that fetch (image and gallery)
+are the only code that drops `s_stream_mux` while running, and only around
+the fetch itself, as described under "A fetching takeover". `stream_render`
+calls only impls; `s_stream_rendering` is deleted.
+
+Wrapper / impl census (every painting entry point in `tiny_display.cpp`,
+with today's internal re-entries):
+
+| Public entry | Takes `s_stream_mux`? | Internal route after the split |
+| --- | --- | --- |
+| `render_card` | yes | `render_card_impl`. A `gallery` spec calls `gallery_commit_impl` → `gallery_nav_impl(0)` (today `render_gallery_card` → public `gallery_nav(0)`, a recursive acquisition after the split). An `image` spec calls `image_impl`. |
+| `render_card` with `type:"universe"` | **no** | The wrapper parses the spec before locking (parsing needs no lock). For `universe` it calls `tiny_shell_universe_push()` holding nothing; that merges the roster and makes exactly one public `render_card` of a composite. Today this branch sits inside `render_card` and re-enters it from `render_universe()`. `render_card_impl` refuses a universe spec with `ESP_ERR_INVALID_ARG` rather than calling the shell. |
+| `gallery_nav` | yes | `gallery_nav_impl(dir)` |
+| `rerender`, `glance` | yes | valid stream: stream redraw, token kept (like rotation; today a clock-tick, lock or clean-flash rerender silently ends the stream); otherwise claim, `rerender_impl` → `render_card_impl(s_card_cache)` (a cached gallery reaches `gallery_nav_impl(0)` as above) |
+| `set_rotation` | yes | valid stream: stream redraw; otherwise `rerender_impl`, and on `INVALID_STATE` the `rotated to N deg` card through `render_card_impl` |
+| `scroll` | yes | valid stream: stream tail redraw; otherwise `scroll_impl` → `rerender_impl` |
+| `scroll_page`, `scroll_gesture` | **no** | delegate to the public `scroll` (or, for a sideways swipe, to `tiny_shell_nav_back` / `tiny_shell_cycle`, which call public `render_card`) exactly once, holding nothing |
+| `blit_1bit` (`play` frames) | yes | claim + paint in one critical section; no fetch (frames are prefetched) |
+| `stream_*` | yes | token check, then `render_card_impl` / `scroll_impl` |
+| `arm_wake_baseline` | no | calls public `render_card` between its own `display_lock` sections, holding nothing; it runs before any stream can exist |
+| `flash_button`, `snapshot_index8`, `splash` | no | not glass owners: `s_display_mux` only, no card replaced, no claim |
+
+A host census test fails if any impl, or any shell function reachable from
+an impl, names a public painting entry point.
 
 - **Stream ops** (`append` / `commit` / `note` / `end`) take
-  `s_stream_mux`, compare the token, and if it is valid build the frame and
-  paint it through `render_card_impl` (and `scroll_impl` for the tail)
-  **before** releasing `s_stream_mux`. The token check and the paint are
-  one critical section, so no takeover can land between them. A stream
-  paint costs about 300–500 ms (a partial refresh), and that is the longest
-  a takeover waits.
-- **A takeover** takes `s_stream_mux`, retires the token and resets the
-  stream, then releases `s_stream_mux` **before** its own fetch and paint.
-  The image card's network fetch therefore never holds `s_stream_mux`, and
-  the stream cannot repaint during that fetch, because its token is already
-  dead. A takeover with no stream on takes and drops `s_stream_mux` and
-  continues as today.
+  `s_stream_mux`, compare the token with `s_glass_gen`, and if it is valid
+  build the frame and paint it through `render_card_impl` (and `scroll_impl`
+  for the tail) **before** releasing `s_stream_mux`. The token check and the
+  paint are one critical section, so no takeover can land between them. A
+  stream paint costs about 300–500 ms (a partial refresh), and that is the
+  longest a takeover waits.
+- **A non-fetching takeover** (every text, list, chat, menu, composite… card,
+  and a `play` frame) takes `s_stream_mux`, claims a new generation (which
+  retires any stream token), resets the stream, caches its spec, paints
+  through its impl, and only then releases `s_stream_mux`. Nothing can land
+  between its claim and its paint.
+- **A fetching takeover** (an image card, a gallery open or flip, and a
+  redraw of either) runs in three phases: (1) under `s_stream_mux`: claim
+  `my = ++s_glass_gen`, reset the stream, cache the spec (`s_card_cache` is
+  written here, so a concurrent rotation redraws *this* card, not the one
+  it replaced); (2) release `s_stream_mux` and fetch (PSRAM LRU, SD, then
+  network), holding no lock; (3) retake `s_stream_mux`, and paint through
+  the impl only if `s_glass_gen == my`. If a newer claim landed during the
+  fetch — a new stream begin, another takeover of either kind, a redraw —
+  the fetched frame is **superseded**: it is not painted, the buffer goes to
+  the frame cache as today (frames are immutable bytes) or is freed, the
+  gallery page index and its NVS save are not advanced, and the call
+  returns `TINY_ERR_GLASS_SUPERSEDED` (a distinct code, mapped onto
+  `ESP_ERR_NOT_FINISHED`). The image card's network fetch therefore never
+  holds `s_stream_mux`, an old stream cannot repaint during it (its token
+  died at the claim), and a late fetch cannot overwrite a newer owner. Two
+  fetching takeovers resolve the same way regardless of which fetch
+  finishes first: the earlier claim either paints and is then painted over,
+  or finds itself superseded and drops; the final frame is always the later
+  claim's.
+- Callers treat `TINY_ERR_GLASS_SUPERSEDED` as "a newer picture already owns
+  the glass", never as an empty or failed set: the empty-gallery fallback
+  cards (`tiny_touch.cpp` `kGallery`, the relay `page gallery` branch) test
+  for `ESP_ERR_INVALID_STATE` only and so never paint over the newer owner;
+  the UP/DOWN gallery flip in `tiny_button.cpp` does not double-beep on it;
+  a relay reply says `superseded`.
 - **Rotation and scroll** take `s_stream_mux`. With a valid stream they
-  redraw through the stream path while holding it; otherwise they call
-  `rerender_impl` / `scroll_impl` as today. Rotation has two callers since
-  grammar 21: the `rotate` verb on `node_task` and the QMI8658 `orient` task
-  (`tiny_orient.cpp`, AMOLED-1.8 `rotate auto`), which calls
-  `tiny_display_set_rotation` from its own task. Both go through one public
-  `set_rotation` wrapper that takes `s_stream_mux` first; its no-cache
-  fallback card (`rotated to N deg`) is built through `render_card_impl`
-  only when no stream is on. The `orient` task never takes `s_display_mux`
-  directly, so an auto-rotation can wait at most one stream paint and cannot
-  invert the lock order. It already skips rotation while locked.
+  redraw through the stream path while holding it and keep the token;
+  otherwise they claim and call `rerender_impl` / `scroll_impl` (a cached
+  image or gallery card redraws as a fetching takeover). Rotation has two
+  callers since grammar 21: the `rotate` verb on `node_task` and the
+  QMI8658 `orient` task (`tiny_orient.cpp`, AMOLED-1.8 `rotate auto`), which
+  calls `tiny_display_set_rotation` from its own task. Both go through the
+  one public `set_rotation` wrapper; its no-cache fallback card
+  (`rotated to N deg`) is built through `render_card_impl` only when no
+  stream is on. The `orient` task never takes `s_display_mux` directly, so
+  an auto-rotation can wait at most one paint and cannot invert the lock
+  order. It already skips rotation while locked.
 
-The token, the takeover decision and the lock calls go into a pure
-`tiny_stream_owner` with injected lock and paint callbacks, so the host can
-test them; on the device the callbacks are the real mutexes and `*_impl`.
+The token, the generation, the takeover decision and the lock calls go into
+a pure `tiny_stream_owner` with injected lock, fetch and paint callbacks, so
+the host can test them; on the device the callbacks are the real mutexes,
+the real fetch and the impls.
+
+**Ask-side token lifecycle.** The stream API changes shape so no call can
+run before a token exists:
+
+```c
+// *tok in: 0 = open a new stream; nonzero = continue the stream it names.
+// *tok out: the stream's token, or 0 on any failure. `note` (nullable) is
+// stored and painted in this call's frame.
+esp_err_t tiny_display_stream_begin(const char *title, const char *card_id,
+                                    const char *question, const char *note,
+                                    uint32_t *tok);
+// Owner-only card replacement: paints card_json iff tok is still current,
+// as one critical section; the stream ends. Stale -> INVALID_STATE, nothing
+// painted. Unlike stream_end, the card is not suppressed on a home stream.
+esp_err_t tiny_display_stream_replace(uint32_t tok, const char *card_json);
+```
+
+A continuation (`*tok` nonzero) is accepted only for a valid token whose
+stream is the wordless home stream and only with no `question`; it keeps the
+frame (no second full wipe, exactly today's re-begin) and applies `note` by a
+partial repaint if it changed. A stale `*tok` returns `ESP_ERR_INVALID_STATE`,
+sets `*tok = 0` and paints nothing. A continuation of a valid token with a
+question or a non-home card is a programming error: `ESP_ERR_INVALID_ARG`,
+nothing changes. A fresh begin's failure (no stream buffer, render error)
+resets the stream and returns `*tok = 0`.
+
+The ask worker keeps the token in its per-request context (the same struct
+that carries the request origin and the summary buffer), never in a global,
+with a four-state **glass sink**: `unopened` (`tok = 0`, never owned),
+`owned`, `detached` (owned once, lost to a newer claim) and `released`
+(ended by this ask). The first stale return from any stream call moves
+`owned` → `detached`. The context is zeroed at the start of every request,
+so a replacement ask always begins with `tok = 0` and claims a new
+generation. Every ask-owned glass write uses the token; the census of
+today's call sites in `tiny_node.cpp`, all of which change:
+
+| Today | New |
+| --- | --- |
+| voice: `stream_note("(( listening ))")` then `stream_begin("tiny","home",NULL)` (573–574) | `stream_begin("tiny","home",NULL,"(( listening ))",&tok)`: one full refresh, note already on it. Failure → `unopened`; capture proceeds and the answer may still open a fresh stream later |
+| voice: `stream_note("(( thinking ))")` after capture (589) | `stream_note(tok, "(( thinking ))")` if `owned` |
+| voice `voice_fail_card` (record / upload failure, via public `render_card`) | `owned`: `stream_replace(tok, card)`; `unopened`: public `render_card` (it is the newest claim); `detached`: not painted, summary only |
+| SSE: `stream_begin(title,"home",question)` then `stream_note("(( thinking ))")` (429–430) | `stream_begin(title,"home",question,"(( thinking ))",&tok)`. Voice with `owned`: continuation, same token. Typed, or voice `unopened`: fresh begin. `detached`: no call |
+| `ask_sse_line` append / commit (353–365), ` [stream cut]` append (461), `stream_end(final_card)` (467) | the same calls with `tok`, through the request context passed into `ask_sse_line`; skipped when not `owned` |
+| classic JSON error card (778) and answer cards (788, 798) | `owned` (voice): `stream_replace(tok, card)`; `unopened`: public `render_card` as today; `detached`: not painted, the relay summary gets the text and ` [glass taken by <card_id>]` |
+
+`text_done`, a barge-in cancel's ` [stopped]` end, and `stream_replace` move
+the sink to `released` and zero `tok`. No other firmware file calls the
+stream API (`tiny_display_stream_active()` has no callers and keeps its
+meaning).
 - On the first stale return the ask marks its glass sink **detached**. The
   agent turn is not cancelled and speech is not cancelled; the question still
   gets its answer. Remaining `t` deltas still go into the relay-reply summary
@@ -376,22 +491,47 @@ event group, created at boot and never deleted, plus three generation words
 (`active_gen`, `cancel_gen`, `ack_gen`) guarded by a `portMUX_TYPE`.
 
 **Creation order.** The group is built with `xEventGroupCreateStatic` from
-a file-scope `StaticEventGroup_t`, in `tiny_speech_init()`. `init_inputs`
-calls it **first**, before `tiny_audio_init()`. `tiny_audio_init()` creates
-the player task at priority 5, above the boot task, so the scheduler may run
-the player before `xTaskCreate` even returns; the group must already exist
-when that first instruction runs. The order is therefore
-`tiny_speech_init()` → `tiny_audio_init()` (player) → `tiny_button_init()`
-(no button callback can reach a control path first) → `tiny_node_start()`
-and the ask worker. On a
-glance wake, `init_inputs` runs after the shell paint; until it runs
-nothing can produce or cancel speech, since the player, the buttons and the
-node do not exist yet. Every control and producer entry point, and the
-player's speech path (it sets `SPACE_BIT` and `IDLE_BIT`), also checks that
-the group handle is non-null: a control or producer returns
-`speech not ready`, and the player refuses a speech-start command and keeps
-playing tones only. A future reordering therefore fails closed rather than
-dereferencing a null handle. There is no lazy create: the display's lazy
+a file-scope `StaticEventGroup_t`, in `tiny_speech_init()`. The player task
+is **not** created by `init_inputs`: on the codec boards `app_main` calls
+`sticky_buzzer_init()` right after `tiny_display_init()`, and
+`sticky_buzzer_init()` → `audio_es8311_init()` creates `audio_play` at
+priority 5, above the boot task, so the scheduler may run the player before
+`xTaskCreateWithCaps` even returns. `tiny_audio_init()` in `init_inputs`
+later calls `audio_es8311_init()` again and gets the memoised result; it
+creates nothing. So `app_main` calls `tiny_speech_init()` directly after
+`tiny_display_init()` and **before** `sticky_buzzer_init()`, on every board
+and on both the cold-boot and glance-wake paths (the buzzer init runs before
+the `glance_wake` split). The boot order is:
+
+`board_init()` → `tiny_display_init()` → **`tiny_speech_init()`** →
+`sticky_buzzer_init()` (codec boards: `audio_es8311_init()` creates the
+player and records its permanent handle) → … → `init_inputs`
+(`tiny_audio_init()` is a memoised no-op for the player, then
+`tiny_led_init()`, `tiny_button_init()`) → `tiny_node_start()` and the ask
+worker.
+
+`tiny_speech_init()` has no board `#if` and depends on nothing: a static
+event group, a statically initialised `portMUX_TYPE` and zeroed generation
+words. `xEventGroupCreateStatic` with a non-null buffer cannot fail, so the
+call returns `void` and cannot leave a half-built controller. On the
+reTerminal (buzzer, `caps.speech` false) the group exists and nothing ever
+waits on it; every control entry still answers with the typed
+`speak refused: no speech playback on this board` before it touches the
+group. The player handle the producer notifies (see Player wake) is written
+by `audio_es8311_init()` before it returns; producers exist only after
+`tiny_node_start()`, so no producer can read it unset. The status-light
+calls the player makes (`tiny_led_speech`) already tolerate a light whose
+`tiny_led_init()` has not run (`s_mux` null → no-op), and a speech start
+cannot reach the player before the node exists.
+
+On a glance wake `init_inputs` runs after the shell paint; until it runs
+nothing can produce or cancel speech, since the buttons and the node do not
+exist yet, but the group already does. Every control and producer entry
+point, and the player's speech path (it sets `SPACE_BIT` and `IDLE_BIT`),
+still checks that the group handle is non-null: a control or producer
+returns `speech not ready`, and the player refuses a speech-start command
+and keeps playing tones only. A future reordering therefore fails closed
+rather than dereferencing a null handle. There is no lazy create: the display's lazy
 `xSemaphoreCreateMutex` pattern would race two first callers, and this
 group must have exactly one instance. The bits are fixed at compile time
 (`CANCEL_BIT` 0, `SPACE_BIT` 1, `IDLE_BIT` 2); nothing allocates them at
@@ -643,6 +783,9 @@ count moves from 23 to 24.
 
 **Settings.** One row on the settings page, persisted in NVS
 (`tinycfg/speakmode`): `off | voice asks | all asks`, default `voice asks`.
+This is a closed enum and an owner decision (2026-10-24): `all asks` is
+public, so typed and offline-typed asks may opt into speech. An unknown
+stored value reads as the default.
 
 CHANGELOG and `TINY_GRAMMAR_VERSION` move to 22 in the same atomic public
 change that adds the request/events, `speak` verb, `caps.speech`, status reply
@@ -758,13 +901,21 @@ speech-to-text.
       wait or re-read sees the cancel. A fake `portMUX` asserts that no FreeRTOS
       fake is called while it is held. A control or producer entry before
       `tiny_speech_init()` returns `speech not ready` and touches no handle.
-      Startup order: a fake scheduler that runs a newly created task
-      immediately, before its creator resumes, boots `init_inputs`; the
-      player's first instructions find a non-null group, and no control,
-      producer or player call ever sees a null handle. With the group
-      deliberately absent, the player refuses speech-start and still plays
-      tones. A mutation that moves `tiny_speech_init()` after
-      `tiny_audio_init()` must fail the immediate-run case.
+      Startup order: the boot sequence is factored into one
+      `tiny_boot_sequence(const tiny_boot_ops_t *)` table that `app_main`
+      itself calls (cold and glance-wake arms), so the host test runs the
+      **real** `app_main` ordering rather than a copy of `init_inputs`. Its
+      ops are fakes: `sticky_buzzer_init` runs a fake `audio_es8311_init`
+      whose fake `xTaskCreateWithCaps` runs the new player task immediately,
+      before its creator resumes. On both arms the player's first
+      instructions find a non-null group, and no control, producer or player
+      call ever sees a null handle; the later `tiny_audio_init()` creates no
+      second player. With the group deliberately absent, the player refuses
+      speech-start and still plays tones. Mutations that move
+      `tiny_speech_init()` after `sticky_buzzer_init()`, or back into
+      `init_inputs`, must fail the immediate-run case; a mutation that makes
+      `tiny_audio_init()` create the player instead must also fail it on the
+      glance-wake arm, where `init_inputs` runs after the paint.
       Mutations that clear after publish, omit the ring-capacity recheck, or
       clear after a predicate check must fail the corresponding rendezvous.
     - Signal lifetime, rendezvous: a fake scheduler pauses a control between
@@ -853,14 +1004,49 @@ speech-to-text.
    pauses inside its paint, a takeover arrives, the commit's paint
    completes, then the takeover retires the token and paints, and the
    takeover's card is the last frame; no later stream paint follows;
-   (ii) a takeover retires the token and pauses inside its (fake image)
-   fetch, and a commit arriving then returns stale without painting;
+   (ii) a takeover claims and pauses inside its (fake image) fetch, and a
+   commit of the old stream arriving then returns stale without painting;
    (iii) a stream paint that would re-enter a public display entry point
-   trips the fake mutex's non-recursive assert; (iv) a lock-order checker
-   records every acquisition and fails on any `display` → `stream` or
-   `region` → `display` edge. Mutations that release `s_stream_mux` between
-   the token check and the paint, or hold it across the takeover's fetch,
-   must fail (i) and (ii) respectively;
+   trips the fake mutex's non-recursive assert, and the same assert runs
+   over every census route: a cached-gallery rerender, a gallery spec
+   through `render_card`, a `universe` spec through `render_card` (shell
+   push → one composite render), `scroll_page` and a sideways
+   `scroll_gesture`, each with and without a valid stream; (iv) a
+   lock-order checker records every acquisition and fails on any
+   `display` → `stream` or `region` → `display` edge; (v) a takeover pauses
+   in its fetch, a new `stream_begin` claims and paints its frame, then the
+   fetch completes: the takeover returns `superseded`, paints nothing, does
+   not advance the gallery index or its NVS save, and the new stream's later
+   commits still paint; (vi) takeover A pauses in its fetch, takeover B
+   (fetching, then again non-fetching) claims and paints, then A completes:
+   A is superseded and B's frame is last; and with B's fetch slower than
+   A's, A paints, B paints over it, and B is last; (vii) a rotation and a
+   rerender with no stream on, landing during a takeover's fetch, redraw
+   the takeover's own cached spec and supersede its late paint, never
+   resurrecting the card it replaced; (viii) the `kGallery` touch route and
+   relay `page gallery` given `superseded` paint no fallback card. Mutations
+   that release `s_stream_mux` between the token check and the paint, hold
+   it across the takeover's fetch, or drop the post-fetch generation check
+   must fail (i), (ii) and (v)/(vi) respectively; a static census check
+   fails if any `*_impl` or impl-reachable shell function names a public
+   painting entry point.
+   Ask-side tokens, with fake display seams: (a) a voice ask runs
+   listening begin → `(( thinking ))` note → SSE continuation begin →
+   deltas → `text_done`, and every call carries one token that the
+   continuation returned unchanged; there is exactly one full refresh before
+   the first delta; (b) a takeover after the listening frame (during capture
+   and again during upload) makes the thinking note, the continuation begin
+   and every delta return stale with nothing painted, the sink reads
+   `detached`, and a record or upload failure card is not painted over the
+   newer card; (c) a listening begin that fails (fake allocation failure)
+   leaves `tok = 0`, the capture still runs, and the SSE path opens a fresh
+   stream; (d) a typed ask always opens fresh, and a continuation with a
+   question or a stale token is refused without painting; (e) the classic
+   JSON answer of a voice ask with a still-valid token replaces the
+   listening frame through `stream_replace`, and with a dead token paints
+   nothing; (f) two consecutive asks never share a token. A mutation that
+   restores the note-before-begin order must fail (a), and one that lets a
+   fresh begin reuse a stale token must fail (b);
    button and relay replacement asks; a second BOOT press while the first
    replacement waits for amp-off atomically coalescing pending slot + gesture
    generation; later release of the superseded press doing nothing; no double
@@ -896,5 +1082,3 @@ than reported as a green strict build.
 - Ring size: 1 MB (about 32 s of text lead) or more. PSRAM is 8 MB, but the
   canvas, frame prefetch and the ask buffers already live there; measure the
   free PSRAM during a `play` before raising it.
-- Whether `speakmode` should include `all asks` at all, or only `off` and
-  `voice asks`.
