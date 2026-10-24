@@ -64,7 +64,7 @@ release, newest first.
   `s_caps[]` roster the provisioning tools read. Settings gains a
   "brightness: N%" row (25/50/80/100) on the colour boards.
   `tests/host/brightness_host_test.sh` covers the argument parse, the boot
-  floor and the row cycle. The spoken-replies design now proposes v23,
+  floor and the row cycle. The spoken-replies design now proposes v25,
   the next free number; it takes whatever is free when it lands.
 
 - **firmware** — FNK0104S drives its microSD slot: SDMMC 4-bit on

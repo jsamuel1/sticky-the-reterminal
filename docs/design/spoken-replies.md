@@ -3,7 +3,7 @@ readtime: 18
 description: "Design for spoken agent replies on the codec boards: speech streamed on the ask connection, 16 kHz PCM, no length cap, played as it arrives."
 ---
 
-# Spoken replies — design (grammar v23, proposed)
+# Spoken replies — design (grammar v25, proposed)
 
 Status: **proposal, no code**. Third person. It covers the agent's reply audio
 (TTS) on the boards that have a real speaker: today the FNK0104S, and the
@@ -32,7 +32,8 @@ Owner decisions (2026-10-24):
   `{"error":…}`, `[DONE]`) or classic JSON. The `stream:"1"` body flag is an
   opt-in that an older backend ignores. The device reads it with a 30 s
   per-read stall bound and a 1 KB line buffer, and holds `s_ask_mux` for the
-  whole connection.
+  whole connection. Every ask path is also admitted work in the work/sleep
+  gate (`tiny/tiny_admit.h`), so no sleep path powers down mid-ask.
 - Internal RAM is the scarce rail on the colour boards: one TLS session needs
   about 60 KB of it, and `tiny_upload` refuses below that.
 
@@ -550,7 +551,7 @@ one owner:
   `tiny_led_speech(bool)`. **The player is the only writer.** It sets
   `speaking` when it turns the amp on for a speech generation, and clears it
   in the same step as its idle acknowledgement, after amp-off. Chimes and
-  `play` frames never set it. The S1 bench harness and, from grammar 23,
+  `play` frames never set it. The S1 bench harness and, from grammar 25,
   `speak test` do, because they go through the same player path.
 - The ask lowers its own field from `THINKING` to `IDLE` at the first
   accepted `text_done`: the text is finished, so it is no longer thinking.
@@ -570,8 +571,9 @@ one owner:
   they do not call `tiny_led_error()`, which stays reserved for the askfail
   card as today.
 - Pocket lock: speech continues, but the light is dark, the same
-  precedence as today (§11: a pocket shows nothing). Deep sleep and OTA
-  cross the speech barrier first, so `speaking` is already clear before
+  precedence as today (§11: a pocket shows nothing). Deep sleep cannot be
+  claimed while speech holds its admission count, and OTA crosses the speech
+  barrier first, so `speaking` is already clear before
   `tiny_led_prepare_sleep()`. Shutdown's forced amp-off path also clears
   it.
 - Other boards: `tiny_led_speech` is an inline no-op like the rest of the
@@ -668,7 +670,7 @@ confirmed against its generation or ring predicate.
   answers `not speaking`. Otherwise it sets `cancel_gen = active_gen`, leaves
   the lock, and calls `xEventGroupSetBits(CANCEL_BIT)` on the static group.
   Every caller (the button callback in the esp_timer task, `node_task`, the
-  sleep path) is a task, never an ISR.
+  OTA and shutdown paths) is a task, never an ISR.
 - The producer's full-ring loop clears `SPACE_BIT | CANCEL_BIT`, checks
   `cancel_gen` against its generation, then checks free ring space under the
   ring lock against the whole pending chunk before it waits on
@@ -749,9 +751,9 @@ test-producer task:
    button callback only queues the replacement and never waits. A hold-to-talk
    replacement carries its gesture, which the next section defines. Remote stop
    latency is bounded by the forced-active relay cadence (5 s); the physical
-   button signals locally. `miccheck`, `speak stop` and `sleep` signal then wait
+   button signals locally. `miccheck` and `speak stop` signal then wait
    on the same bounded idle barrier. A barrier timeout returns `speech stop
-   timed out` and does not capture or sleep with the amp active. Repeated stop
+   timed out` and does not capture with the amp active. Repeated stop
    and a stop racing natural EOF are idempotent: one generation completes once,
    one old relay reply is sent once, and the newer request cannot inherit old
    bytes.
@@ -797,6 +799,51 @@ nothing, sent as a real voice ask. So the gesture gets a record that it owns:
 - Relay `voice <seconds>` and the reTerminal fixed-length click carry a
   duration and no gesture, so they are unaffected.
 
+### Work/sleep admission
+
+Main's `tiny_admit` gate (`tiny/tiny_admit.h`, grammar 23) is the one door
+between work and deep sleep: every ask path enters it in
+`tiny_node_do_ask`, and the `sleep` verb (`work_to_sleep`), the PWR key
+(`tiny_node_sleep_now`) and auto-sleep (`sleep_claim`) refuse while any work
+is counted. Speech moves the ask off `node_task` and outlives the text, so the
+gate's count has to follow it:
+
+- A request queued to the ask worker is reserved work: the producer (relay
+  dispatch, button callback, offline drain) calls `work_enter()` before it
+  publishes into the request queue or the replacement slot, and calls
+  `work_exit()` itself if the publish fails or a newer BOOT press replaces
+  the slot. The worker adopts the count with `Work(AdoptReserved::Yes)`,
+  the shape `tiny_button.cpp` and `tiny_touch.cpp` already use. Sleep cannot
+  claim between queue acceptance and worker start.
+- That one count lives until the request's **speech generation is idle**:
+  the worker holds it across `[DONE]`, the residual drain and amp-off, and
+  releases it only after the player's idle acknowledgement for that
+  generation (or at once when no speech was opened). The text answer
+  finishing does not end the work, because the amp is still on.
+- `speak test` enters the gate in its verb before it starts the test
+  producer and hands the count to that task by the same adopt rule; the
+  task releases it after its own idle acknowledgement. It answers
+  `refused: going to sleep` when the gate is claimed, as every verb does.
+- The player, the static event group and the queues are boot objects and
+  take no count. A chime enqueued during a sleep claim is unaffected (the
+  sleep path already plays none after the claim).
+- No speech path ever calls `sleep_claim()`, `work_to_sleep()` or
+  `sleep_release()`, and no sleep path waits on the speech barrier: a sleep
+  request during speech is refused, never queued behind it. This keeps one
+  owner for the power transition and leaves the gate's existing
+  `sleep refused: busy` answer correct for spoken answers too.
+
+Host tests reuse `tests/host/admit_host_test.sh`'s real-thread harness with
+the fake player: (a) a sleep claim raced against a relay `ask` publish at
+every point between `work_enter()` and the worker's adopt never sleeps with a
+request queued; (b) `sleep_claim()` fails from `[DONE]` until the idle ack of
+that generation, and succeeds immediately after; (c) a BOOT replacement that
+supersedes a pending slot leaves the count unchanged (one exit, one enter);
+(d) `speak test` under a held claim answers `refused: going to sleep` and
+starts no task. Mutations that release at `[DONE]`, release before the idle
+ack, or let the worker construct a fresh `Work` instead of adopting must fail
+(b) or (a).
+
 Rules:
 
 | situation | behaviour |
@@ -813,7 +860,8 @@ Rules:
 | any new card or `render_ui` **before** `text_done` | the card takes the glass and retires the stream token; the ask detaches its glass sink, so text goes on into the relay summary only and no final card is painted. Speech continues |
 | any new card or `render_ui` **after** `text_done` | an ordinary card; speech continues. The ask holds no glass token |
 | pocket lock | speech continues. Lock guards inputs, not output (same as `say`); the status light is dark |
-| deep sleep, auto-sleep, OTA reboot or node shutdown | signal cancellation, wait for the bounded player-idle/amp-off barrier, then cross the power boundary; on timeout refuse a requested sleep/OTA, while shutdown's last resort forces the amp GPIO off before teardown |
+| `sleep` verb, PWR-key long press or auto-sleep | speech is admitted work (see "Work/sleep admission" below), so every sleep path refuses exactly as it does for an ask in flight today: `sleep refused: busy (...)`, the PWR key does nothing, auto-sleep is due again next tick. Sleep never cancels speech; `speak stop` then `sleep` does |
+| OTA reboot or node shutdown | signal cancellation, wait for the bounded player-idle/amp-off barrier, then cross the power boundary; on timeout refuse the OTA, while shutdown's last resort forces the amp GPIO off before teardown |
 | connection cut or 30 s stall mid-speech | terminal state `cut`; the buffered residual drains even below the prebuffer; verdict `cut after N s` |
 | a malformed audio block | dropped whole, the ring unchanged, counted in `bad_lines`; the stream carries on |
 | a malformed text line | skipped as a torn frame, as today |
@@ -839,15 +887,20 @@ fixed board fact (AMOLED-1.8 stays false until its ES8311 is proven, and
 advertise a verb that refuses or hide one that a later build enables. This
 design adds no TinyBeacon capability bit.
 
-## Grammar v23 (proposed)
+## Grammar v25 (proposed)
 
-The main branch is already at grammar 22: v19 is strict direct-artifact OTA
+The main branch is already at grammar 24: v19 is strict direct-artifact OTA
 arguments; v20 adds `sensors` `battery.source` and FNK0104S `battery_pct`;
 v21 adds AMOLED-1.8 QMI8658 orientation/acceleration, `rotate auto`, and the
 related capability/status shapes; v22 adds the colour-board `brightness`
 verb (board-gated through `s_board_verbs[]`), `caps.brightness` and the
-`status` `brightness` field. Spoken replies are the next grammar change,
-v23. If another grammar change lands first, this proposal takes the next free
+`status` `brightness` field; v23 adds AMOLED-1.8 AXP2101 power and the
+PCF85063A clock (`usb_power`, `vbus_mv`, `battery.source` `axp2101`) and the
+`sleep refused: busy` / `refused: going to sleep` answers of the work/sleep
+admission gate (`tiny/tiny_admit.h`); v24 adds the internal-RAM receipts
+`status` `internal_largest` and `internal_boot` (`tiny_heapmark`). Spoken
+replies are the next grammar change, v25. If another grammar change lands
+first, this proposal takes the next free
 number; the number is assigned when the complete public firmware slice is cut,
 not by this document.
 
@@ -901,14 +954,14 @@ This is a closed enum and an owner decision (2026-10-24): `all asks` is
 public, so typed and offline-typed asks may opt into speech. An unknown
 stored value reads as the default.
 
-CHANGELOG and `TINY_GRAMMAR_VERSION` move to 23 in the same atomic public
+CHANGELOG and `TINY_GRAMMAR_VERSION` move to 25 in the same atomic public
 change that adds the request/events, `speak` verb, `caps.speech`, status reply
 fields and setting. The slices below are implementation order, not permission
 to expose a partial grammar. S1 keeps new helpers unreachable from existing
 verbs/status and uses host tests plus a compile-time bench harness; it may land
 alone only in that wire-inert state. Otherwise S1 and S2 are squashed into one
 buildable commit. No build—tagged or not—may dispatch or advertise any new
-speech surface while reporting grammar 22.
+speech surface while reporting grammar 24.
 
 ## Backend contract (tiny.technology, not in this repo)
 
@@ -951,6 +1004,7 @@ first, then TTS on the model's text.
 | Stall rule | 30 s with no byte is a cut | the same, but only while the ring has room |
 | Failure | `error` is shown as an agent error | `audio_error` changes only the speech verdict; the text stays an answer |
 | Concurrency | a second ask is refused while one is in flight | the same before the first audio sample; after it, barge-in cancels and replaces |
+| Sleep | the ask is admitted work (`tiny_admit`); `sleep`, the PWR key and auto-sleep refuse until it returns | the same count is held until the speaker is idle, so sleep refuses for the whole audio tail rather than cutting it |
 | Cancellation | none today; the turn runs to `[DONE]` | the device closes the connection; the backend must stop TTS (contract item 6). Tool side effects already done are not rolled back |
 | Glass | typed live, then the final card | unchanged up to `text_done`; audio never touches the glass |
 | Status light (FNK0104S) | amber while the ask runs | amber until `text_done`, green while the speaker plays |
@@ -976,10 +1030,10 @@ speech-to-text.
    flush and the amp-off acknowledgement. The status-light resolver may gain
    an internal `speaking` input because that changes no wire shape. S1 does
    **not** add `speak` dispatch, `s_caps[]`, `caps.speech`, speech status fields,
-   `speakmode`, ask opt-in or SSE parsing while grammar remains 22. Its hardware
+   `speakmode`, ask opt-in or SSE parsing while grammar remains 24. Its hardware
    proof uses a compile-time bench harness that invokes the player directly;
    the harness is off in normal builds. If implementation needs the public
-   `speak test` vehicle instead, S1 and S2 land atomically with grammar 23.
+   `speak test` vehicle instead, S1 and S2 land atomically with grammar 25.
    S1 host tests, each pinning one contract:
     - Ring: whole commits straddling the buffer end at every offset of a small
       ring read back byte for byte; a commit without room for the whole chunk
@@ -1060,10 +1114,10 @@ speech-to-text.
       AMOLED-1.8; on a `caps.speech=false` board every `speak` subcommand
       returns the typed refusal, never help text; the existing provision
       roster tests pass with the new entry; every build exposing the entry
-      reports grammar 23.
+      reports grammar 25.
 
    Proof on the FNK0104S bench uses the direct compile-time S1 harness, or the
-   `speak test` verb only after the atomic grammar-23 public slice. The latter
+   `speak test` verb only after the atomic grammar-25 public slice. The latter
    replies `test started`; its verdict is read with `speak status`:
     - `speak test 60` reaches `done 60.0 s, 0 underruns`, and `miccheck`
       reads the room floor afterwards (the amp is really off).
@@ -1229,12 +1283,16 @@ speech-to-text.
    button and relay replacement asks; a second BOOT press while the first
    replacement waits for amp-off atomically coalescing pending slot + gesture
    generation; later release of the superseded press doing nothing; no double
-   reply, orphaned replacement or capture before amp-off. Auto-sleep tests pin that ask-worker or speech activity blocks the
-   due path; explicit sleep/OTA tests pin cancellation-before-power transition
+   reply, orphaned replacement or capture before amp-off. Sleep tests
+   (`sleep` verb, PWR key, auto-sleep) pin that a queued request or a
+   speech tail holds the admission count and every sleep path refuses
+   without cancelling it ("Work/sleep admission" (a)-(d)); OTA tests pin
+   cancellation-before-power transition
    and timeout refusal. Shutdown tests pin amp-off even when normal
    acknowledgement fails. Mutation controls that remove event reset, atomic
-   ring commit, terminal-tail wakeup, generation checks, async-ask sleep guard
-   or power-boundary barrier must fail. Proof on hardware: a voice ask longer
+   ring commit, terminal-tail wakeup, generation checks, the speech-tail
+   admission count
+   or the OTA power-boundary barrier must fail. Proof on hardware: a voice ask longer
    than the ring is answered on the glass and out loud end to end; mid-answer
    AI-button barge-in begins capture only after amp-off; `miccheck` then reads
    quiet.
@@ -1254,7 +1312,10 @@ than reported as a green strict build.
 ## Open questions
 
 - Speech admission floor: derive it from repeated worst-case measurements of
-  ask plus one short relay/heartbeat client, then add explicit margin. Until
+  ask plus one short relay/heartbeat client, then add explicit margin. Main's
+  v24 `status` `internal_largest` and `internal_boot` receipts are the
+  measurement source: read them during a voice ask that overlaps a relay
+  poll. Until
   that floor is measured on FNK0104S, `speech_ready` stays false in release
   builds; do not ship a guessed threshold that can turn allocator pressure into
   a reboot.
