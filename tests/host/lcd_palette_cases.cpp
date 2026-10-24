@@ -78,8 +78,16 @@ int main(int argc, char **argv) {
     CHECK(color(Theme::Dark, kNeutral, 0).r < 0xFF, "dark ink is not full white");
     CHECK(same(color(Theme::Light, kBlue, 3), gray(0xFF)), "light accent bg = white");
     CHECK(same(color(Theme::Dark, kBlue, 3), gray(0x00)), "dark accent bg = black");
-    CHECK(same(color(Theme::Light, kBlue, 0), kInkLight[kBlue]), "blue ink");
-    CHECK(same(color(Theme::Dark, kRed, 0), kInkDark[kRed]), "dark red ink");
+    CHECK(same(color(Theme::Light, kBlue, 0), kInkLight[kBlue - kRed]), "blue ink");
+    CHECK(same(color(Theme::Dark, kRed, 0), kInkDark[0]), "dark red ink");
+    {
+        Rgb out{1, 2, 3};
+        CHECK(!ink(Theme::Light, kNeutral, &out) && !ink(Theme::Dark, kMono, &out) &&
+                  !ink(Theme::Light, 12, &out) && out.r == 1,
+              "no ink for neutral/mono/unassigned");
+        CHECK(ink(Theme::Light, kPink, &out) && same(out, kInkLight[kInkCount - 1]),
+              "pink ink is the last row");
+    }
     {
         const Rgb ink = color(Theme::Light, kRed, 0), mid = color(Theme::Light, kRed, 1),
                   tint = color(Theme::Light, kRed, 2);
@@ -89,8 +97,8 @@ int main(int argc, char **argv) {
     CHECK(same(color(Theme::Light, 12, 0), color(Theme::Light, kNeutral, 0)),
           "unassigned accent draws neutral");
     // Every named accent's ink is distinct from neutral and from each other.
-    for (int a = kRed; a < kNamedAccents; ++a)
-        for (int b = a + 1; b < kNamedAccents; ++b)
+    for (int a = 0; a < kInkCount; ++a)
+        for (int b = a + 1; b < kInkCount; ++b)
             CHECK(!same(kInkLight[a], kInkLight[b]) && !same(kInkDark[a], kInkDark[b]),
                   "inks %d/%d distinct", a, b);
     CHECK(index_of(kBlue, 2) == ((7 << 2) | 2), "index_of");
