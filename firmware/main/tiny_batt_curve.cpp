@@ -28,9 +28,10 @@ extern "C" int tiny_batt_median_mv(int *mv, size_t n)
 {
     if (mv == nullptr || n == 0) return -1;
     std::sort(mv, mv + n);
-    // Even n: mean of the middle two, rounded half up - deterministic.
+    // Even n: midpoint of the middle two, rounded half up - deterministic,
+    // and computed without a+b so no int input can overflow.
     if (n % 2) return mv[n / 2];
-    return (mv[n / 2 - 1] + mv[n / 2] + 1) / 2;
+    return mv[n / 2 - 1] + (mv[n / 2] - mv[n / 2 - 1] + 1) / 2;
 }
 
 extern "C" int tiny_batt_lipo_percent(int pack_mv)

@@ -19,6 +19,9 @@ int main()
         CHECK("median odd, unsorted", tiny_batt_median_mv(b, 3) == 5);
         int c[] = {4, 1, 3, 2};
         CHECK("median even rounds half up", tiny_batt_median_mv(c, 4) == 3);
+        int big[] = {2147483640, 2147483646};
+        CHECK("median even: no overflow near INT_MAX",
+              tiny_batt_median_mv(big, 2) == 2147483643);
         int d[] = {1900, 1901, 1899, 2600, 1900};
         CHECK("median ignores one spike", tiny_batt_median_mv(d, 5) == 1900);
         CHECK("median n=0 is -1", tiny_batt_median_mv(a, 0) == -1);

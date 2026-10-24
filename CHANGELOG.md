@@ -26,8 +26,9 @@ release, newest first.
   `sensors` battery gains `source` (`bq27220`|`adc`); an `adc` object carries
   only percent, voltage_mv, charging:null and present. `glance` battery_pct
   is null, not 0, with no reading.
-- **tests** — `tests/host/batt_curve_host_test.sh` (33 checks):
-  median, spike tolerance, divider precision, curve, plausibility gates.
+- **tests** — `tests/host/batt_curve_host_test.sh` (34 checks):
+  median, spike tolerance, divider precision, curve, plausibility gates,
+  overflow-safe median.
 
 - **firmware, grammar v19** — direct-artifact OTA now classifies every
   two-argument form, plus any one-argument value with a scheme (`http://`,
