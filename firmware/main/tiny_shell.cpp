@@ -911,7 +911,13 @@ esp_err_t tiny_shell_menu(const char *id) {
         if (!tiny_board_caps()->brightness) return ESP_ERR_NOT_SUPPORTED;
         const int cur = tiny_display_brightness();
         const uint8_t nxt = tiny_brightness_next_step(cur < 0 ? 0 : (uint8_t)cur);
-        tiny_display_set_brightness(nxt);
+        // Persist only what the panel took, same rule as the relay verb.
+        const esp_err_t berr = tiny_display_set_brightness(nxt);
+        if (berr != ESP_OK) {
+            ESP_LOGW(TAG, "bright %u%% refused by panel (%s) - unchanged, "
+                          "not saved", nxt, esp_err_to_name(berr));
+            return render_settings();  // row still shows the real level
+        }
         const esp_err_t perr = tiny_config_brightness_set(nxt);
         if (perr != ESP_OK)
             ESP_LOGW(TAG, "bright persisted=NO (%s) - %u%% holds until "

@@ -97,9 +97,10 @@ extern "C" void app_main(void)
         uint8_t saved = 0;
         const bool have = tiny_config_brightness_get(&saved);
         const uint8_t lvl = tiny_brightness_boot_level(have, saved);
-        tiny_display_set_brightness(lvl);
-        ESP_LOGI(TAG, "brightness %u%% (%s)", lvl,
-                 have ? (lvl == saved ? "saved" : "saved, floor-clamped") : "default");
+        const esp_err_t berr = tiny_display_set_brightness(lvl);
+        ESP_LOGI(TAG, "brightness %u%% (%s): %s", lvl,
+                 have ? (lvl == saved ? "saved" : "saved, floor-clamped") : "default",
+                 esp_err_to_name(berr));
     }
     tiny_bootmark_stage(3);
 

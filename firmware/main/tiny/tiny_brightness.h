@@ -13,9 +13,6 @@
 // strand the owner. The relay can still set 0 live; status reports the truth.
 #define TINY_BRIGHTNESS_BOOT_FLOOR 10
 
-// Settings row stops, in tap order (wraps).
-static const uint8_t kTinyBrightnessSteps[] = {25, 50, 80, 100};
-
 typedef enum {
     TINY_BRIGHTNESS_REPORT = 0,  // bare verb (or only spaces): read, change nothing
     TINY_BRIGHTNESS_SET = 1,     // *level holds 0..100
@@ -52,9 +49,12 @@ static inline uint8_t tiny_brightness_boot_level(bool have, uint8_t saved) {
 }
 
 // The settings row's next stop: the first step above `cur`, else the first.
+// Stops (tap order, wraps) live inside the function, so a translation unit
+// that includes this header without calling it carries no copy of them.
 static inline uint8_t tiny_brightness_next_step(uint8_t cur) {
-    const int n = (int)(sizeof kTinyBrightnessSteps / sizeof *kTinyBrightnessSteps);
+    static const uint8_t steps[] = {25, 50, 80, 100};
+    const int n = (int)(sizeof steps / sizeof *steps);
     for (int i = 0; i < n; ++i)
-        if (kTinyBrightnessSteps[i] > cur) return kTinyBrightnessSteps[i];
-    return kTinyBrightnessSteps[0];
+        if (steps[i] > cur) return steps[i];
+    return steps[0];
 }

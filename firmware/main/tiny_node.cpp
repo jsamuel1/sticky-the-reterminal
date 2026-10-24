@@ -270,11 +270,20 @@ static const char *const s_caps[] = { "render_ui", "status", "sensors", "say", "
 // heartbeat, the BLE catalog and the pair claim offer them only where they
 // work. s_caps[] above stays the roster every board shares (tools/
 // provision_lib.py and provision.js read it verbatim).
-static const char *s_caps_board[sizeof s_caps / sizeof *s_caps + 1];
+// Every verb a board MAY add, paired with the board-table bit that turns it
+// on. s_caps_board is sized from this table, so adding a row here can never
+// write past the end of it.
+static const struct { const char *verb; bool tiny_board_caps_t::*on; } s_board_verbs[] = {
+    {"brightness", &tiny_board_caps_t::brightness},  // v22
+};
+static const char *s_caps_board[sizeof s_caps / sizeof *s_caps +
+                                sizeof s_board_verbs / sizeof *s_board_verbs];
 static int build_board_caps(void) {
     int n = 0;
     for (const char *c : s_caps) s_caps_board[n++] = c;
-    if (tiny_board_caps()->brightness) s_caps_board[n++] = "brightness";
+    const tiny_board_caps_t *bc = tiny_board_caps();
+    for (const auto &v : s_board_verbs)
+        if (bc->*v.on) s_caps_board[n++] = v.verb;
     return n;
 }
 extern "C" const char *const *tiny_node_caps(int *count) {
