@@ -64,7 +64,13 @@ tests/run.sh                                 # host tests: askq, bootmark, sleep
 - Board variants: `choice TINY_BOARD` (Kconfig.projbuild) = reterminal
   (default) | fnk0104s | amoled18. Pins per board in `pin_config_<board>.h`,
   HAL set per board in `main/CMakeLists.txt`, run-time facts in
-  `tiny/board_caps.h` (status `board` + `absent[]`). Colour boards layer
+  `tiny/board_caps.h` (status `board`, `caps{}` and the derived `absent[]`).
+  Card layout follows the panel: a short side < 480 px (FNK 320×480, AMOLED
+  368×448) selects the compact profile in `tiny_display.cpp`
+  (`apply_layout_profile`); the reTerminal frame is pinned byte-for-byte by
+  `tests/host/render_golden.txt` — `render_host_test.sh --update` only for an
+  intended layout change, and say which frames moved. Boards without an IMU
+  have no auto-rotate (`rotate auto` stays manual). Colour boards layer
   `sdkconfig.defaults.<board>` on the base, use `partitions_16mb.csv`, log on
   USB-Serial-JTAG, and accept `ota` only for images stamped with their own
   board id (see §10b). Shared

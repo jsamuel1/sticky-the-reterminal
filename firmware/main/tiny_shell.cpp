@@ -1,6 +1,7 @@
 // tiny_shell — home screen + nav stack. See tiny_shell.h.
 #include "tiny/tiny_shell.h"
 #include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
+#include "tiny/board_caps.h"
 #include "tiny/tiny_onboard.h"
 #include "sticky_buzzer.h"
 #include "tiny/tiny_config.h"
@@ -92,7 +93,8 @@ static esp_err_t render_settings(void) {
     char ssid[40] = "-";
     int rssi = 0;
     bool have_rssi = false;
-    EXT_RAM_BSS_ATTR static char sj[1024];
+    // PSRAM: 2 KB of internal .bss is TLS headroom the voice upload needs.
+    EXT_RAM_BSS_ATTR static char sj[2048];   // same ceiling as the `status` verb
     if (tiny_node_status_json(sj, sizeof sj) == ESP_OK) {
         cJSON *o = cJSON_Parse(sj);
         if (o) {
@@ -148,6 +150,9 @@ static esp_err_t render_settings(void) {
         cJSON_AddItemToArray(items, bv);
         // Display section: rotation lock. Same menu block — the
         // two behavior toggles live together above the read-only vitals.
+        // Only on a board with an accelerometer: without one "follow gravity"
+        // is a promise nothing can keep (`rotate 0|90|180|270` still works).
+        if (tiny_board_caps()->imu) {
         cJSON *rt = cJSON_CreateObject();
         char rlab[36], rnote[36];
         if (tiny_orient_auto()) {
@@ -163,6 +168,7 @@ static esp_err_t render_settings(void) {
         cJSON_AddStringToObject(rt, "note", rnote);
         cJSON_AddStringToObject(rt, "id", "rotlock");
         cJSON_AddItemToArray(items, rt);
+        }
         // Autosleep idle budget. The note names the NEXT value —
         // a cycling control that hides its next stop is a roulette wheel.
         cJSON *sl = cJSON_CreateObject();

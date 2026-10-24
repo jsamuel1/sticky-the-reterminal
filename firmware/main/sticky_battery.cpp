@@ -137,3 +137,11 @@ esp_err_t sticky_battery_read_detail(BatteryDetail &detail)
              detail.charging ? "charging" : "discharging", detail.status_bits);
     return ESP_OK;
 }
+
+esp_err_t sticky_battery_read_voltage(int &millivolts)
+{
+    BatteryDetail detail;
+    const esp_err_t err = sticky_battery_read_detail(detail);
+    if (err == ESP_OK) millivolts = detail.voltage_mv;
+    return err;
+}
