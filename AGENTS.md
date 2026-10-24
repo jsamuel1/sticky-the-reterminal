@@ -147,7 +147,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 | `tiny_touch` | GT911 task (prio 6) → hit-region resolution → local action or `ui_tap` event upstream |
 | `tiny_button` | GPIO4/5/6 press/hold · raw-GPIO UP+DOWN 1 s unlock chord that the gated layer cannot disable |
 | `tiny_lock` | §11 pocket lockout: manual + IMU auto (face-down ≥3 s, walking ≥5 s after 30 s idle) · gates touch/buttons/**mic capture entry** · `status.locked` |
-| `tiny_orient` | IMU classify → auto-rotate (1 Hz e-ink; 300 ms AMOLED; 3 agreeing samples) · per-board axis tables in `tiny/tiny_orient_map.h` (host-tested) · feeds lock's walk detector at 1 Hz |
+| `tiny_orient` | IMU classify → auto-rotate (1 Hz e-ink; 300 ms AMOLED; 3 agreeing samples) · per-board axis tables in `tiny/tiny_orient_map.h` (host-tested) · feeds the supported lock detector at ≤1 Hz (disabled on no-chord boards) |
 | `tiny_audio` | PDM 16 kHz WAV into PSRAM (cap 15 s) · re-claims GPIO19/20 from USB-JTAG before every capture (deep-sleep wake mutes the mic otherwise) · buzzer LEDC GPIO48, silent/soft tiers |
 | `tiny_upload` / `tiny_screenshot` | `POST /api/media` (PSRAM buffer) · framebuffer → 2-bit PNG → URL |
 | `tiny_sensors` | live on-demand reads: SHT40, LSM6DS3TR-C, PCF8563, plus battery from BQ27220 or FNK GPIO 9 ADC (AMOLED: QMI8658, PCF85063A, AXP2101) · ADC burst cached 1 s so status/glass agree · nulls never fabricated |

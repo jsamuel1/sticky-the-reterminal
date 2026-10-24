@@ -1,27 +1,15 @@
 // tiny_orient — see tiny/tiny_orient.h.
 //
-// Why this does NOT use sticky_imu's arrow_* classification: probed live at
-// 2026-08-25 23:20Z, the device sitting normally on its stand reports
-// orientation "face_up" with accel (x -0.499, y 0.009, z 0.878) — the panel is
-// tilted back, so the axis normal to the glass dominates and the vendor
-// classifier answers "flat" for the device's ordinary pose. Every arrow_* branch
-// would be dead code on a stand.
+// Rotation uses the dominant IN-PLANE acceleration vector (x, y), not
+// sticky_imu's coarse arrow_* classification: a device on a tilted stand can
+// have z as its largest component while an in-plane component still identifies
+// the physical edge that is up (reTerminal on its stand, probed 2026-08-25:
+// accel (-0.499, 0.009, 0.878) g, which the arrow_* classifier calls face_up).
 //
-// So we do what a phone does: throw away z and look at the IN-PLANE gravity
-// vector (x, y). That measurement is also our calibration reference — in the
-// pose that currently looks right-side-up, gravity points along -x. Hence:
-//
-//      gravity -x  -> 0 deg   (landscape, the reference we measured)
-//      gravity +x  -> 180 deg (exactly opposite; certain)
-//      gravity -y  -> 90 deg  }  which of the two portraits is which
-//      gravity +y  -> 270 deg }  needs a human to turn the device once
-//
-// The 90/270 handedness is the one thing here that is an assumption rather than
-// a measurement (QUESTIONS.md 2026-08-25) — if portrait comes up upside down it
-// is this table, and only this table, that is wrong.
-//
-// The tables themselves live in tiny/tiny_orient_map.h (one per board, host
-// tested); this file is the policy: sample, debounce, commit.
+// Board calibration lives in tiny/tiny_orient_map.h. The reTerminal table is
+// measured and includes its framebuffer push transform; the AMOLED table is
+// inferred pending owner-hardware calibration. This file owns only sampling,
+// debounce, and commit policy.
 #include "tiny/tiny_orient.h"
 
 #include <cstdio>
@@ -50,13 +38,14 @@ static constexpr const TinyOrientMap &kMap = kTinyOrientMapAmoled18;
 static constexpr int kPollMs = 1000;
 static constexpr const TinyOrientMap &kMap = kTinyOrientMapReterminal;
 #endif
-// 3 agreeing samples ~= 3 s of holding still. An e-ink turn is a visible
-// ~600 ms flash, so the cost of being eager is a panel that strobes while the
-// human is still moving; the cost of being patient is a second of lag. Patience
-// wins on a device you put down.
+// 3 agreeing samples = 3 x kPollMs of holding still (~3 s e-ink, ~0.9 s
+// AMOLED). An e-ink turn is a visible ~600 ms flash, so the cost of being eager
+// is a panel that strobes while the human is still moving; the cost of being
+// patient is a second of lag. Patience wins on a device you put down.
 static constexpr int kAgree = 3;
-// tiny_lock's thresholds are sample counts at 1 Hz (tiny_lock.cpp): it is
-// fed once per second whatever the rotation poll rate is.
+// tiny_lock's thresholds are sample counts at no more than 1 Hz
+// (tiny_lock.cpp). The reTerminal feeds exactly every second; faster panel
+// polling is downsampled to the first whole-poll interval >= 1 second.
 static constexpr int kLockFeedEvery = (1000 + kPollMs - 1) / kPollMs;
 
 static volatile bool s_auto = true;
@@ -73,17 +62,8 @@ static uint32_t s_commits = 0;      // rotations actually applied
 static int s_agree = 0;             // consecutive agreeing samples right now
 static float s_ax = 0.0F, s_ay = 0.0F, s_az = 0.0F;
 
-// -1 when the reading says nothing about which way is up.
-// CALIBRATION (reTerminal P0 bug, owner-on-hardware ~00:20Z: "turns correctly
-// but I see upside down"): the original mapping (ax<0 -> 0, ax>0 -> 180, ay<0
-// -> 90, ay>0 -> 270) was read off sticky_imu.cpp's vendor axis comments — but
-// the DRIVER already rotates every framebuffer 180 degrees at push
-// (rotate_framebuffer_180, unconditional in both refresh paths of
-// sticky_display.cpp). Those vendor comments describe the raw panel, not the
-// picture the user sees; the panel therefore tracked his hand perfectly while
-// showing the sky at his feet. Both pairs swap. The owner's report is the
-// calibration measurement: constant offset, correct tracking = mapping, not
-// logic. kTinyOrientMapReterminal carries the swapped table.
+// -1 when the reading says nothing about which way is up. Mapping stays in the
+// selected board table so calibration cannot alter debounce or display policy.
 static int classify(const StickyImuState &s, const char **name) {
     return tiny_orient_classify(s.acceleration_x_g, s.acceleration_y_g, kMap,
                                 name);
@@ -96,7 +76,8 @@ static void orient_task(void *) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kPollMs));
         // The IMU is read EVERY poll regardless of auto-rotate: this task is
-        // also the §11 auto-lock sensor (tiny_lock_imu_feed below). Rotation
+        // also the §11 auto-lock sensor (tiny_lock_imu_feed below, every
+        // kLockFeedEvery-th sample; a no-op on no-chord boards). Rotation
         // policy gates further down; the read does not.
         StickyImuState st = {};
         const esp_err_t rerr = sticky_imu_read(st);

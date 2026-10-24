@@ -27,9 +27,10 @@ bool tiny_lock_is_locked(void);      // the gate every input choke point asks
 // Locking is idempotent; unlock re-renders the last card (full refresh).
 esp_err_t tiny_lock_set(bool locked, const char *reason);
 
-// §11 half 2 — IMU auto-entry. tiny_orient's 1Hz task feeds every good
-// accel sample here (ONE imu reader on the bus; lock policy lives in this
-// module). Locks on: face-down ≥3s, or walking-motion ≥5s while the device
+// §11 half 2 — IMU auto-entry. tiny_orient's task feeds good accel samples
+// here at no more than 1 Hz (ONE imu reader on the bus; lock policy lives in
+// this module). Boards without an UP+DOWN unlock chord ignore the feed: a lock
+// the IMU entered there could only be left over the relay. Locks on: face-down ≥3s, or walking-motion ≥5s while the device
 // has seen no input for 30s. No-ops while already locked.
 void tiny_lock_imu_feed(float ax_g, float ay_g, float az_g);
 

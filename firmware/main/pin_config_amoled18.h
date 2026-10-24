@@ -7,7 +7,8 @@
 // must be confirmed on hardware. Driven so far: BOOT button, the shared I2C
 // bus, the TCA9554 expander, the CO5300 panel (lcd_panel_co5300.cpp), the
 // ES8311 codec, the CST820 touch (tiny_touch.cpp), the AXP2101 (battery,
-// USB, PWR key) and the PCF85063A RTC.
+// USB, PWR key), the PCF85063A RTC and the QMI8658 accelerometer
+// (sticky_imu_qmi8658.cpp).
 
 // Real drivers this board builds in place of hal_absent.cpp's stubs.
 #define HAL_PMU_AXP2101     1   // sticky_pmu_axp2101.cpp

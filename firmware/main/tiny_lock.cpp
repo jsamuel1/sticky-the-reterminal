@@ -27,7 +27,8 @@ static const int kChordPollMs = 50;    // 20 samples over the chord second
 static atomic_bool s_locked = false;
 
 // §11 auto-entry constants — named, per spec ("firmware constants, tuned
-// on-device"). Sampling arrives at tiny_orient's 1Hz cadence, so the sample
+// on-device"). tiny_orient feeds at no more than 1 Hz (exactly 1 Hz on the
+// reTerminal, the only board with auto-entry armed today), so the sample
 // counts below ARE the seconds.
 static const float kFaceDownG = 0.60F;     // az below -this = glass to the fabric
 static const int kFaceDownSamples = 3;     // ≥3s face-down -> pocket/table-down

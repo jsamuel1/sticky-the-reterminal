@@ -31,13 +31,13 @@ Everything below describes the binary as built.
 │   ├─ tiny_button      GPIO4/5/6 press/hold semantics; raw-GPIO unlock chord │
 │   ├─ tiny_lock        §11 pocket lockout: manual + IMU auto-entry, input    │
 │   │                   gates (touch/buttons/mic), status.locked truth        │
-│   ├─ tiny_orient      IMU classify → auto-rotate (settle before commit);    │
-│   │                   its 1 Hz reader also feeds tiny_lock's walk detector  │
+│   ├─ tiny_orient      IMU classify → auto-rotate (1 Hz e-ink, 300 ms AMOLED;│
+│   │                   settle before commit); feeds lock at ≤1 Hz when armed │
 │   ├─ tiny_audio       PDM capture → WAV in PSRAM (capture-entry gate, §11)  │
 │   │                   · buzzer chime, LEDC GPIO48 — chimes, never speech    │
 │   ├─ tiny_upload      POST /api/media via esp_http_client (PSRAM buffer)    │
 │   ├─ tiny_screenshot  framebuffer → upload: render ground truth on demand   │
-│   ├─ tiny_sensors     I²C1 live reads: SHT40 · LSM6DS3TR-C · PCF8563 ·      │
+│   ├─ tiny_sensors     I²C1 live reads: SHT40 · LSM6DS3/QMI8658 · PCF8563 ·  │
 │   │                   BQ27220 — the sensors verb reads hardware, not cache  │
 │   ├─ tiny_time        RTC→system at boot; SNTP→system→RTC on Wi-Fi-up;      │
 │   │                   clock names its source (sntp/rtc)                     │
