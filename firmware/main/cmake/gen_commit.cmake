@@ -13,12 +13,17 @@ execute_process(
 if(NOT RC EQUAL 0 OR TINY_SHA STREQUAL "")
   set(TINY_SHA "nogit")
 endif()
-# Dirty flag scoped to firmware/: uncommitted markdown elsewhere in the repo
-# must not taint the FIRMWARE's provenance
-# string ("e1fac273-dirty" for a clean-source build). The artifact's honesty
-# boundary is the tree that is COMPILED INTO it -- firmware/ -- not the repo.
+# Dirty flag scoped to what is COMPILED INTO the image: firmware/ (main, the
+# project CMakeLists, sdkconfig defaults, partition tables, idf_component.yml)
+# and the vendored Seeed components EXTRA_COMPONENT_DIRS pulls in. Uncommitted
+# markdown elsewhere in the repo must not taint the FIRMWARE's provenance
+# string ("e1fac273-dirty" for a clean-source build); an edited partition table
+# or vendor driver must. Build dirs, firmware/sdkconfig and managed_components
+# are gitignored, so they never count. REPO_DIR is firmware/main.
+get_filename_component(TINY_FW_DIR "${REPO_DIR}/.." ABSOLUTE)
+get_filename_component(TINY_VENDOR_DIR "${REPO_DIR}/../../vendor/Sticky_dashboard_demo/components" ABSOLUTE)
 execute_process(
-  COMMAND git status --porcelain -- ${REPO_DIR}
+  COMMAND git status --porcelain -- ${TINY_FW_DIR} ${TINY_VENDOR_DIR}
   WORKING_DIRECTORY ${REPO_DIR}
   OUTPUT_VARIABLE TINY_DIRTY
   OUTPUT_STRIP_TRAILING_WHITESPACE

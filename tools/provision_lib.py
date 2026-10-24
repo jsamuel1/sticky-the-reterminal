@@ -29,15 +29,13 @@ import time
 import urllib.error
 import urllib.request
 
-BOARD_FLASH = {"reterminal": "32MB", "fnk0104s": "16MB", "amoled18": "16MB"}
+BOARDS = ("reterminal", "fnk0104s", "amoled18")
 BODY = "sticky-the-reterminal"
-PLATFORM = "esp32s3"
+PLATFORM = "esp32s3"   # = tiny_pair.cpp start_code()
 KIND = "daemon"
-# Firmware verbs (tiny_node.cpp). body:<slug> and via:<host> go first, as tiny-tech does.
-FW_CAPS = ["render_ui", "status", "sensors", "say", "ask", "play", "voice", "screenshot",
-           "miccheck", "page", "rotate", "glance", "tap", "swipe", "scroll", "lock",
-           "unlock", "sleep", "ota", "messages", "config", "agent"]
 CAP_LEN, CAP_MAX = 32, 32
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_FW = os.path.join(os.path.dirname(HERE), "firmware")
 DEFAULT_API = "https://tiny.technology"
 UA = "sticky provision_new.sh"
 
@@ -95,8 +93,71 @@ def parse_flash_id(text):
     return m.group(1).lower(), (s.group(1) if s else "unknown")
 
 
-def check_size(board, detected):
-    want = BOARD_FLASH[board]
+# ---------------------------------------------------------------- firmware facts
+# Read from the firmware tree being flashed (its own branch), never copied here:
+# a hand-kept copy drifts the day a verb or a board's flash size changes.
+
+def firmware_caps(fw_dir):
+    """The verb roster tiny_node.cpp s_caps[] advertises in every heartbeat."""
+    path = os.path.join(fw_dir, "main", "tiny_node.cpp")
+    try:
+        src = open(path).read()
+    except OSError:
+        raise Refused("cannot read %s for the capability roster" % path)
+    m = re.search(r"\bs_caps\s*\[\s*\]\s*=\s*\{([^}]*)\}", src)
+    caps = re.findall(r'"([^"]+)"', m.group(1)) if m else []
+    if not caps:
+        raise Refused("no s_caps[] roster in %s" % path)
+    return caps
+
+
+def board_flash_size(fw_dir, board):
+    """CONFIG_ESPTOOLPY_FLASHSIZE_* the board's sdkconfig defaults select (last one wins)."""
+    size = None
+    for f in ["sdkconfig.defaults"] + ([] if board == "reterminal" else ["sdkconfig.defaults." + board]):
+        p = os.path.join(fw_dir, f)
+        if not os.path.exists(p):
+            raise Refused("no %s for board %s" % (p, board))
+        for line in open(p):
+            m = re.match(r"CONFIG_ESPTOOLPY_FLASHSIZE_(\d+MB)=y\s*$", line.strip())
+            if m:
+                size = m.group(1)
+    if not size:
+        raise Refused("no CONFIG_ESPTOOLPY_FLASHSIZE_* in %s sdkconfig defaults" % board)
+    return size
+
+
+def commit_of(fw_commit):
+    """The sha inside a `git describe --always --abbrev=8 [--dirty]` stamp:
+    'bb2f9323', 'bb2f9323-dirty', or 'v0.31.0-3-gbb2f9323[-dirty]' (= ota_push.py)."""
+    s = str(fw_commit or "")
+    if s.endswith("-dirty"):
+        s = s[: -len("-dirty")]
+    if "-g" in s:
+        s = s.rsplit("-g", 1)[1]
+    return s
+
+
+def check_provenance(fw_commit, sha, allow_dirty=False):
+    """Refuse an image that cannot name its exact tree: no stamp, a -dirty stamp,
+    or a stamp that is not the source HEAD (a stale --no-build dir). allow_dirty
+    downgrades all three to a warning."""
+    c = commit_of(fw_commit)
+    if not fw_commit or fw_commit == "nogit" or len(c) < 7:
+        why = "build carries no fw_commit stamp (%s)" % (fw_commit or "missing tiny_commit.h")
+    elif str(fw_commit).endswith("-dirty"):
+        why = "build is %s (uncommitted firmware/ or vendor/ source)" % fw_commit
+    elif not re.fullmatch(r"[0-9a-f]{40}", sha or "") or not sha.startswith(c):
+        why = "build says fw_commit %s but the source HEAD is %s (stale --no-build dir?)" % (fw_commit, sha)
+    else:
+        return
+    if not allow_dirty:
+        raise Refused(why + " — commit and rebuild, or pass --allow-dirty")
+    say("[provision] warning: " + why + " (--allow-dirty)")
+
+
+def check_size(board, detected, fw_dir=DEFAULT_FW):
+    want = board_flash_size(fw_dir, board)
     if detected in ("", "unknown", "Unknown"):
         say("[provision] warning: flash size not detected; expecting %s for %s" % (want, board))
         return
@@ -159,8 +220,9 @@ def make_plan(build_dir, board, allow_unbuilt=False):
     build_dir = os.path.abspath(build_dir)
     firmware_dir = os.path.dirname(build_dir)
     fa_path = os.path.join(build_dir, "flasher_args.json")
+    want_size = board_flash_size(firmware_dir, board)
     plan = {"board": board, "build_dir": build_dir, "built": os.path.exists(fa_path),
-            "expected_flash_size": BOARD_FLASH[board]}
+            "expected_flash_size": want_size}
     if not plan["built"]:
         if not allow_unbuilt:
             raise Refused("no %s — build first (tools/build_board.sh %s)" % (fa_path, board))
@@ -177,8 +239,8 @@ def make_plan(build_dir, board, allow_unbuilt=False):
     if built_board != board:
         raise Refused("%s holds a %s build, not %s" % (build_dir, built_board, board))
     size = fa.get("flash_settings", {}).get("flash_size")
-    if size != BOARD_FLASH[board]:
-        raise Refused("%s is built for %s flash; %s has %s" % (build_dir, size, board, BOARD_FLASH[board]))
+    if size != want_size:
+        raise Refused("%s is built for %s flash; %s has %s" % (build_dir, size, board, want_size))
     part_csv = sdk.get("PARTITION_TABLE_FILENAME") or sdk.get("PARTITION_TABLE_CUSTOM_FILENAME")
     part_csv = part_csv if os.path.isabs(part_csv) else os.path.join(firmware_dir, part_csv)
     nvs_off, nvs_size = nvs_region(part_csv)
@@ -248,7 +310,10 @@ def api_base(creds):
     return a.rstrip("/")
 
 
-def capabilities():
+def capabilities(fw_dir=DEFAULT_FW):
+    """body:<slug> (+ via:<host>) first, as tiny-tech does, then the flashed firmware's
+    own s_caps[] — the same set its first heartbeat will advertise."""
+    fw = firmware_caps(fw_dir)
     head = ["body:" + BODY]
     try:
         dev = _read_json(os.path.join(tiny_home(), "device.json"))
@@ -257,7 +322,7 @@ def capabilities():
     except (OSError, ValueError):
         pass
     out = []
-    for c in head + FW_CAPS:
+    for c in head + fw:
         c = c.strip().lower()[:CAP_LEN]
         if c and c not in out:
             out.append(c)
@@ -367,12 +432,12 @@ def write_receipt(path, rec):
     os.chmod(path, 0o600)
 
 
-def enroll(name, receipt, adopt=False, dry_run=False):
+def enroll(name, receipt, adopt=False, dry_run=False, fw_dir=DEFAULT_FW):
     """Returns device_id (prints nothing else on stdout). Dry run: describe the route, send nothing
     but a read-only GET /api/devices when a session exists."""
+    claim = {"name": name, "platform": PLATFORM, "kind": KIND, "capabilities": capabilities(fw_dir)}
     creds = load_creds()
     api = api_base(creds)
-    claim = {"name": name, "platform": PLATFORM, "kind": KIND, "capabilities": capabilities()}
     if creds:
         same, live = fleet_rows(api, creds["token"], name)
         if dry_run:
@@ -485,13 +550,17 @@ def main(argv=None):
     sub.required = True
     a = sub.add_parser("name"); a.add_argument("mac")
     sub.add_parser("flash-id")
-    a = sub.add_parser("check-size"); a.add_argument("board", choices=sorted(BOARD_FLASH)); a.add_argument("detected")
-    a = sub.add_parser("plan"); a.add_argument("build_dir"); a.add_argument("board", choices=sorted(BOARD_FLASH))
+    a = sub.add_parser("check-size"); a.add_argument("board", choices=BOARDS); a.add_argument("detected")
+    a.add_argument("--fw", default=DEFAULT_FW)
+    a = sub.add_parser("provenance"); a.add_argument("fw_commit"); a.add_argument("sha")
+    a.add_argument("--allow-dirty", action="store_true")
+    a = sub.add_parser("plan"); a.add_argument("build_dir"); a.add_argument("board", choices=BOARDS)
     a.add_argument("--out", required=True); a.add_argument("--allow-unbuilt", action="store_true")
     a = sub.add_parser("argv"); a.add_argument("plan"); a.add_argument("nvs_bin")
     a = sub.add_parser("json-get"); a.add_argument("file"); a.add_argument("key")
     a = sub.add_parser("enroll"); a.add_argument("--name", required=True); a.add_argument("--receipt", required=True)
     a.add_argument("--adopt", action="store_true"); a.add_argument("--dry-run", action="store_true")
+    a.add_argument("--fw", default=DEFAULT_FW, help="firmware/ dir being flashed (caps roster)")
     a = sub.add_parser("nvs-csv"); a.add_argument("receipt"); a.add_argument("out")
     a = sub.add_parser("bootlog"); a.add_argument("port"); a.add_argument("seconds", type=float); a.add_argument("log")
     o = p.parse_args(argv)
@@ -502,7 +571,9 @@ def main(argv=None):
         elif o.cmd == "flash-id":
             print(*parse_flash_id(sys.stdin.read()))
         elif o.cmd == "check-size":
-            check_size(o.board, o.detected)
+            check_size(o.board, o.detected, o.fw)
+        elif o.cmd == "provenance":
+            check_provenance(o.fw_commit, o.sha, o.allow_dirty)
         elif o.cmd == "plan":
             plan = make_plan(o.build_dir, o.board, o.allow_unbuilt)
             with open(o.out, "w") as f:
@@ -518,7 +589,7 @@ def main(argv=None):
                 return 1
             print(v if not isinstance(v, (dict, list)) else json.dumps(v))
         elif o.cmd == "enroll":
-            dev = enroll(o.name, o.receipt, o.adopt, o.dry_run)
+            dev = enroll(o.name, o.receipt, o.adopt, o.dry_run, o.fw)
             if dev:
                 print(dev)
         elif o.cmd == "nvs-csv":

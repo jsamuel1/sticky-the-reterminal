@@ -59,8 +59,10 @@ if [ -n "$DIRTY_SHA" ]; then
   echo "         Commit firmware/ and rebuild (tools/playground_package.sh --build)." >&2
   exit 1
 fi
-if [ -n "$(git -C "$DIR" status --porcelain -- firmware/main firmware/CMakeLists.txt firmware/partitions.csv firmware/sdkconfig.defaults)" ]; then
-  echo "package: REFUSED — firmware/ has uncommitted changes (docs/release.md rule 1)." >&2
+# Same scope gen_commit.cmake stamps: everything compiled in (firmware/ incl.
+# every board's defaults + partition table, and the vendored Seeed components).
+if [ -n "$(git -C "$DIR" status --porcelain -- firmware vendor/Sticky_dashboard_demo/components)" ]; then
+  echo "package: REFUSED — firmware/ or vendor/ has uncommitted changes (docs/release.md rule 1)." >&2
   exit 1
 fi
 

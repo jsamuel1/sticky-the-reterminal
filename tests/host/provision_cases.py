@@ -42,6 +42,39 @@ check(refused(pl.check_size, "reterminal", "16MB") is not None, "reterminal buil
 check(refused(pl.check_size, "fnk0104s", "16MB") is None, "fnk0104s on 16MB passes")
 check(refused(pl.check_size, "amoled18", "32MB") is not None, "amoled18 build on a 32MB board refuses")
 
+# ---- firmware facts come from the tree being flashed, not a copy ---------------
+FW = os.path.join(ROOT, "firmware")
+os.environ["TINY_HOME"] = os.path.join(tempfile.gettempdir(), "provision-cases-no-home")  # no via: from host
+check([pl.board_flash_size(FW, b) for b in pl.BOARDS] == ["32MB", "16MB", "16MB"],
+      "flash size per board from sdkconfig.defaults[.<board>]")
+caps = pl.capabilities(FW)
+check(caps[0] == "body:" + pl.BODY and caps[1:] == pl.firmware_caps(FW) and "sd" in caps,
+      "claim = body cap + tiny_node.cpp s_caps[] verbatim (incl. sd)")
+alt = tempfile.mkdtemp()
+os.makedirs(os.path.join(alt, "main"))
+open(os.path.join(alt, "main", "tiny_node.cpp"), "w").write(
+    'static const char *const s_caps[] = { "render_ui",\n  "status", "newverb" };\n')
+for f, size in (("sdkconfig.defaults", "32MB"), ("sdkconfig.defaults.fnk0104s", "8MB")):
+    open(os.path.join(alt, f), "w").write("# CONFIG_ESPTOOLPY_FLASHSIZE_4MB is not set\n"
+                                          "CONFIG_ESPTOOLPY_FLASHSIZE_%s=y\n" % size)
+check(pl.capabilities(alt)[1:] == ["render_ui", "status", "newverb"],
+      "another branch's roster (added verb) is what gets claimed")
+check(pl.board_flash_size(alt, "fnk0104s") == "8MB" and refused(pl.check_size, "fnk0104s", "16MB", alt) is not None,
+      "another branch's flash size is what the board is checked against")
+open(os.path.join(alt, "main", "tiny_node.cpp"), "w").write("// no roster\n")
+check(refused(pl.capabilities, alt) is not None, "no s_caps[] roster refuses (never claims a guess)")
+shutil.rmtree(alt)
+
+# ---- provenance: the stamp must name exactly the source HEAD ------------------
+HEAD = "3ffffd7f" + "0" * 32
+check(refused(pl.check_provenance, "3ffffd7f", HEAD) is None, "clean stamp == HEAD passes")
+check(refused(pl.check_provenance, "v0.31.0-3-g3ffffd7f", HEAD) is None, "describe-with-tag stamp == HEAD passes")
+for bad, what in (("3ffffd7f-dirty", "-dirty"), ("nogit", "nogit"), (None, "missing stamp"),
+                  ("0123abcd", "stale build (other sha)")):
+    check(refused(pl.check_provenance, bad, HEAD) is not None, "%s refuses" % what)
+    check(refused(pl.check_provenance, bad, HEAD, True) is None, "%s passes with --allow-dirty" % what)
+check(refused(pl.check_provenance, "3ffffd7f", "nogit") is not None, "source without git refuses")
+
 # ---- flash plan --------------------------------------------------------------
 tmp = tempfile.mkdtemp()
 
@@ -182,8 +215,9 @@ check(r["device_token"] == "TOK-PAIR" and r["via"] == "pair" and oct(os.stat(rec
       "receipt holds the token, 0600")
 start = [b for pth, b in Api.state["calls"] if pth == "/api/devices/pair/start"][0]
 check(start["name"] == "tiny-eba6" and start["kind"] == "daemon" and start["platform"] == "esp32s3"
-      and start["capabilities"][0] == "body:sticky-the-reterminal" and len(start["secretHash"]) == 64
-      and "secret" not in start, "pair/start claim: name/kind/platform/body cap, only the secret's hash")
+      and start["capabilities"][0] == "body:sticky-the-reterminal"
+      and start["capabilities"][1:] == pl.firmware_caps(FW) and len(start["secretHash"]) == 64
+      and "secret" not in start, "pair/start claim: name/kind/platform/body cap, firmware's caps, only the secret's hash")
 for outcome in ("denied", "expired", "claimed"):
     reset(pair_outcome=outcome)
     check(outcome in (refused(pl.enroll, "tiny-eba6", receipt) or "") and not os.path.exists(receipt),

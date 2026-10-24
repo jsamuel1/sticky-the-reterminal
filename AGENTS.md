@@ -224,11 +224,12 @@ fix that only the glass showed.
 ## 7. Release discipline (`docs/release.md`)
 
 1. Publish builds come from a **clean detached worktree**
-   (`git status --porcelain -- firmware/` empty).
+   (`git status --porcelain -- firmware/ vendor/Sticky_dashboard_demo/components/` empty).
 2. Labels are monotonic; a burned label is never reused.
 3. Receipts outrank version strings — verify by making the surface answer.
 4. **Never publish a `-dirty` or unpushed `fw_commit`.** (`gen_commit.cmake`
-   injects `git describe` at build time; `-dirty` is scoped to `firmware/`.)
+   injects `git describe` at build time; `-dirty` covers everything compiled in:
+   `firmware/` and the vendored components. `tests/host/gen_commit_host_test.sh` pins it.)
 5. Prove ancestry before publishing: `git merge-base --is-ancestor <on-glass> <build>`.
 6. Claim a feature only after string-verifying the artifact.
 

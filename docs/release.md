@@ -15,7 +15,9 @@ up the `sed` hazard for others tripped it a day later.
 tree. *Incident:* an image built mid-edit shipped as `0.14.2-m12` — a label no
 commit carries — answering `page` and `tap` but not `scroll`, with a pre-M10
 help string: three eras in one binary. The precise gate is
-`git status --porcelain -- firmware/` empty; global `--dirty` trips on tracked
+`git status --porcelain -- firmware/ vendor/Sticky_dashboard_demo/components/`
+empty (everything compiled in, incl. board defaults, partition tables and the
+vendored drivers); global `--dirty` trips on tracked
 logs that aren't in the image.
 
 ## 2. Labels are monotonic, even accidental ones

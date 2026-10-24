@@ -26,6 +26,19 @@ release, newest first.
   320×480 and 368×448, fails on edge-band ink or out-of-panel tap regions,
   and pins every frame in `render_golden.txt`. Set `RENDER_OUT=dir` to get
   the PNGs. A 1 px reTerminal margin mutation fails all 36 reTerminal frames.
+- **firmware/tools** — `fw_commit`'s `-dirty` now covers everything compiled
+  into the image: all of `firmware/` (project CMakeLists, every board's
+  sdkconfig defaults, partition tables) and the vendored Seeed components, not
+  only `firmware/main`. An edited partition table or vendor driver used to
+  build as a clean stamp. `playground_package.sh` gates on the same scope.
+  `tests/host/gen_commit_host_test.sh` runs the shipped `gen_commit.cmake`
+  against a scratch repo (compiled-input edits dirty, docs/tools/build dirs not).
+- **tools** — `provision_new.sh` reads the enrolled capability roster
+  (`tiny_node.cpp` `s_caps[]`, which had gained `sd`) and the board's flash
+  size (`sdkconfig.defaults[.<board>]`) from the source it flashes instead of
+  hand-kept copies. It refuses uncommitted `firmware/`/`vendor/` source before
+  building, and a build whose `fw_commit` is `-dirty`, `nogit` or not the
+  source HEAD (stale `--no-build`), unless `--allow-dirty`.
 
 - **firmware** — colour UI on colour boards, grammar v16. The Canvas gains an
   optional 4-bit accent plane beside the unchanged 2-bit gray plane; only

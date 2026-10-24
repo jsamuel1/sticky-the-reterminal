@@ -10,7 +10,8 @@
 #   --dry-run                              print the plan; read the MAC, write nothing, enrol nothing
 #   --mac <base-mac>                       skip the port read (dry-run without a board)
 #   --adopt                                re-key a same-name row that is ONLINE (else refused)
-#   --allow-dirty                          flash a "-dirty" build (uncommitted firmware/)
+#   --allow-dirty                          flash uncommitted firmware/ or vendor/ source, or a
+#                                          build whose fw_commit is not the source HEAD
 #   --no-build                             flash the existing build dir as is
 #   --no-wifi                              identity only; the board asks for Wi-Fi itself
 #   --keep-src                             keep the temp clone of --repo/--branch
@@ -27,8 +28,11 @@
 #      match --board refuses.
 #   2. Builds <repo>@<branch> for the board with tools/build_board.sh (Docker
 #      espressif/idf:v5.4 via tools/idf.sh; TINY_IDF=host opts out). The ref is
-#      cloned into a temp dir unless it is this checkout's HEAD. A "-dirty"
-#      fw_commit refuses unless --allow-dirty.
+#      cloned into a temp dir unless it is this checkout's HEAD. Uncommitted
+#      firmware/ or vendor/ source refuses before the build, and the built
+#      fw_commit must be exactly the source HEAD (not -dirty, not nogit, not a
+#      stale --no-build dir) unless --allow-dirty. The board's flash size and
+#      the enrolled capability roster are read from that source's firmware/.
 #   3. Plans the write from the build's own flasher_args.json (parts, flash
 #      mode/size/freq) plus NVS at the offset partitions*.csv gives it.
 #   4. Enrols. With a session (~/.tiny/credentials.json or TINY_TOKEN): a
@@ -65,7 +69,7 @@ IMAGE="${TINY_IDF_IMAGE:-espressif/idf:v5.4}"
 VENV="${XDG_CACHE_HOME:-$HOME/.cache}/sticky-provision/venv"
 ESPTOOL_PIN="esptool==4.8.1"                     # = espressif/idf:v5.4
 NVSGEN_PIN="esp-idf-nvs-partition-gen==0.1.6"    # = espressif/idf:v5.4
-ADOPT_FLAG=""
+ADOPT_FLAG="" DIRTY_FLAG=""
 DRY=0 ALLOW_DIRTY=0 NO_BUILD=0 NO_WIFI=0 KEEP=0
 MAC="" PORT=""
 
@@ -82,7 +86,7 @@ while [ $# -gt 0 ]; do
     --mac=*)       MAC="${1#*=}"; shift ;;
     --dry-run)     DRY=1; shift ;;
     --adopt)       ADOPT_FLAG=--adopt; shift ;;
-    --allow-dirty) ALLOW_DIRTY=1; shift ;;
+    --allow-dirty) ALLOW_DIRTY=1; DIRTY_FLAG=--allow-dirty; shift ;;
     --no-build)    NO_BUILD=1; shift ;;
     --no-wifi)     NO_WIFI=1; shift ;;
     --keep-src)    KEEP=1; shift ;;
@@ -171,7 +175,6 @@ else
 fi
 ids="$(lib name "$BASE")" || die "bad MAC '$BASE'"
 read -r AP NAME <<<"$ids"
-[ -n "$MAC" ] || lib check-size "$BOARD" "$SIZE"
 log "${PORT:-<no port>} base=$BASE softap=$AP flash=$SIZE → name $NAME (board $BOARD)"
 
 # ---- 2. source: this checkout's HEAD in place, else a temp clone ------------
@@ -225,6 +228,20 @@ SHA="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo nogit)"
 [ -f "$SRC/tools/idf.sh" ] || die "$ORIGIN${BRANCH:+@$BRANCH} predates tools/idf.sh — this script cannot build it"
 if [ "$BOARD" = reterminal ]; then BUILD="$SRC/firmware/build"; else BUILD="$SRC/firmware/build-$BOARD"; fi
 log "source $ORIGIN${BRANCH:+ @ $BRANCH} = $SHA"
+# Board facts (flash size, verb roster) come from the source being flashed.
+[ -n "$MAC" ] || lib check-size "$BOARD" "$SIZE" --fw "$SRC/firmware"
+# What the image is built from: firmware/ + the vendored components (the scope
+# gen_commit.cmake stamps). A dirty tree refuses before minutes of building.
+DIRTY_SRC=""
+if [ "$SHA" != nogit ]; then
+  DIRTY_SRC="$(git -C "$SRC" status --porcelain -- firmware vendor/Sticky_dashboard_demo/components 2>/dev/null || true)"
+fi
+if [ -n "$DIRTY_SRC" ]; then
+  printf '%s\n' "$DIRTY_SRC" | head -8 | sed 's/^/[provision]   /'
+  if [ "$ALLOW_DIRTY" = 1 ]; then log "warning: uncommitted firmware/vendor source (--allow-dirty)"
+  elif [ "$DRY" = 1 ]; then log "warning: uncommitted firmware/vendor source — a real run refuses without --allow-dirty"
+  else die "uncommitted firmware/ or vendor/ source in $SRC — commit, or pass --allow-dirty"; fi
+fi
 
 # ---- 3. build, then plan from the build's own flasher_args.json -------------
 if [ "$DRY" = 1 ]; then
@@ -233,7 +250,7 @@ if [ "$DRY" = 1 ]; then
   echo "build     $BUILD ($note)"
   echo "wifi      ${WIFI_SSID:+ssid \"$WIFI_SSID\" from }$WIFI_FROM"
   echo "receipt   $SELF/.secrets.$NAME.json (0600)"
-  lib enroll --name "$NAME" --receipt /dev/null --dry-run ${ADOPT_FLAG:+"$ADOPT_FLAG"}
+  lib enroll --name "$NAME" --receipt /dev/null --dry-run --fw "$SRC/firmware" ${ADOPT_FLAG:+"$ADOPT_FLAG"}
   echo "dry run — nothing built, enrolled or written${PORT:+ (the MAC read reset the board)}"
   exit 0
 fi
@@ -247,16 +264,16 @@ if [ "$NO_BUILD" = 0 ]; then
   "$@" >"$BLOG" 2>&1 </dev/null || { tail -15 "$BLOG" >&2; die "build failed (full log $BLOG)"; }
 fi
 lib plan "$BUILD" "$BOARD" --out "$WORK/plan.json"
-COMMIT="$(lib json-get "$WORK/plan.json" commit || echo unknown)"
-case "$COMMIT" in
-  *-dirty) [ "$ALLOW_DIRTY" = 1 ] || die "build is $COMMIT (uncommitted firmware/) — commit, or pass --allow-dirty" ;;
-esac
-case "$SHA" in "${COMMIT%-dirty}"*) ;; *) log "warning: build says fw_commit $COMMIT but source HEAD is $SHA (--no-build on a stale dir?)" ;; esac
+COMMIT="$(lib json-get "$WORK/plan.json" commit || echo nogit)"
+# The stamp must name this exact tree: refuse -dirty, nogit, or a sha that is not
+# the source HEAD (a stale --no-build dir) unless --allow-dirty.
+lib provenance "$COMMIT" "$SHA" ${DIRTY_FLAG:+"$DIRTY_FLAG"} \
+  || die "refusing to flash an image that cannot name its exact tree"
 
 # ---- 4. enrol (session or pairing code; token shown once) --------------------
 RECEIPT="$SELF/.secrets.$NAME.json"
 umask 077
-DEVICE_ID="$(lib enroll --name "$NAME" --receipt "$RECEIPT" ${ADOPT_FLAG:+"$ADOPT_FLAG"})" \
+DEVICE_ID="$(lib enroll --name "$NAME" --receipt "$RECEIPT" --fw "$SRC/firmware" ${ADOPT_FLAG:+"$ADOPT_FLAG"})" \
   || die "enrolment failed — nothing was flashed"
 log "enrolled $NAME device_id=$DEVICE_ID (receipt $RECEIPT)"
 
