@@ -86,6 +86,12 @@ release, newest first.
   upload) now replaces the home stream with a card naming the reason. Before
   this fix the glass stayed on "(( thinking ))". The upload error carries the
   free internal heap.
+- **firmware** — colour boards: an FNK0104S voice upload failed with
+  `ESP_ERR_NO_MEM` (24 KB internal free against the 60 KB TLS pre-flight).
+  Small mallocs and Wi-Fi/lwip buffers now go to PSRAM first
+  (`SPIRAM_MALLOC_ALWAYSINTERNAL=512`, `SPIRAM_TRY_ALLOCATE_WIFI_LWIP`), the
+  I²S DMA rings shrink to 4 × 240 frames, and the tone player's queue and
+  stack live in PSRAM. The audio init line logs its internal-RAM cost.
 
 ## 0.31.0 — grammar v14 — on-device pairing code (onboarding Phase B)
 

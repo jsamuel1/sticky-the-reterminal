@@ -18,3 +18,11 @@ CONFIG_SPIRAM_SPEED_80M=y
 # Console: native USB-Serial-JTAG on the USB-C port (vendor default).
 # CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Internal RAM: colour boards spend it on LCD DMA strips and I2S rings, and a
+# voice upload needs 60 KB of it free for TLS (tiny_upload pre-flight). With
+# the stock 16 KB threshold every small malloc lands internal: measured
+# 24 KB free at upload time on the FNK0104S. Small mallocs and Wi-Fi/lwip
+# buffers go to PSRAM first; explicit DMA/INTERNAL requests are unaffected.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
