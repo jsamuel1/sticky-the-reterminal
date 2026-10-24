@@ -13,7 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-// glibc < 2.38 has no strlcpy/strlcat; the device's newlib does.
+// glibc < 2.38 has no strlcpy/strlcat; the device's newlib does. Detect it
+// from the libc version, not a manual flag: ubuntu-latest (glibc 2.39, and a
+// fortified inline strlcpy under _FORTIFY_SOURCE) rejects a second definition.
+#if !defined(RENDER_SHIM_HAVE_STRLCPY) && defined(__GLIBC__) && \
+    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 38))
+#define RENDER_SHIM_HAVE_STRLCPY 1
+#endif
 #ifndef RENDER_SHIM_HAVE_STRLCPY
 static inline size_t strlcpy(char *d, const char *s, size_t n) {
     const size_t l = strlen(s);
