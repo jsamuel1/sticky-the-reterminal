@@ -40,6 +40,7 @@
 #include "tiny/tiny_audio.h"
 #include "tiny/tiny_button.h"
 #include "tiny/tiny_lock.h"
+#include "tiny/tiny_led.h"
 #include "tiny/tiny_orient.h"
 #include "tiny/tiny_sensors.h"
 #include "tiny/tiny_time.h"
@@ -122,6 +123,8 @@ extern "C" void app_main(void)
         ESP_LOGI(TAG, "touch init: %s", esp_err_to_name(tiny_touch_init()));
         // M5: mic power rail + buzzer.
         ESP_LOGI(TAG, "audio init: %s", esp_err_to_name(tiny_audio_init()));
+        // FNK0104S status light (no-op elsewhere); logs its internal cost.
+        tiny_led_init();
         // M9: SHT40 + IMU on I2C1 — the `sensors` verb. Logged, never
         // ESP_ERROR_CHECK'd: a dead sensor must not stop the boot.
         ESP_LOGI(TAG, "sensors init: %s", esp_err_to_name(tiny_sensors_init()));

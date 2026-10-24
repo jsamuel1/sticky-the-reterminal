@@ -6,6 +6,17 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware (FNK0104S)** — the board's WS2812 (GPIO 42) is a status light:
+  blue while the mic captures, amber while the upload and ask are in flight,
+  red for 5 s after an askfail card (not for "saved for later" or a backend
+  refusal sentence), off otherwise. Dark while pocket-locked, and latched
+  black before deep sleep. espressif/led_strip 3.0.3 over one RMT channel
+  (48 symbols, no DMA); boot logs its internal-RAM cost. Static DIRAM on
+  the fnk0104s image +2952 B (145508 → 148460), mostly the RMT TX ISR and
+  encoders, which IDF 5.4 places in IRAM unconditionally. Behind
+  `CONFIG_TINY_STATUS_LED` (FNK0104S only, default on) and
+  `CONFIG_TINY_STATUS_LED_BRIGHTNESS` (default 12/255). No verb or reply
+  change; the reTerminal and AMOLED-1.8 images do not carry it.
 - **firmware** — AMOLED-1.8 V2: CST820 touch is driven (P3b). Polled every
   30 ms at 0x15 on the shared I²C bus (SCL 14 / SDA 15, INT 21 logged only),
   CST816-protocol frame from register 0x01; reset is TCA9554 bit 2, pulsed by

@@ -149,6 +149,7 @@ extern "C" esp_err_t tiny_audio_chime(const char *) {
 // pad is never touched (the console is USB-Serial-JTAG on these boards).
 #include "audio_es8311.h"
 #include "esp_timer.h"
+#include "tiny/tiny_led.h"
 #include "tiny_pcm.h"
 
 #define SAMPLE_RATE AUDIO_ES8311_RATE
@@ -210,6 +211,10 @@ extern "C" esp_err_t tiny_audio_record_wav(int seconds, uint8_t **wav, size_t *l
     int16_t *st = (int16_t *)heap_caps_malloc(cap * 4, MALLOC_CAP_SPIRAM);
     if (!st) return ESP_ERR_NO_MEM;
 
+    // Status light: blue from here until the capture ends (every return
+    // below goes through `out`). No-op on boards without the light.
+    tiny_led_set(TINY_LED_LISTENING);
+
     // Drain what the DMA ring collected while nobody listened (~90 ms).
     {
         static int16_t junk[2 * 256];
@@ -247,6 +252,7 @@ extern "C" esp_err_t tiny_audio_record_wav(int seconds, uint8_t **wav, size_t *l
     }
 
 out:
+    tiny_led_set(TINY_LED_IDLE);
     ESP_LOGI(TAG, "record %ds -> %s (%u bytes)", seconds, esp_err_to_name(err),
              (unsigned)*len);
     return err;

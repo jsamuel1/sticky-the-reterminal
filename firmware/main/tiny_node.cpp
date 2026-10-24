@@ -8,6 +8,7 @@
 #include "tiny/tiny_askq.h"
 #include "tiny/tiny_agent.h"
 #include "tiny/tiny_lock.h"
+#include "tiny/tiny_led.h"
 
 #include "tiny/tiny_provision.h"
 
@@ -536,6 +537,7 @@ static void voice_fail_card(const char *title, const char *why, esp_err_t r) {
     char *ecs = cJSON_PrintUnformatted(ec);
     cJSON_Delete(ec);
     if (ecs) { tiny_display_render_card(ecs); free(ecs); }
+    tiny_led_error();  // status light: red with the card (FNK0104S)
 }
 
 extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
@@ -548,6 +550,15 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
     // RAII release: this function has six return paths and a manual give on
     // each would eventually miss one (that is how locks die).
     struct AskGuard { ~AskGuard() { xSemaphoreGive(s_ask_mux); } } guard;
+    // Status light (FNK0104S; no-op elsewhere): amber while the ask is in
+    // flight, off when it returns, red if it painted askfail. A queued-ask
+    // DRAIN stays dark for the same reason it paints no card: nobody is
+    // standing at it. Declared after `guard`, so it runs first on return.
+    struct LedGuard {
+        bool on;
+        ~LedGuard() { if (on) tiny_led_set(TINY_LED_IDLE); }
+    } led{!s_askq_draining};
+    if (led.on && text) tiny_led_set(TINY_LED_THINKING);
     s_ask_backend_spoke = false;  // §16 drain context — set true when st > 0
     static char audio_url[256];
     audio_url[0] = 0;
@@ -572,6 +583,7 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
             voice_fail_card("couldn't record", out, r);
             return r;
         }
+        if (led.on) tiny_led_set(TINY_LED_THINKING);  // before the ack chime: no dark gap
         tiny_audio_chime("ack");  // "heard you" — upload+think takes a while
         tiny_display_stream_note("(( thinking ))");
         r = tiny_upload_media(wav, wlen, "audio/wav", audio_url, sizeof audio_url);
@@ -696,9 +708,12 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
         cJSON *ec = cJSON_CreateObject();
         cJSON_AddStringToObject(ec, "type", "text");
         cJSON_AddStringToObject(ec, "card_id", "askfail");
+        // Status light: red unless the card turns out not to be a failure.
+        bool led_red = true;
         if (st <= 0 && text && strstr(out, "question saved")) {
             // Queued is not a failure — the card says what actually happens
             // next, and the glance cluster wears qN until it does.
+            led_red = false;
             cJSON_AddStringToObject(ec, "title", "saved for later");
             cJSON_AddStringToObject(ec, "body", out);
         } else if (st == 422 && audio_url[0]) {
@@ -735,6 +750,7 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
                 if (agent2[0]) snprintf(et, sizeof et, "@%s", agent2);
                 cJSON_ReplaceItemInObject(ec, "card_id",
                                           cJSON_CreateString("ask"));
+                led_red = false;  // an answer, not wreckage
                 cJSON_AddStringToObject(ec, "title", et);
                 cJSON_AddStringToObject(ec, "body", es->valuestring);
                 snprintf(out, out_cap, "%.400s", es->valuestring);
@@ -759,6 +775,7 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
         char *ecs = cJSON_PrintUnformatted(ec);
         cJSON_Delete(ec);
         if (ecs) { tiny_display_render_card(ecs); free(ecs); }
+        if (led_red) tiny_led_error();
         return ESP_FAIL;
     }
     cJSON *ar = cJSON_Parse(ask_resp);

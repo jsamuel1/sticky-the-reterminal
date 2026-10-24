@@ -41,6 +41,26 @@ config TINY_LCD_SPI_MHZ
         (QSPI, 4 data lines): the Waveshare BSP runs 40. Drop to 20 if the
         glass shows noise.
 
+config TINY_STATUS_LED
+    bool "WS2812 status light (listening / thinking / error)"
+    depends on TINY_BOARD_FNK0104S
+    default y
+    help
+        Drives the board's one WS2812 (GPIO42) through RMT as an ambient
+        state light: blue while the mic captures, amber while the upload or
+        ask is in flight, red for a few seconds after an ask fails, off
+        otherwise. Dark while pocket-locked and in deep sleep. Only the
+        FNK0104S has the part; every other board builds without it.
+
+config TINY_STATUS_LED_BRIGHTNESS
+    int "Status light brightness (1-64 of 255)"
+    depends on TINY_STATUS_LED
+    range 1 64
+    default 12
+    help
+        Scale applied to every colour. The LED sits behind the case at
+        arm's length; 12 is visible indoors without lighting the room.
+
 config TINY_DASHBOARD_URL
     string "Dashboard base URL (settings QR target)"
     default "https://sticky.cagatay.my"
