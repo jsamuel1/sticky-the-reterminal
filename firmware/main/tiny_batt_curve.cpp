@@ -1,8 +1,18 @@
 #include "tiny/tiny_batt_curve.h"
 
 #include <algorithm>
+#include <climits>
+#include <cstdint>
 
 namespace {
+
+// Every arithmetic step on caller-supplied ints is done in 64 bits and
+// clamped back, so the public API has no signed-overflow UB for ANY input
+// (the ADC never comes close, but these are extern "C" and host-tested).
+int clamp_int(int64_t v)
+{
+    return v > INT_MAX ? INT_MAX : v < INT_MIN ? INT_MIN : (int)v;
+}
 
 // Resting open-circuit voltage of a 1S LiPo vs state of charge. The widely
 // used 5 %-step table (Adafruit/Seeed/LVGL demos agree to ~10 mV); the board
@@ -28,10 +38,12 @@ extern "C" int tiny_batt_median_mv(int *mv, size_t n)
 {
     if (mv == nullptr || n == 0) return -1;
     std::sort(mv, mv + n);
-    // Even n: midpoint of the middle two, rounded half up - deterministic,
-    // and computed without a+b so no int input can overflow.
+    // Even n: midpoint of the middle two, rounded half up - deterministic.
+    // 64-bit: b - a spans up to 2^32 - 1 for INT_MIN..INT_MAX; the midpoint
+    // itself always lies in [a, b], so it fits back in an int.
     if (n % 2) return mv[n / 2];
-    return mv[n / 2 - 1] + (mv[n / 2] - mv[n / 2 - 1] + 1) / 2;
+    const int64_t a = mv[n / 2 - 1], b = mv[n / 2];
+    return (int)(a + (b - a + 1) / 2);
 }
 
 extern "C" int tiny_batt_lipo_percent(int pack_mv)
@@ -60,14 +72,14 @@ extern "C" tiny_batt_estimate_t tiny_batt_estimate(int *pin_mv, size_t n,
     if (pin_mv == nullptr || n == 0 || divider <= 0) return e;
     const int med = tiny_batt_median_mv(pin_mv, n);  // sorts ascending
     // Divider undone on the median itself - no integer division in between.
-    e.pack_mv = med * divider;
+    e.pack_mv = clamp_int((int64_t)med * divider);
     // Spread = interquartile range, so ONE spike (which the median already
     // ignores) cannot veto the percent either; a charger hunting with no cell
     // moves the whole burst and still trips it. Below 4 samples there are no
     // quartiles to speak of: max - min.
     const size_t lo = n >= 4 ? n / 4 : 0;
     const size_t hi = n >= 4 ? (3 * n) / 4 : n - 1;
-    e.spread_mv = (pin_mv[hi] - pin_mv[lo]) * divider;
+    e.spread_mv = clamp_int(((int64_t)pin_mv[hi] - pin_mv[lo]) * divider);
     e.plausible = e.pack_mv >= TINY_BATT_MIN_PLAUSIBLE_MV &&
                   e.pack_mv <= TINY_BATT_MAX_PLAUSIBLE_MV &&
                   e.spread_mv <= TINY_BATT_MAX_SPREAD_MV;

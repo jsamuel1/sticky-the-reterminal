@@ -173,7 +173,7 @@ extern "C" esp_err_t tiny_sensors_json(char *out, size_t cap) {
         note_error(errors, bat.source, be);
     }
     if (have_bat && adc) {
-        // v19: a divider measures a voltage and nothing else. The percent is
+        // v20: a divider measures a voltage and nothing else. The percent is
         // a resting-voltage estimate; there is no current, capacity, health,
         // cycle count or temperature to report, so none is (zeros would be
         // claims). charging is null: a divider cannot see current.
@@ -186,7 +186,7 @@ extern "C" esp_err_t tiny_sensors_json(char *out, size_t cap) {
         cJSON_AddItemToObject(s, "battery", b);
     } else if (have_bat) {
         cJSON *b = cJSON_CreateObject();
-        cJSON_AddStringToObject(b, "source", "bq27220");  // v19
+        cJSON_AddStringToObject(b, "source", "bq27220");  // v20
         cJSON_AddNumberToObject(b, "percent", bat.percent);
         cJSON_AddNumberToObject(b, "voltage_mv", bat.voltage_mv);
         cJSON_AddNumberToObject(b, "current_ma", bat.current_ma);

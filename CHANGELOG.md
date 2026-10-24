@@ -21,14 +21,16 @@ release, newest first.
   3.0–4.35 V or the burst's interquartile spread exceeds 150 mV, so `status`
   `battery_pct` is null there and `battery_mv` still reports the measurement.
   `charging` is null (a divider sees no current); auto-sleep treats "cannot
-  tell" as wall power. `caps.battery_gauge` is on and `absent` drops
+  tell", and any divider read that is not a plausible cell, as wall power.
+  A valid 0% now shows in the title bar and onboarding (it was hidden as
+  "no reading"), and a failed read paints n/a on the sleep card, not 0%. `caps.battery_gauge` is on and `absent` drops
   `battery`, so the title-bar battery glyph and status card read real data.
   `sensors` battery gains `source` (`bq27220`|`adc`); an `adc` object carries
   only percent, voltage_mv, charging:null and present. `glance` battery_pct
   is null, not 0, with no reading.
-- **tests** — `tests/host/batt_curve_host_test.sh` (34 checks):
-  median, spike tolerance, divider precision, curve, plausibility gates,
-  overflow-safe median.
+- **tests** — `tests/host/batt_curve_host_test.sh` (39 checks, built with
+  UBSan in trap mode): median, spike tolerance, divider precision, curve,
+  plausibility gates, no signed overflow across INT_MIN..INT_MAX.
 
 - **firmware, grammar v19** — direct-artifact OTA now classifies every
   two-argument form, plus any one-argument value with a scheme (`http://`,
