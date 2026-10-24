@@ -44,6 +44,13 @@ extern "C" void tiny_lock_note_activity(void) {
 }
 
 extern "C" void tiny_lock_imu_feed(float ax, float ay, float az) {
+#if PIN_BTN_UP < 0 || PIN_BTN_DOWN < 0
+    // No UP+DOWN chord on this board (AMOLED-1.8: BOOT only), so a lock the
+    // IMU entered could only be left over the relay. Face-down on a desk must
+    // not strand the glass: auto-entry stays off; `lock`/`unlock` still work.
+    (void)ax; (void)ay; (void)az;
+    return;
+#endif
     if (atomic_load(&s_locked)) {
         s_face_streak = 0;
         s_motion_streak = 0;

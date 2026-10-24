@@ -25,7 +25,7 @@ elseif(CONFIG_TINY_BOARD_AMOLED18)
   # AMOLED-1.8 V2: CO5300 QSPI AMOLED behind the shared colour-panel canvas.
   set(TINY_BOARD_SRCS
     "board_generic.cpp" "sticky_power_generic.cpp" "lcd_canvas.cpp" "lcd_panel_co5300.cpp"
-    "hal_absent.cpp"
+    "hal_absent.cpp" "sticky_imu_qmi8658.cpp"
     "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp")
 else()
   # reTerminal Sticky (default): Seeed's HAL adapted from the dashboard demo.

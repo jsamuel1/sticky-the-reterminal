@@ -19,31 +19,44 @@
 // The 90/270 handedness is the one thing here that is an assumption rather than
 // a measurement (QUESTIONS.md 2026-08-25) — if portrait comes up upside down it
 // is this table, and only this table, that is wrong.
+//
+// The tables themselves live in tiny/tiny_orient_map.h (one per board, host
+// tested); this file is the policy: sample, debounce, commit.
 #include "tiny/tiny_orient.h"
 
-#include <cmath>
 #include <cstdio>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 #include "sticky_imu.h"
 #include "tiny/board_caps.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_lock.h"
+#include "tiny/tiny_orient_map.h"
 
 static const char *TAG = "tiny_orient";
 
+#if defined(CONFIG_TINY_BOARD_AMOLED18)
+// An AMOLED turn is one ~50 ms push with no flash, so the e-ink's patience
+// buys nothing: 3 agreeing samples at 300 ms = the card follows the hand in
+// ~1 s, with the same hysteresis against a wobble.
+static constexpr int kPollMs = 300;
+static constexpr const TinyOrientMap &kMap = kTinyOrientMapAmoled18;
+#else
 static constexpr int kPollMs = 1000;
+static constexpr const TinyOrientMap &kMap = kTinyOrientMapReterminal;
+#endif
 // 3 agreeing samples ~= 3 s of holding still. An e-ink turn is a visible
 // ~600 ms flash, so the cost of being eager is a panel that strobes while the
 // human is still moving; the cost of being patient is a second of lag. Patience
 // wins on a device you put down.
 static constexpr int kAgree = 3;
-// Below this much in-plane gravity the device is lying flat / face up and no
-// edge is meaningfully "up" — hold the last decision rather than guess.
-static constexpr float kFlatG = 0.35F;
+// tiny_lock's thresholds are sample counts at 1 Hz (tiny_lock.cpp): it is
+// fed once per second whatever the rotation poll rate is.
+static constexpr int kLockFeedEvery = (1000 + kPollMs - 1) / kPollMs;
 
 static volatile bool s_auto = true;
 static int s_last_deg = -1;
@@ -60,37 +73,28 @@ static int s_agree = 0;             // consecutive agreeing samples right now
 static float s_ax = 0.0F, s_ay = 0.0F, s_az = 0.0F;
 
 // -1 when the reading says nothing about which way is up.
+// CALIBRATION (reTerminal P0 bug, owner-on-hardware ~00:20Z: "turns correctly
+// but I see upside down"): the original mapping (ax<0 -> 0, ax>0 -> 180, ay<0
+// -> 90, ay>0 -> 270) was read off sticky_imu.cpp's vendor axis comments — but
+// the DRIVER already rotates every framebuffer 180 degrees at push
+// (rotate_framebuffer_180, unconditional in both refresh paths of
+// sticky_display.cpp). Those vendor comments describe the raw panel, not the
+// picture the user sees; the panel therefore tracked his hand perfectly while
+// showing the sky at his feet. Both pairs swap. The owner's report is the
+// calibration measurement: constant offset, correct tracking = mapping, not
+// logic. kTinyOrientMapReterminal carries the swapped table.
 static int classify(const StickyImuState &s, const char **name) {
-    const float ax = s.acceleration_x_g;
-    const float ay = s.acceleration_y_g;
-    if (sqrtf(ax * ax + ay * ay) < kFlatG) {
-        *name = "flat";
-        return -1;
-    }
-    // CALIBRATION (P0 bug, owner-on-hardware ~00:20Z: "turns correctly but I
-    // see upside down"): the original mapping (ax<0 -> 0, ax>0 -> 180, ay<0 ->
-    // 90, ay>0 -> 270) was read off sticky_imu.cpp's vendor axis comments —
-    // but the DRIVER already rotates every framebuffer 180 degrees at push
-    // (rotate_framebuffer_180, unconditional in both refresh paths of
-    // sticky_display.cpp). Those vendor comments describe the raw panel, not
-    // the picture the user sees; the panel therefore tracked his hand
-    // perfectly while showing the sky at his feet. Both pairs swap. The
-    // owner's report is the calibration measurement: constant offset, correct
-    // tracking = mapping, not logic.
-    if (fabsf(ax) >= fabsf(ay)) {
-        *name = ax < 0 ? "landscape" : "landscape-flipped";
-        return ax < 0 ? 180 : 0;
-    }
-    *name = ay < 0 ? "portrait-right" : "portrait-left";
-    return ay < 0 ? 270 : 90;
+    return tiny_orient_classify(s.acceleration_x_g, s.acceleration_y_g, kMap,
+                                name);
 }
 
 static void orient_task(void *) {
     int pending = -1;
     int agree = 0;
+    int feed = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kPollMs));
-        // The IMU is read EVERY second regardless of auto-rotate: this task is
+        // The IMU is read EVERY poll regardless of auto-rotate: this task is
         // also the §11 auto-lock sensor (tiny_lock_imu_feed below). Rotation
         // policy gates further down; the read does not.
         StickyImuState st = {};
@@ -107,7 +111,10 @@ static void orient_task(void *) {
         s_ax = st.acceleration_x_g;
         s_ay = st.acceleration_y_g;
         s_az = st.acceleration_z_g;
-        tiny_lock_imu_feed(s_ax, s_ay, s_az);
+        if (++feed >= kLockFeedEvery) {
+            feed = 0;
+            tiny_lock_imu_feed(s_ax, s_ay, s_az);
+        }
 
         // While locked, the panel must NOT strobe with pocket movement — a
         // rotation is a visible flash and a battery cost with nobody looking
@@ -154,7 +161,7 @@ extern "C" bool tiny_orient_auto(void) { return s_auto; }
 
 extern "C" void tiny_orient_set_auto(bool on) {
     // No accelerometer = nothing to follow. Reporting "auto" there would be a
-    // mode that never acts (FNK0104S; the AMOLED until its QMI8658 lands), so
+    // mode that never acts (FNK0104S), so
     // the request is refused into manual and the log says why.
     if (on && !tiny_board_caps()->imu) {
         ESP_LOGI(TAG, "auto-rotate refused: board has no IMU (manual)");

@@ -6,6 +6,22 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware, grammar v21** — AMOLED-1.8 V2 auto-rotate. New
+  `sticky_imu_qmi8658.cpp` drives the QMI8658 at 0x6B on the shared I2C bus.
+  It checks WHO_AM_I 0x05, soft-resets, and runs the accelerometer only
+  (±2 g, 31.25 Hz; the gyro stays off). The schematic routes INT1 to TCA9554
+  EXIO6 and leaves INT2 unconnected, so v1 polls. `tiny_orient` now reads
+  per-board axis tables from `tiny/tiny_orient_map.h` (the reTerminal table
+  is unchanged). On the AMOLED it polls every 300 ms with the same
+  3-sample debounce, so the card turns about 1 s after the board does;
+  `tiny_lock` is still fed at 1 Hz. The AMOLED signs come from Waveshare's
+  demo and the board layout, not from a measurement on the owner's board.
+  `caps.imu` is true and `absent` drops `imu`. Boards with no UP+DOWN unlock
+  chord no longer auto-lock from the IMU, so face-down on a desk cannot
+  strand the glass. `tests/host/orient_host_test.sh` checks each axis against
+  the shipped Canvas, and the render goldens gain 18 `amoled18-90` frames
+  (448×368).
+
 - **firmware (FNK0104S)** — the board's WS2812 (GPIO 42) is a status light:
   blue while the mic captures, amber while the upload and ask are in flight
   (the capture's end hands blue straight to amber in one write, no black

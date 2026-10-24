@@ -194,12 +194,13 @@ int main(int argc, char **argv) {
     // Panel sizes in PHYSICAL pixels, plus the rotation the board uses.
     // reTerminal: 800x480 landscape, and 90 deg (the IMU portrait turn).
     // FNK0104S: the 320x480 portrait panel at rotation 0.
-    // AMOLED-1.8: the 368x448 panel at rotation 0.
+    // AMOLED-1.8: the 368x448 panel at rotation 0, and 90 deg (QMI8658 turn).
     const Size sizes[] = {
         {800, 480, 0, "reterminal-0", false, false},
         {800, 480, 90, "reterminal-90", false, false},
         {320, 480, 0, "fnk0104s", true, false},     // light theme
         {368, 448, 0, "amoled18", true, true},      // dark theme (AMOLED)
+        {368, 448, 90, "amoled18-90", true, true},  // landscape 448x368
     };
     for (const Size &sz : sizes) {
         const size_t stride = (size_t)(sz.w + 3) / 4;

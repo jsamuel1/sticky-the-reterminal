@@ -34,6 +34,8 @@ esp_err_t sticky_sht40_init(i2c_master_bus_handle_t) { return ESP_ERR_NOT_SUPPOR
 esp_err_t sticky_sht40_read(Sht40Reading &) { return ESP_ERR_NOT_SUPPORTED; }
 
 // ---- IMU -------------------------------------------------------------------
+#ifndef QMI8658_I2C_ADDR
+// The AMOLED-1.8 builds sticky_imu_qmi8658.cpp instead.
 esp_err_t sticky_imu_init(i2c_master_bus_handle_t) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_imu_read(StickyImuState &) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_imu_read_gyro(StickyGyroReading &) { return ESP_ERR_NOT_SUPPORTED; }
@@ -51,6 +53,7 @@ const char *sticky_imu_orientation_name(StickyImuOrientation orientation)
     }
     return "unknown";
 }
+#endif  // QMI8658_I2C_ADDR
 
 // ---- microSD (phase 1: not driven) -----------------------------------------
 extern "C" esp_err_t sticky_sdcard_init(void) { return ESP_ERR_NOT_SUPPORTED; }

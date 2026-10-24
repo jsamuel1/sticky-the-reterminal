@@ -62,8 +62,9 @@ constexpr tiny_board_caps_t kCaps = {
 };
 #elif defined(CONFIG_TINY_BOARD_AMOLED18)
 // Phase 2b: CO5300 AMOLED (lcd_canvas) and ES8311 audio code are built;
-// P3b: CST820 touch (tiny_touch.cpp). AXP2101, PCF85063A, QMI8658 and SD land
-// in later phases.
+// P3b: CST820 touch (tiny_touch.cpp). QMI8658 accelerometer
+// (sticky_imu_qmi8658.cpp) drives auto-rotate and pocket lock. AXP2101,
+// PCF85063A and SD land in later phases.
 // mic/buzzer/speaker stay false until a board proves them.
 constexpr tiny_board_caps_t kCaps = {
     .id = "amoled18",
@@ -81,7 +82,7 @@ constexpr tiny_board_caps_t kCaps = {
     .battery_gauge = false,
     .battery_voltage = false,
     .rtc = false,
-    .imu = false,
+    .imu = true,         // QMI8658 accel, sticky_imu_qmi8658.cpp
     .env = false,
     .sd = false,
     .power_latch = false,

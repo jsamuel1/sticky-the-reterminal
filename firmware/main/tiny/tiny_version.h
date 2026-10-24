@@ -162,4 +162,13 @@
 //        a plausible resting cell), charging null. battery_mv is unchanged
 //        (the measurement, plausible or not).
 //      + `glance` reply battery_pct is null (was 0) when there is no reading.
-#define TINY_GRAMMAR_VERSION 20  // v20: sensors battery.source; FNK battery_pct
+// v21 = AMOLED-1.8 V2 accelerometer (QMI8658):
+//      + amoled18: caps.imu true, `absent` drops "imu"; `rotate auto`
+//        follows gravity (3 agreeing samples at 300 ms, ~1 s) and settings
+//        shows the follow-gravity row. `sensors` reports orientation +
+//        accel_g; gyro_dps stays null with "gyro: ESP_ERR_NOT_SUPPORTED" in
+//        errors[] (accelerometer-only driver). `rotate` imu_last names are
+//        portrait | portrait-flipped | landscape-left | landscape-right.
+//      + boards without an UP+DOWN unlock chord (amoled18) never auto-lock
+//        from the IMU; `lock` / `unlock` over the relay are unchanged.
+#define TINY_GRAMMAR_VERSION 21  // v21: amoled18 imu (QMI8658 auto-rotate)
