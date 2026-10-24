@@ -3,7 +3,7 @@ readtime: 18
 description: "Design for spoken agent replies on the codec boards: speech streamed on the ask connection, 16 kHz PCM, no length cap, played as it arrives."
 ---
 
-# Spoken replies — design (grammar v21, proposed)
+# Spoken replies — design (grammar v22, proposed)
 
 Status: **proposal, no code**. Third person. It covers the agent's reply audio
 (TTS) on the boards that have a real speaker: today the FNK0104S, and the
@@ -207,7 +207,15 @@ from_stream)`, `scroll_impl`, `rerender_impl`. The `*_impl` functions take
   continues as today.
 - **Rotation and scroll** take `s_stream_mux`. With a valid stream they
   redraw through the stream path while holding it; otherwise they call
-  `rerender_impl` / `scroll_impl` as today.
+  `rerender_impl` / `scroll_impl` as today. Rotation has two callers since
+  grammar 21: the `rotate` verb on `node_task` and the QMI8658 `orient` task
+  (`tiny_orient.cpp`, AMOLED-1.8 `rotate auto`), which calls
+  `tiny_display_set_rotation` from its own task. Both go through one public
+  `set_rotation` wrapper that takes `s_stream_mux` first; its no-cache
+  fallback card (`rotated to N deg`) is built through `render_card_impl`
+  only when no stream is on. The `orient` task never takes `s_display_mux`
+  directly, so an auto-rotation can wait at most one stream paint and cannot
+  invert the lock order. It already skips rotation while locked.
 
 The token, the takeover decision and the lock calls go into a pure
 `tiny_stream_owner` with injected lock and paint callbacks, so the host can
@@ -283,6 +291,17 @@ and applying the volume tier as a gain.
   keeps the amp on for up to 2 s, then turns the amp off and waits for the
   prebuffer again. Every underrun is counted in the verdict. Producer terminal
   state, not a byte-count guess, wakes that wait.
+- **Player wake.** The player's prebuffer wait (start, and after an
+  underrun's amp-off) follows the same check-before-wait rule as the
+  producer. Its predicate, read under the ring lock, is "fill ≥ 300 ms, or a
+  terminal state is published". The producer calls `xTaskNotifyGive(player)`
+  after every committed chunk and after publishing a terminal state; the
+  player handle is permanent (created at boot, never deleted), so this does
+  not break the signal-lifetime rule. The player checks the predicate, then
+  calls `ulTaskNotifyTake(pdTRUE, …)`. A task notification is a counter, not
+  an edge: a give between the check and the take leaves the count nonzero,
+  so the take returns at once and the predicate is checked again. No commit or
+  terminal publish can strand a playable ring.
 - **Ownership.** One player task owns I2S TX and the amp. Its command queue
   carries tone, speech-start and speech-stop generations. It acknowledges
   speech idle only after residual drain or flush, tail silence and amp-off.
@@ -310,8 +329,8 @@ one owner:
   `tiny_led_speech(bool)`. **The player is the only writer.** It sets
   `speaking` when it turns the amp on for a speech generation, and clears it
   in the same step as its idle acknowledgement, after amp-off. Chimes and
-  `play` frames never set it. `speak test` does, because it goes through
-  the same player path.
+  `play` frames never set it. The S1 bench harness and, from grammar 22,
+  `speak test` do, because they go through the same player path.
 - The ask lowers its own field from `THINKING` to `IDLE` at the first
   accepted `text_done`: the text is finished, so it is no longer thinking.
   An ask that never sees `text_done` (old backend, or a cut before it)
@@ -358,28 +377,36 @@ event group, created at boot and never deleted, plus three generation words
 
 **Creation order.** The group is built with `xEventGroupCreateStatic` from
 a file-scope `StaticEventGroup_t`, in `tiny_speech_init()`. `init_inputs`
-calls it after `tiny_audio_init()` (which creates the player task, so the
-player can find the group before it first blocks) and before
-`tiny_button_init()`, so no button callback can reach a control path
-first. `tiny_node_start()` and the ask worker come later still. On a
+calls it **first**, before `tiny_audio_init()`. `tiny_audio_init()` creates
+the player task at priority 5, above the boot task, so the scheduler may run
+the player before `xTaskCreate` even returns; the group must already exist
+when that first instruction runs. The order is therefore
+`tiny_speech_init()` → `tiny_audio_init()` (player) → `tiny_button_init()`
+(no button callback can reach a control path first) → `tiny_node_start()`
+and the ask worker. On a
 glance wake, `init_inputs` runs after the shell paint; until it runs
 nothing can produce or cancel speech, since the player, the buttons and the
-node do not exist yet. Every control and producer entry point also checks
-that the group handle is non-null and returns `speech not ready` if it is
-not, so a future reordering fails closed rather than dereferencing a null
-handle. There is no lazy create: the display's lazy
+node do not exist yet. Every control and producer entry point, and the
+player's speech path (it sets `SPACE_BIT` and `IDLE_BIT`), also checks that
+the group handle is non-null: a control or producer returns
+`speech not ready`, and the player refuses a speech-start command and keeps
+playing tones only. A future reordering therefore fails closed rather than
+dereferencing a null handle. There is no lazy create: the display's lazy
 `xSemaphoreCreateMutex` pattern would race two first callers, and this
 group must have exactly one instance. The bits are fixed at compile time
 (`CANCEL_BIT` 0, `SPACE_BIT` 1, `IDLE_BIT` 2); nothing allocates them at
 runtime, and no other module shares the group.
 
 **Clear before check.** Each waiter clears the bit it is about to wait for,
-then re-reads the generation words under the lock, and only then calls
-`xEventGroupWaitBits(..., xClearOnExit = pdFALSE, ...)`. A `SetBits` that
-lands between the clear and the wait is therefore never lost: either the
-re-read already sees the new generation, or the bit is still set when the
-wait begins. Setting a bit nobody is waiting for is harmless, because
-every wake is confirmed against the generation words.
+then re-reads both its durable predicate and the relevant generation word before
+it calls `xEventGroupWaitBits(..., xClearOnExit = pdFALSE, ...)`. For
+`CANCEL_BIT` and `IDLE_BIT`, the durable predicates are `cancel_gen == G` and
+`ack_gen == G`. For `SPACE_BIT`, the producer locks the ring and rechecks that
+free space is still smaller than the complete decoded chunk it must commit.
+A notification that lands between clear and predicate check is therefore seen
+by the predicate; one that lands after the check leaves its bit set for the
+wait. Setting a bit nobody is waiting for is harmless because every wake is
+confirmed against its generation or ring predicate.
 
 - A producer registers in this order: clear `CANCEL_BIT` and `SPACE_BIT`
   (outside any lock), then set `active_gen` under the lock. A control that
@@ -396,11 +423,14 @@ every wake is confirmed against the generation words.
   the lock, and calls `xEventGroupSetBits(CANCEL_BIT)` on the static group.
   Every caller (the button callback in the esp_timer task, `node_task`, the
   sleep path) is a task, never an ISR.
-- The producer's full-ring wait is `xEventGroupWaitBits(SPACE_BIT |
-  CANCEL_BIT)`. On wake it compares `cancel_gen` with its own generation
-  under the lock. A match means cancel; anything else clears the stale bit
-  outside the lock, re-reads the words, and only then waits again (the
-  clear-before-check rule above).
+- The producer's full-ring loop clears `SPACE_BIT | CANCEL_BIT`, checks
+  `cancel_gen` against its generation, then checks free ring space under the
+  ring lock against the whole pending chunk before it waits on
+  `SPACE_BIT | CANCEL_BIT`. A player free between clear and the capacity check
+  is observed as space; a free after the check leaves `SPACE_BIT` set. On wake
+  it repeats the complete clear → cancellation/capacity checks → wait protocol.
+  A foreign cancellation generation is ignored; neither a stale bit nor a
+  lost space edge can strand a writable ring.
 - The player acknowledges idle the same way: it writes `ack_gen` under the
   lock, leaves it, then sets `IDLE_BIT`. Waiters compare `ack_gen` with the
   generation they stopped.
@@ -423,10 +453,21 @@ test-producer task:
    envelope id and request into its bounded queue and defer the reply to this
    worker instead of blocking `node_task`; physical-button asks and the offline
    ask-queue drain use the same owner. While speech is active, one pending
-   replacement is retained; additional asks receive an explicit busy reply.
-   Before the first audio sample, replacement asks retain today's behavior and
-   are refused as `ask already in flight` rather than cancelling an agent turn
-   that has not begun speaking. Completion is posted back to the node task so
+   replacement slot is retained. Relay, typed and offline requests arriving
+   after that slot is occupied receive an explicit busy reply. BOOT is
+   different because its release event must stay paired with its press: a newer
+   BOOT long-press atomically replaces an older pending physical slot and its
+   gesture generation before signalling the worker. The superseded generation
+   can neither capture nor send an ask; its later release is ignored by the
+   generation check. A BOOT press that finds the slot held by a relay, typed
+   or offline request is refused: it writes no gesture record, so its release
+   finds no matching generation and does nothing, and the status line reads
+   `busy: replacement pending`. Speech still stops, because the pending
+   request has already signalled cancellation. The reTerminal fixed-length
+   click carries no gesture and follows the non-BOOT busy rule. Before the first audio sample, replacement asks retain
+   today's behavior and are refused as `ask already in flight` rather than
+   cancelling an agent turn that has not begun speaking. Completion is posted
+   back to the node task so
    an offline question is popped only under today's delivered-or-backend-spoke
    rule. For a relay request, the worker emits one completion record;
    `node_task` alone sends its reply PATCH. The completion queue cannot drop:
@@ -479,10 +520,14 @@ before that. The global flag would then give a clipped 0.5 s capture of
 nothing, sent as a real voice ask. So the gesture gets a record that it owns:
 
 - `on_talk_start` allocates a **gesture generation** `G` and writes
-  `{G, pressed_at, released = false}` under the gesture `portMUX`. A newer
-  press replaces the record, and an older generation can never consume it.
-  `on_talk_release` sets `released` and `released_at` only when the record
-  still holds the generation that was pressed. Every path uses this record,
+  `{G, pressed_at, released = false}` under the gesture `portMUX`. With no
+  pending physical replacement it claims that fixed slot. If an older BOOT
+  replacement is still pending, the same critical section replaces both slot
+  generation and gesture record with the new `G`; there is never an old queued
+  request pointing at a new gesture. A newer non-BOOT request does not mutate
+  this record and follows the busy rule above. `on_talk_release` sets
+  `released` and `released_at` only when the record and pending/capturing slot
+  still hold the generation that was pressed. Every path uses this record,
   with or without speech, so the gesture has one meaning.
 - The voice request queued to the ask worker carries `G`. Once the player
   acknowledges idle, the worker takes the record at **capture eligibility**
@@ -543,13 +588,15 @@ source) all consume it. A runtime filter would make the heartbeat disagree
 with the claim the provisioning tools make from that source. This design adds
 no TinyBeacon capability bit.
 
-## Grammar v21 (proposed)
+## Grammar v22 (proposed)
 
-The main branch is already at grammar 20: v19 is strict direct-artifact OTA
-arguments, and v20 is the `sensors` `battery.source` field and the FNK0104S
-`battery_pct`. Spoken replies are the next grammar change, v21. If another
-grammar change lands first, this proposal takes the next free number; the
-number is assigned when the S1+S2 release is cut, not by this document.
+The main branch is already at grammar 21: v19 is strict direct-artifact OTA
+arguments; v20 adds `sensors` `battery.source` and FNK0104S `battery_pct`;
+v21 adds AMOLED-1.8 QMI8658 orientation/acceleration, `rotate auto`, and the
+related capability/status shapes. Spoken replies are the next grammar change,
+v22. If another grammar change lands first, this proposal takes the next free
+number; the number is assigned when the complete public firmware slice is cut,
+not by this document.
 
 **Ask opt-in.** Each queued request carries an explicit origin:
 `physical_voice`, `relay_voice`, `typed`, or `offline_typed`; mode decisions do
@@ -597,15 +644,14 @@ count moves from 23 to 24.
 **Settings.** One row on the settings page, persisted in NVS
 (`tinycfg/speakmode`): `off | voice asks | all asks`, default `voice asks`.
 
-CHANGELOG and `TINY_GRAMMAR_VERSION` move to 21 only in the firmware release
-that contains **both S1 and S2**. The slices are implementation order, not
-separately shippable grammar states: S1 may be bench-tested from a development
-build, but no released v21 may advertise `speak`, `caps.speech`, status fields
-or the request/events without the complete S2 parser, cancellation and
-settings contract. S1 may still add `speak` to `s_caps[]` together with its
-dispatch branch, because the roster rule is about dispatch, not grammar. A
-build between the S1 and S2 commits is a development build and is not
-tagged.
+CHANGELOG and `TINY_GRAMMAR_VERSION` move to 22 in the same atomic public
+change that adds the request/events, `speak` verb, `caps.speech`, status reply
+fields and setting. The slices below are implementation order, not permission
+to expose a partial grammar. S1 keeps new helpers unreachable from existing
+verbs/status and uses host tests plus a compile-time bench harness; it may land
+alone only in that wire-inert state. Otherwise S1 and S2 are squashed into one
+buildable commit. No build—tagged or not—may dispatch or advertise any new
+speech surface while reporting grammar 21.
 
 ## Backend contract (tiny.technology, not in this repo)
 
@@ -664,17 +710,20 @@ speech-to-text.
 
 ## Slices
 
-1. **S1, firmware, no backend dependency; not released alone.** `tiny_pcm`
+1. **S1, wire-inert firmware core, no backend dependency.** `tiny_pcm`
    gets the canonical base64 validator/decoder, the mono→stereo gain expander
    and the ring. A pure-C speech controller (generations, terminal state,
-   static cancel/space/idle event bits) and a player model get injected clocks, a fake I2S sink
-   and a fake amp pin so they run on the host. `audio_es8311` gets the ring
-   player with prebuffer, underrun, residual drain, flush and the amp-off
-   acknowledgement. Also: `speak stop|status|test`, `caps.speech`, status
-   fields and barge-in at the capture entry point, plus the status light's
-   `speaking` input and its `led_host_test.sh` cases, behind a development-build
-   flag (grammar stays 20 until S2; see above). S1 host tests, each pinning
-   one contract:
+   static cancel/space/idle event bits) and a player model get injected clocks,
+   a fake I2S sink and a fake amp pin so they run on the host.
+   `audio_es8311` gets the ring player with prebuffer, underrun, residual drain,
+   flush and the amp-off acknowledgement. The status-light resolver may gain
+   an internal `speaking` input because that changes no wire shape. S1 does
+   **not** add `speak` dispatch, `s_caps[]`, `caps.speech`, speech status fields,
+   `speakmode`, ask opt-in or SSE parsing while grammar remains 21. Its hardware
+   proof uses a compile-time bench harness that invokes the player directly;
+   the harness is off in normal builds. If implementation needs the public
+   `speak test` vehicle instead, S1 and S2 land atomically with grammar 22.
+   S1 host tests, each pinning one contract:
     - Ring: whole commits straddling the buffer end at every offset of a small
       ring read back byte for byte; a commit without room for the whole chunk
       is refused and leaves the write index unchanged; index wrap keeps fill
@@ -692,18 +741,32 @@ speech-to-text.
       speech; a capture request is admitted only after the idle ack.
     - Controller: a stale-generation stop, a double stop, and a stop racing
       natural EOF each complete the generation exactly once.
-    - Event bits: a fake scheduler injects a `SetBits(CANCEL_BIT)` at every
-      point between a waiter's clear, its generation re-read and its
-      `WaitBits`; each one wakes or is seen by the re-read, and none is
-      lost. Registration rendezvous: a control lands (a) between the
+    - Event bits: a fake scheduler injects a matching generation or ring-space
+      transition at every point between a waiter's clear, its durable-predicate
+      recheck and its `WaitBits`; each transition wakes or is seen by the
+      recheck, and none is lost. For `SPACE_BIT`, free fewer than, exactly and
+      more than the pending complete chunk, including a player free immediately
+      before clear, between clear and ring-capacity check, and between that
+      check and wait. Player wake: a commit or terminal publish injected at
+      every point between the player's prebuffer check and its
+      `ulTaskNotifyTake`, including a sub-prebuffer `done`, is never lost. A
+      mutation that replaces the counting notification with a cleared edge
+      flag and no recheck must fail. Registration rendezvous: a control lands (a) between the
       producer's bit clear and its `active_gen` publish, where it answers
-      `not speaking` or targets the old generation, and the new producer
-      plays on; and (b) immediately after the publish, where the new
-      producer's first wait or re-read sees the cancel. A fake `portMUX`
-      asserts that no FreeRTOS fake is called while it is held. A control or producer entry before `tiny_speech_init()`
-      returns `speech not ready` and touches no handle. Mutations that clear
-      the bits after the publish, or after the waiter's generation re-read,
-      must fail (b) and the injection sweep respectively.
+      `not speaking` or targets the old generation, and the new producer plays
+      on; and (b) immediately after the publish, where the new producer's first
+      wait or re-read sees the cancel. A fake `portMUX` asserts that no FreeRTOS
+      fake is called while it is held. A control or producer entry before
+      `tiny_speech_init()` returns `speech not ready` and touches no handle.
+      Startup order: a fake scheduler that runs a newly created task
+      immediately, before its creator resumes, boots `init_inputs`; the
+      player's first instructions find a non-null group, and no control,
+      producer or player call ever sees a null handle. With the group
+      deliberately absent, the player refuses speech-start and still plays
+      tones. A mutation that moves `tiny_speech_init()` after
+      `tiny_audio_init()` must fail the immediate-run case.
+      Mutations that clear after publish, omit the ring-capacity recheck, or
+      clear after a predicate check must fail the corresponding rendezvous.
     - Signal lifetime, rendezvous: a fake scheduler pauses a control between
       its `active_gen` lookup and its `SetBits`. The producer then completes
       and unregisters, and a second producer registers. On resume, the
@@ -716,18 +779,25 @@ speech-to-text.
       speech, release before the ack: no capture, no ask, verdict `stopped`;
       (b) press, ack, release 2 s later: capture length about 2 s counted from
       the ack, ask sent; (c) press, ack, release at 0.2 s: the 0.5 s floor
-      applies from the ack; (d) a second press during the barrier: only the
-      newest generation is consumed, and the older release is ignored;
-      (e) ack later than 3 s after the press while still held: the arm is not
-      expired. A mutation that reads a global released flag instead of the
-      generation record must fail (a) and (d).
-    - Roster: `speak` is in `s_caps[]` on all three board builds; on a
-      `caps.speech=false` board every `speak` subcommand returns the typed
-      refusal, never help text; the existing provision roster tests pass with
-      the new entry.
+      applies from the ack; (d) a second BOOT press during the barrier
+      atomically replaces both the pending physical slot and gesture record;
+      only its generation is consumed, while the older release is ignored and
+      no orphaned slot remains; (d2) a BOOT press while a relay or typed
+      request holds the slot is refused without writing a gesture record,
+      its release changes nothing, and the pending request is the one
+      consumed; (e) ack later than 3 s after the press while
+      still held: the arm is not expired. A mutation that updates only the
+      gesture record but leaves the pending request's old `G`, or reads a global
+      released flag, must fail (a) and (d).
+    - Public roster/grammar (S2 or the atomic S1+S2 commit): `speak` is in
+      `s_caps[]` on all three board builds; on a `caps.speech=false` board every
+      `speak` subcommand returns the typed refusal, never help text; the existing
+      provision roster tests pass with the new entry; every build exposing the
+      entry reports grammar 22.
 
-   Proof on the FNK0104S bench (`speak test` replies `test started`; the
-   verdict is read with `speak status`):
+   Proof on the FNK0104S bench uses the direct compile-time S1 harness, or the
+   `speak test` verb only after the atomic grammar-22 public slice. The latter
+   replies `test started`; its verdict is read with `speak status`:
     - `speak test 60` reaches `done 60.0 s, 0 underruns`, and `miccheck`
       reads the room floor afterwards (the amp is really off).
     - A 1 s test, which is longer than the prebuffer but proves nothing about
@@ -736,8 +806,12 @@ speech-to-text.
       off.
     - The AI button pressed mid-test stops it, and capture starts only after
       the log's amp-off acknowledgement.
-    - Relay `speak stop` sent twice gives the verdict, then `not speaking`.
-    - A chiming `render_ui` mid-test is dropped and counted.
+    - Grammar-22 slice only, since S1 has no relay `speak` surface: relay
+      `speak stop` sent twice gives the verdict, then `not speaking`. Under
+      the S1 harness the same idempotence is proven by calling the controller's
+      stop entry twice from the harness.
+    - A chiming `render_ui` mid-test is dropped and counted (`render_ui` is an
+      existing verb, so this runs under either vehicle).
     - The status light shows green for the whole test and goes dark at the
       amp-off acknowledgement; an AI-button barge-in goes green → blue.
 2. **S2, firmware, against the backend contract.** The dedicated ask worker,
@@ -768,8 +842,10 @@ speech-to-text.
    speech keeps playing, and the taking card is still current at `[DONE]`;
    the same three injected after `text_done` leave the stream untouched,
    since it has already ended; a gallery flip and a `play` frame before
-   `text_done` retire the token like a card; a rotation and a scroll with a
-   valid stream keep it and redraw the stream; a cancel before `text_done` ends the ask's own
+   `text_done` retire the token like a card; manual and QMI8658-driven
+   auto-rotation plus scroll with a valid stream keep it and redraw the stream
+   under the same stream-first lock order; a cancel before `text_done` ends the
+   ask's own
    stream with ` [stopped]` exactly once, and a cancel after takeover
    paints nothing; a mutation that drops the token check must fail;
    `tiny_stream_owner` lock order, with fake recursive-detecting mutexes
@@ -785,8 +861,10 @@ speech-to-text.
    `region` → `display` edge. Mutations that release `s_stream_mux` between
    the token check and the paint, or hold it across the takeover's fetch,
    must fail (i) and (ii) respectively;
-   button and relay replacement asks; no double reply; and no capture before
-   amp-off. Auto-sleep tests pin that ask-worker or speech activity blocks the
+   button and relay replacement asks; a second BOOT press while the first
+   replacement waits for amp-off atomically coalescing pending slot + gesture
+   generation; later release of the superseded press doing nothing; no double
+   reply, orphaned replacement or capture before amp-off. Auto-sleep tests pin that ask-worker or speech activity blocks the
    due path; explicit sleep/OTA tests pin cancellation-before-power transition
    and timeout refusal. Shutdown tests pin amp-off even when normal
    acknowledgement fails. Mutation controls that remove event reset, atomic
