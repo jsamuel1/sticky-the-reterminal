@@ -108,7 +108,11 @@ release, newest first.
   board.
   `caps.imu` is true and `absent` drops `imu`. Boards with no UP+DOWN unlock
   chord (the AMOLED) never auto-lock from the IMU, so face-down on a desk
-  cannot strand the glass. `tests/host/orient_host_test.sh` checks each axis against
+  cannot strand the glass. Unlock guidance is per board too: `lock`, the
+  locked `voice`/mic refusals and the locked sleep card say "hold UP+DOWN 1s
+  or send unlock" only on the reTerminal and "send unlock (no on-device
+  chord)" on the colour boards (`tiny_lock_unlock_hint()`); the onboarding
+  tour teaches BOOT and swipes there instead of UP/DOWN. `tests/host/orient_host_test.sh` checks each axis against
   the shipped Canvas, and the render goldens gain 18 `amoled18-90` frames
   (448×368).
 

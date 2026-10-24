@@ -29,6 +29,15 @@ bool tiny_lock_is_locked(void);      // the gate every input choke point asks
 // Locking is idempotent; unlock re-renders the last card (full refresh).
 esp_err_t tiny_lock_set(bool locked, const char *reason);
 
+// Owner-facing unlock guidance. Every reply, card or tour line that tells a
+// human how to leave lockout takes it from here, so no copy promises the
+// UP+DOWN chord on a board that has no UP/DOWN keys.
+//   chord boards:   "hold UP+DOWN 1s or send unlock"
+//   no-chord boards: "send unlock (no on-device chord)"
+// No double quotes or backslashes: callers splice it into JSON literals.
+bool tiny_lock_has_unlock_chord(void);
+const char *tiny_lock_unlock_hint(void);
+
 // §11 half 2 — IMU auto-entry. tiny_orient's task feeds good accel samples
 // here at no more than 1 Hz (ONE imu reader on the bus; lock policy lives in
 // this module). Boards without an UP+DOWN unlock chord ignore the feed: a lock

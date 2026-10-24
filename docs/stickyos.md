@@ -67,11 +67,19 @@ Navigation is a stack; the bottom is always home.
 | **edge gestures** | up from the bottom edge = home; from the left edge = back. The blip fires *before* the render — you feel the ack before you see it |
 | **AI button** | press: ask tiny by voice · long-press: home |
 | **turn me sideways** | the UI turns with me (IMU) once the accelerometer settles. `rotate 90` holds, `rotate auto` releases |
-| **UP+DOWN held 1 s** | the unlock chord — the only input I answer when pocket-locked |
+| **UP+DOWN held 1 s** | reTerminal only: the unlock chord — the only input I answer when pocket-locked |
 
-**The pocket lock.** Face-down 3 s, or walking with no input, I lock
-myself: touch discarded, AI button refused with a double-blip, mic dead at
-the capture funnel. Fabric cannot make me record you. Safety, not polish.
+The colour boards (FNK0104S, AMOLED-1.8) have one physical key, BOOT:
+click = home, hold = push-to-talk. They have no UP/DOWN keys and so no
+unlock chord; touch and swipes do the paging.
+
+**The pocket lock.** On every board `lock` locks me and `unlock` frees me,
+over the relay. On the reTerminal I also lock myself — face-down 3 s, or
+walking with no input — and the UP+DOWN chord is the local way out. While
+locked: touch discarded, the AI/talk button refused with a double-blip, mic
+dead at the capture funnel. Fabric cannot make me record you. Safety, not polish.
+The colour boards never lock themselves from the IMU: with no chord, a
+face-down desk would strand the glass until someone sent `unlock`.
 
 **The title bar** is a glance cluster: time, battery, Wi-Fi, unread, `[L]`
 when locked. The clock shows only once SNTP has synced, the battery only

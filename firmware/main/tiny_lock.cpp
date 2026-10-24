@@ -89,6 +89,23 @@ extern "C" bool tiny_lock_is_locked(void) {
     return atomic_load(&s_locked);
 }
 
+extern "C" bool tiny_lock_has_unlock_chord(void) {
+#if PIN_BTN_UP < 0 || PIN_BTN_DOWN < 0
+    return false;
+#else
+    return true;
+#endif
+}
+
+extern "C" const char *tiny_lock_unlock_hint(void) {
+#if PIN_BTN_UP < 0 || PIN_BTN_DOWN < 0
+    // FNK0104S / AMOLED-1.8: BOOT only. The relay is the only way out.
+    return "send unlock (no on-device chord)";
+#else
+    return "hold UP+DOWN 1s or send unlock";
+#endif
+}
+
 extern "C" esp_err_t tiny_lock_set(bool locked, const char *reason) {
     const bool was = atomic_exchange(&s_locked, locked);
     if (was == locked) return ESP_OK;  // idempotent, no ceremony
@@ -124,17 +141,19 @@ extern "C" esp_err_t tiny_lock_set(bool locked, const char *reason) {
     return ESP_OK;
 }
 
-// Unlock-chord watcher. Buttons are active-low (iot_button config in
-// tiny_button.cpp uses active_level 0). While UNLOCKED this task is one
-// atomic read per poll — cheap enough to leave running; while LOCKED it is
-// the ONLY path back, so it must not depend on iot_button (whose callbacks
-// tiny_button.cpp gates when locked).
+// Unlock-chord watcher, chord boards only (reTerminal). Buttons are
+// active-low (iot_button config in tiny_button.cpp uses active_level 0).
+// While UNLOCKED this task is one atomic read per poll — cheap enough to
+// leave running; while LOCKED it is the only LOCAL path back (the relay
+// `unlock` verb is the other), so it must not depend on iot_button (whose
+// callbacks tiny_button.cpp gates when locked). On no-chord boards the task
+// deletes itself and the relay is the only exit.
 static void chord_task(void *) {
 #if PIN_BTN_UP < 0 || PIN_BTN_DOWN < 0
     // Single-button board: no chord exists. Lockout is entered and left
     // over the relay (`lock` / `unlock`); there is no IMU auto-entry either.
     vTaskDelete(NULL);
-#endif
+#else
     int held_ms = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kChordPollMs));
@@ -151,6 +170,7 @@ static void chord_task(void *) {
             held_ms = 0;
         }
     }
+#endif
 }
 
 extern "C" esp_err_t tiny_lock_init(void) {
