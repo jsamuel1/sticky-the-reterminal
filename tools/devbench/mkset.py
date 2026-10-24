@@ -14,6 +14,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -62,6 +63,8 @@ def main() -> None:
         "chip": chip,
         "boards": [a.board],
         "version": version,
+    "commit": sha,
+    "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((a.build / "flasher_args.json").stat().st_mtime)),
         "note": note,
         "flash_settings": fa.get("flash_settings", {}),
         "parts": parts,

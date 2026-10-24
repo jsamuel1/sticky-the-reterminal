@@ -629,18 +629,35 @@ async function shipTrace(text, tag) {
 // first boot. The device token lives only in this page's memory and the NVS
 // image; it is never logged, reported or kept by the server.
 let sets = [];
+// "2026-10-24 11:10 (2 h ago)" in the owner's local time; ISO in, so the
+// server's UTC build stamps and the jobs' +offset queue times both parse.
+function when(iso) {
+  if (!iso) return "";
+  const t = new Date(iso);
+  if (isNaN(t)) return iso;
+  const p = (n) => String(n).padStart(2, "0");
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  const ago = s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
+  return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())} (${ago})`;
+}
+// The newest set per board (sets arrive newest first).
+const newestFor = () => { const seen = new Set(), out = new Set(); for (const s of sets) for (const b of s.boards?.length ? s.boards : ["?"]) if (!seen.has(b)) { seen.add(b); out.add(s.name); } return out; };
 async function loadSets() {
   try {
     sets = await (await fetch("api/sets")).json();
-    const sel = $("flashset"), keep = sel.value;
-    sel.replaceChildren(...(sets.length ? sets.map((s) => new Option(s.error ? `⚠ ${s.error}` : `${s.name} — ${s.boards?.join("/") || "any board"} — ${s.flash_settings?.flash_size || "?"} — ${s.parts.length} parts${s.version ? " — " + s.version : ""}`, s.name)) : [new Option("no image sets (build firmware or add images/<set>/manifest.json)", "")]));
+    const sel = $("flashset"), keep = sel.value, newest = newestFor();
+    sel.replaceChildren(...(sets.length ? sets.map((s) => new Option(s.error ? `⚠ ${s.error}` :
+      `${newest.has(s.name) ? "★ " : ""}${s.name} — built ${when(s.built_at) || "?"} — ${s.boards?.join("/") || "any board"} — ${s.flash_settings?.flash_size || "?"}${s.app_version ? " — " + s.app_version : ""}`, s.name)) : [new Option("no image sets (build firmware or add images/<set>/manifest.json)", "")]));
     if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
     renderSet();
   } catch { $("flashparts").textContent = "server unreachable"; }
 }
 function renderSet() {
   const s = sets.find((x) => x.name === $("flashset").value);
-  $("flashparts").textContent = s ? (s.note ? s.note + "\n" : "") + s.parts.map((p) => `0x${p.offset.toString(16).padStart(6, "0")}  ${p.file}  ${(p.size / 1024).toFixed(0)} KiB  md5 ${p.md5}`).join("\n") +
+  const newest = newestFor();
+  $("flashparts").textContent = s ? `built ${when(s.built_at) || "unknown"}${s.built_at_source ? ` (${s.built_at_source})` : ""}${newest.has(s.name) ? "  ★ newest for " + (s.boards?.join("/") || "its board") : ""}\n` +
+    (s.version ? `version ${s.version}\n` : "") + (s.note ? s.note + "\n" : "") +
+    s.parts.map((p) => `0x${p.offset.toString(16).padStart(6, "0")}  ${p.file}  ${(p.size / 1024).toFixed(0)} KiB  md5 ${p.md5}`).join("\n") +
     `\nflash ${s.flash_settings?.flash_mode || "keep"} / ${s.flash_settings?.flash_size || "keep"} / ${s.flash_settings?.flash_freq || "keep"}   source: ${s.source}` : "";
 }
 $("flashset").onchange = renderSet;
@@ -883,16 +900,25 @@ async function postResult(j, res, div) {
 async function pollJobs() {
   let jobs = [];
   try { jobs = await (await fetch("api/jobs")).json(); } catch { return; }
+  if (!sets.length) await loadSets();
+  // newest request first; the banner says when each was queued and how old
+  // the image it names is, so a stale request is visible before Run.
+  jobs.sort((a, b) => String(b.queued_at || b.id).localeCompare(String(a.queued_at || a.id)));
   const box = $("jobs");
   box.hidden = !jobs.length;
-  box.replaceChildren(...jobs.map((j) => {
+  box.replaceChildren(...jobs.map((j, idx) => {
     const div = document.createElement("div");
     div.className = "job";
     const what = j.kind === "flash" ? `${j.dry_run ? "PLAN (dry run) for " : ""}flash set "${j.set}"${j.provision ? ` + PROVISION${j.adopt ? " (adopt)" : ""}` : ""}${j.erase_all ? " + ERASE ALL" : ""}` : j.kind === "dump" ? `dump ${j.what}` : j.kind === "boot" ? `boot log ${j.secs}s` : j.kind;
-    div.innerHTML = `<b></b> <span></span> <span class="muted"></span> `;
-    div.children[0].textContent = `Agent asks: ${what}`;
+    const set = j.set ? sets.find((s) => s.name === j.set) : null;
+    const newerSet = set && sets.find((s) => s.built_at > set.built_at && s.boards?.some((b) => set.boards?.includes(b)));
+    div.innerHTML = `<b></b> <span></span> <span class="muted"></span><div class="small muted"></div> `;
+    div.children[0].textContent = `${jobs.findIndex((x) => x.label === j.label) === idx && jobs.filter((x) => x.label === j.label).length > 1 ? "★ latest for this board — " : ""}Agent asks: ${what}`;
     div.children[1].textContent = `for board "${j.label}"`;
     div.children[2].textContent = j.note ? `— ${j.note}` : "";
+    div.children[3].textContent = `requested ${when(j.queued_at) || "?"}` +
+      (j.set ? ` · image built ${set ? when(set.built_at) || "?" : "? (set not found)"}` : "") +
+      (newerSet ? ` · ⚠ newer image for this board: ${newerSet.name} (${when(newerSet.built_at)})` : "");
     const run = document.createElement("button"); run.textContent = "Run"; run.className = j.kind === "flash" && !j.dry_run ? "danger" : "primary";
     const skip = document.createElement("button"); skip.textContent = "Decline";
     run.disabled = busy || !port;

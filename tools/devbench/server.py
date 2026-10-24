@@ -145,7 +145,8 @@ def load_sets() -> dict[str, dict]:
                 name = slug(m.parent.name)
                 sets[name] = {"name": name, "chip": d.get("chip", ""), "source": str(m.parent),
                               "flash_settings": d.get("flash_settings", {}), "version": d.get("version"),
-                              "boards": d.get("boards", []), "note": d.get("note"), "parts": parts}
+                              "boards": d.get("boards", []), "note": d.get("note"), "parts": parts,
+                              **({"manifest_built_at": d["built_at"]} if d.get("built_at") else {})}
             except Exception as e:
                 sets[slug("error-" + m.parent.name)] = {"name": "error", "error": f"{m}: {e}", "parts": []}
     return sets
@@ -356,6 +357,46 @@ def public(s: dict) -> dict:
     return {**s, "parts": [{k: v for k, v in p.items() if k != "path"} for p in s.get("parts", [])]}
 
 
+# ---- when was a set built? --------------------------------------------------------
+# The app image's esp_app_desc_t carries the compiler's __DATE__/__TIME__. Builds
+# run in espressif/idf:v5.4, whose clock is UTC, so that stamp is a build time
+# in UTC that survives copying (file mtimes do not: fetch_ci.sh and mkset.py copy).
+_MONTHS = {m: i for i, m in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1)}
+
+
+def app_desc(path: Path) -> dict | None:
+    try:
+        with open(path, "rb") as fh:
+            b = fh.read(256)
+    except OSError:
+        return None
+    if len(b) < 160 or b[0] != 0xE9 or int.from_bytes(b[32:36], "little") != 0xABCD5432:
+        return None
+    s = lambda o, n: b[32 + o:32 + o + n].split(b"\0", 1)[0].decode(errors="replace")  # noqa: E731
+    out = {"project": s(48, 32), "app_version": s(16, 32), "idf": s(112, 32)}
+    m = re.fullmatch(r"(\w{3}) +(\d+) (\d{4})", s(96, 16).strip())
+    t = re.fullmatch(r"(\d\d):(\d\d):(\d\d)", s(80, 16).strip())
+    if m and t and m.group(1) in _MONTHS:
+        out["built_at"] = "%s-%02d-%02dT%s:%s:%sZ" % (m.group(3), _MONTHS[m.group(1)], int(m.group(2)), *t.groups())
+    return out
+
+
+def stamp_sets(sets: dict[str, dict]) -> list[dict]:
+    """Each set gets built_at (+ app_version/project) from its app part; the
+    list is newest first, sets with no readable stamp last."""
+    for s in sets.values():
+        apps = [p for p in s.get("parts", []) if p["offset"] >= 0x10000]
+        app, desc = next(((p, d) for p in apps if (d := app_desc(p["path"]))), (apps[0] if apps else None, None))
+        if desc:
+            s.update({k: v for k, v in desc.items() if v})
+        if app and not s.get("built_at") and s.get("manifest_built_at"):
+            s["built_at"], s["built_at_source"] = s["manifest_built_at"], "manifest"
+        if app and not s.get("built_at"):
+            s["built_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(app["mtime"]))
+            s["built_at_source"] = "file mtime"
+    return sorted(sets.values(), key=lambda s: s.get("built_at") or "", reverse=True)
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(ROOT), **kw)
@@ -415,7 +456,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split("?", 1)[0]
         if p == "/api/sets":
-            return self._json(200, [public(s) for s in load_sets().values()])
+            return self._json(200, [public(s) for s in stamp_sets(load_sets())])
         m = re.fullmatch(rf"/api/sets/({NAME})/({NAME})", p)
         if m:
             s = load_sets().get(m.group(1))

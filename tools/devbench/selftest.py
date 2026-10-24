@@ -161,13 +161,24 @@ def start_server(tmp: Path, tiny_port: int) -> subprocess.Popen:
 def fake_set(tmp: Path):
     s = tmp / "images" / "tiny-fnk0104s-test"
     s.mkdir(parents=True)
-    for f, n in (("bootloader.bin", 64), ("partition-table.bin", 32), ("ota_data_initial.bin", 32), ("tiny_sticky.bin", 4096)):
+    # app image with an esp_app_desc_t: magic at +32, version +48, time +112, date +128
+    app = bytearray(os.urandom(4096))
+    app[0] = 0xE9
+    app[32:36] = (0xABCD5432).to_bytes(4, "little")
+    for off, txt in ((16, b"0.31.0"), (48, b"tiny_sticky"), (80, b"01:10:02"), (96, b"Oct 24 2026"), (112, b"v5.4")):
+        app[32 + off:32 + off + 16] = txt.ljust(16, b"\0")
+    for f, n in (("bootloader.bin", 64), ("partition-table.bin", 32), ("ota_data_initial.bin", 32)):
         (s / f).write_bytes(os.urandom(n))
+    (s / "tiny_sticky.bin").write_bytes(bytes(app))
     (s / "manifest.json").write_text(json.dumps({"chip": "ESP32-S3", "boards": ["fnk0104s"], "version": "test",
                                                 "flash_settings": {"flash_mode": "dio", "flash_freq": "80m", "flash_size": "16MB"},
                                                 "parts": [{"offset": "0x0", "file": "bootloader.bin"}, {"offset": "0x8000", "file": "partition-table.bin"},
                                                           {"offset": "0xf000", "file": "ota_data_initial.bin"}, {"offset": "0x20000", "file": "tiny_sticky.bin"}]}))
     (s / "README.md").write_text("not a part")
+    old = tmp / "images" / "tiny-fnk0104s-older"
+    shutil.copytree(s, old)
+    app[32 + 96:32 + 112] = b"Oct 22 2026".ljust(16, b"\0")
+    (old / "tiny_sticky.bin").write_bytes(bytes(app))
 
 
 def section_server(tmp: Path):
@@ -176,6 +187,10 @@ def section_server(tmp: Path):
     check("sets list", st == 200 and isinstance(sets, list), b[:200])
     real = next((s for s in sets if s["parts"] and not s.get("error")), None)
     check("image set listed with boards", bool(real) and real.get("boards") == ["fnk0104s"], sets)
+    names = [s["name"] for s in sets]
+    check("sets carry built_at from the app descriptor (UTC), newest first",
+          real and real["name"] == "tiny-fnk0104s-test" and real.get("built_at") == "2026-10-24T01:10:02Z" and real.get("app_version") == "0.31.0"
+          and names.index("tiny-fnk0104s-test") < names.index("tiny-fnk0104s-older"), [(s["name"], s.get("built_at")) for s in sets])
     if real:
         p = min(real["parts"], key=lambda x: x["size"])
         st, h, data = req("GET", f"/api/sets/{real['name']}/{p['file']}")
