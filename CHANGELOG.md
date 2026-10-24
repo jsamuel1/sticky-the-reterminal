@@ -6,10 +6,19 @@ release, newest first.
 
 ## Unreleased
 
-- **bench OTA fixes** — `ota <url> <sha256>` now sends every argument with a
-  scheme (`http://`, `ftp://`, …) to the URL guard, so it is refused instead
-  of being read as a channel name. This matches the v15 contract, so the
-  grammar is unchanged. `tools/ota_push.py` counts only a reply starting
+- **status buffer cap** — both `tiny_node_status_json` callers (the
+  `status` verb and the settings page) declare their PSRAM buffer with one
+  `TINY_STATUS_JSON_CAP` (2048) from `tiny/tiny_node.h`. A 1024 B caller made
+  `status` answer `status json truncated` (1026 B at v17, 1303 B measured at
+  v18), which stopped the bench OTA pre-status. `tests/host/status_cap_host_test.sh`
+  fails on any caller not sized by the constant, or a cap under 1536 B. Reply
+  shape unchanged, so the grammar is unchanged.
+
+- **bench OTA fixes** — `ota <url> <sha256>` now sends every two-argument
+  form, plus any one-argument value with a scheme (`http://`, `ftp://`, …),
+  to the URL guard. Invalid direct URLs are refused instead of being read as
+  channel names with their second argument silently ignored. This matches the
+  v15 contract, so the grammar is unchanged. `tools/ota_push.py` counts only
   `OTA staged` as success (`... - nothing staged` used to pass), and a
   configured bench board that is offline now fails the job instead of
   skipping. Each CI `build` job asserts its app's board stamp

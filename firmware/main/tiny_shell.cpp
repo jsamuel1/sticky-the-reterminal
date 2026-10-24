@@ -94,7 +94,7 @@ static esp_err_t render_settings(void) {
     int rssi = 0;
     bool have_rssi = false;
     // PSRAM: 2 KB of internal .bss is TLS headroom the voice upload needs.
-    EXT_RAM_BSS_ATTR static char sj[2048];   // same ceiling as the `status` verb
+    EXT_RAM_BSS_ATTR static char sj[TINY_STATUS_JSON_CAP];   // same ceiling as the `status` verb
     if (tiny_node_status_json(sj, sizeof sj) == ESP_OK) {
         cJSON *o = cJSON_Parse(sj);
         if (o) {

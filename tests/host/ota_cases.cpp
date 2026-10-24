@@ -104,15 +104,21 @@ int main(int argc, char **argv) {
     CHECK(!media_url_ok(longkey.c_str()), "U11 overlong key refused");
     CHECK(!media_url_ok(nullptr), "U12 null refused");
 
-    // --- verb dispatch: any scheme is the URL form, so the guard sees it ---
-    CHECK(ota_arg_is_url("https://plugin.tiny.technology/media/a.bin"), "D1 https is url form");
-    CHECK(ota_arg_is_url("http://plugin.tiny.technology/media/a.bin"), "D2 http is url form");
-    CHECK(ota_arg_is_url("ftp://x/a.bin"), "D3 ftp is url form");
-    CHECK(!ota_arg_is_url("sticky-dev"), "D4 channel name is not url form");
-    CHECK(!ota_arg_is_url(""), "D5 empty is channel form (default)");
+    // --- verb dispatch: a scheme or second arg selects the URL form ---
+    CHECK(ota_args_are_direct("https://plugin.tiny.technology/media/a.bin", 2),
+          "D1 https + sha is direct form");
+    CHECK(ota_args_are_direct("http://plugin.tiny.technology/media/a.bin", 2),
+          "D2 http is direct form");
+    CHECK(ota_args_are_direct("ftp://x/a.bin", 2), "D3 ftp is direct form");
+    CHECK(!ota_args_are_direct("sticky-dev", 1), "D4 one arg is channel form");
+    CHECK(!ota_args_are_direct("", 0), "D5 empty is channel form (default)");
     CHECK(!media_url_ok("http://plugin.tiny.technology/media/a.bin") &&
-              ota_arg_is_url("http://plugin.tiny.technology/media/a.bin"),
+              ota_args_are_direct("http://plugin.tiny.technology/media/a.bin", 2),
           "D6 http url reaches the guard and is refused");
+    CHECK(ota_args_are_direct("plugin.tiny.technology/media/a.bin", 2),
+          "D7 malformed URL + sha reaches the guard and is refused");
+    CHECK(ota_args_are_direct("sticky-dev", 2),
+          "D8 channel + extra arg reaches direct guard instead of ignoring arg");
 
     // --- sha256 guard ---
     const std::string h64(64, 'a');

@@ -1954,7 +1954,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         // buffer size means one of them breaks first, quietly.
         // 2048: v18 `caps` (~290 B) pushed the worst case (pair_url +
         // died_doing + ssid) past 1 KB; the refusal below names the bytes.
-        EXT_RAM_BSS_ATTR static char st[2048];  // PSRAM .bss
+        EXT_RAM_BSS_ATTR static char st[TINY_STATUS_JSON_CAP];  // PSRAM .bss
         // The writer now REFUSES rather than truncating, and its refusal is
         // parseable JSON naming the byte count it needed — so do not clobber it
         // with a generic sentence. Only substitute when nothing usable came back.
@@ -2421,7 +2421,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         const char *arg = prompt[3] == ' ' ? prompt + 4 : "";
         char a1[200] = "", a2[80] = "", extra[2] = "";
         const int na = sscanf(arg, "%199s %79s %1s", a1, a2, extra);
-        const bool url_form = tiny_ota_util::ota_arg_is_url(a1);
+        const bool url_form = tiny_ota_util::ota_args_are_direct(a1, na);
         esp_err_t r;
         if (url_form && na != 2) {
             reply(envelope_id, "OTA refused: usage ota <url> <sha256>");
