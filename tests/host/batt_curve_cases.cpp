@@ -85,6 +85,16 @@ int main()
         CHECK("4600 mV: implausible", !e.plausible && e.percent == -1);
     }
     {
+        // One Wi-Fi-TX spike in a 15-sample burst: median AND gate ignore it.
+        int s[15];
+        for (int i = 0; i < 15; ++i) s[i] = 1900 + (i % 3);  // 1900..1902
+        s[7] = 2400;
+        tiny_batt_estimate_t e = tiny_batt_estimate(s, 15, 2);
+        CHECK("lone spike: still plausible", e.plausible);
+        CHECK("lone spike: median unmoved", e.pack_mv == 3802);
+        CHECK("lone spike: percent reported", e.percent >= 0);
+    }
+    {
         // Spread exactly at the limit is accepted; one over is not.
         int ok[] = {1900, 1975};
         CHECK("spread 150 accepted", tiny_batt_estimate(ok, 2, 2).plausible);

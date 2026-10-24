@@ -17,7 +17,7 @@ if(CONFIG_TINY_BOARD_FNK0104S)
   # FNK0104S: ST7796S LCD behind the shared colour-panel canvas (lcd_canvas).
   set(TINY_BOARD_SRCS
     "board_generic.cpp" "sticky_power_generic.cpp" "lcd_canvas.cpp" "lcd_panel_st7796.cpp"
-    "hal_absent.cpp" "sticky_battery_adc.cpp"
+    "hal_absent.cpp" "sticky_battery_adc.cpp" "tiny_batt_curve.cpp"
     "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp")
 elseif(CONFIG_TINY_BOARD_AMOLED18)
   # AMOLED-1.8 V2: CO5300 QSPI AMOLED behind the shared colour-panel canvas.

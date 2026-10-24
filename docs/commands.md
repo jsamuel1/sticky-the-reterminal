@@ -33,7 +33,7 @@ use_device invoke → prompt: "status"
 | `scroll` | <code>up&vert;<wbr>down&vert;<wbr>top&vert;<wbr>±px</code> | steps ⅔ of a view; bare form reports | `offset`, `content_h`, `view_h`, `scrollable` |
 | `glance` | — | redraws the current card via *partial* refresh, no network | `refresh:"partial"`, battery, wifi, unread, locked |
 | `status` | — | machine JSON with a human `summary` inside | `fw`, `fw_commit`, `fw_date`, `grammar_version`, `battery_pct`, `battery_mv`, `rssi_dbm`, `card_id`, `locked`, `last_boot`, `board`, `caps` |
-| `sensors` | `[card]` | live I²C read: SHT40, IMU, RTC, BQ27220; `card` also paints the page | JSON. **Read `mah_trusted` first** — the gauge claims 7500 mAh on a 750 mAh pack |
+| `sensors` | `[card]` | live read: SHT40, IMU, RTC, battery (BQ27220, or the FNK0104S GPIO 9 divider); `card` also paints the page | JSON. `battery.source` is `bq27220` or `adc`; an `adc` battery has only `percent` (resting-voltage estimate), `voltage_mv`, `charging:null`, `present`. On `bq27220` **read `mah_trusted` first** — the gauge claims 7500 mAh on a 750 mAh pack |
 | `miccheck` | `[seconds]` | records PDM audio, replies levels instead of uploading | <code>verdict:"live&vert;<wbr>SILENT"</code>, `rms`, `peak` |
 | `ask` | text | a full owner-scoped agent turn — tools, memory, other devices — streamed onto home | the answer. One at a time; a second is refused |
 | `voice` | `[seconds]` | records, uploads, then `ask` with `audioUrl` — the AI button's path | the answer, or "didn't catch that" on 422 |
