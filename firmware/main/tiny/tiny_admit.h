@@ -11,6 +11,9 @@
 // One atomic word: bit 31 = sleep claimed, bits 0..30 = work in flight.
 //   * work_enter() refuses once sleep is claimed, else counts one in.
 //     Nested work (dispatch -> ask, send -> open) just counts twice.
+//   * queue producers call work_enter() before publishing an item. Its
+//     consumer constructs Work(AdoptReserved::Yes), transferring that same
+//     count without a gap; a failed enqueue calls work_exit().
 //   * sleep_claim() succeeds only from "no work, not claimed"; after that no
 //     work can enter, so whatever the sleeper checks next (a stream playing,
 //     the charger) cannot change under it. A sleeper that decides not to
@@ -67,10 +70,16 @@ inline void sleep_release() { word().fetch_and(~kSleep); }
 inline bool sleep_claimed() { return (word().load() & kSleep) != 0; }
 inline uint32_t work_in_flight() { return word().load() & ~kSleep; }
 
+// Queue producers reserve work before publishing an item; consumers adopt
+// that already-counted slot. This closes queue acceptance -> consumer start:
+// sleep cannot claim between those two events.
+enum class AdoptReserved : uint8_t { Yes };
+
 // RAII work slot: `Work w; if (!w) refuse;`
 struct Work {
     bool ok;
     Work() : ok(work_enter()) {}
+    explicit Work(AdoptReserved) : ok(true) {}
     ~Work() { if (ok) work_exit(); }
     Work(const Work &) = delete;
     Work &operator=(const Work &) = delete;

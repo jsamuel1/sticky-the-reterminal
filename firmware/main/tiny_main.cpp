@@ -29,6 +29,7 @@
 #include "sticky_power.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+#include "tiny/tiny_admit.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_touch.h"
 #include "tiny/tiny_config.h"
@@ -190,7 +191,10 @@ extern "C" void app_main(void)
     // is already reading the card. 6s = past the glance, before the pocket.
     if (glance_wake) {
         vTaskDelay(pdMS_TO_TICKS(6000));
-        tiny_display_rerender();
+        // Inputs are live by now, so a PWR long press may already have
+        // claimed sleep (tiny_admit.h): then the goodbye card stays.
+        tiny_admit::Work work;
+        if (work) tiny_display_rerender();
     }
 
     // M11: the UI follows the body. Started AFTER the shell so its first commit

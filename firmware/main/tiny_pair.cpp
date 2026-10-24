@@ -14,6 +14,7 @@
 #include "tiny/tiny_pair.h"
 #include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_pair_util.h"
+#include "tiny/tiny_admit.h"
 #include "tiny/tiny_config.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_node.h"
@@ -110,6 +111,9 @@ extern "C" void tiny_pair_retry(void) {
 // render lands on "pair"). Anything else on the glass (the shell's Wi-Fi
 // keyboard, a preview) belongs to someone else.
 static void repaint(void) {
+    // Work (tiny_admit.h): never paint over a claimed sleep's goodbye card.
+    tiny_admit::Work work;
+    if (!work) return;
     const char *id = tiny_display_current_card_id();
     if (!strcmp(id, "ob-pair") || !strcmp(id, "ob-link")) tiny_onboard_render();
 }

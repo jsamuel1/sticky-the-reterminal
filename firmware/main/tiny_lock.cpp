@@ -11,6 +11,7 @@
 
 #include "pin_config.h"
 #include "sticky_buzzer.h"
+#include "tiny/tiny_admit.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_led.h"
 #include "tiny/tiny_node.h"
@@ -95,6 +96,10 @@ extern "C" esp_err_t tiny_lock_set(bool locked, const char *reason) {
     // Status light (FNK0104S): dark while locked, back to the live state on
     // unlock. No-op on boards without the light.
     tiny_led_sync();
+    // The state flip above always happens; the paint below is work, so it
+    // enters the work/sleep gate (tiny_admit.h) and is skipped once a sleep
+    // is claimed - it must not overwrite the goodbye card the wake diffs.
+    tiny_admit::Work work;
     if (locked) {
         // Two blips = "input refused" in the sound vocabulary — here it means
         // "inputs are now refused", audible through a pocket. The glass keeps
@@ -103,7 +108,7 @@ extern "C" esp_err_t tiny_lock_set(bool locked, const char *reason) {
         // §12: the strip should SAY it is locked — one partial refresh flips
         // the [L] into the glance cluster without a full flash. Failure is
         // fine (no card cached yet); the lock itself never depends on it.
-        tiny_display_glance();
+        if (work) tiny_display_glance();
     } else {
         sticky_buzzer_beep();
         // Leaving lockout restores the full 30 min budget, and
@@ -113,7 +118,7 @@ extern "C" esp_err_t tiny_lock_set(bool locked, const char *reason) {
         // §11 exit: full refresh, last card restored. The card never left the
         // glass — the re-render clears partial-refresh ghosting accumulated
         // in the pocket and proves the panel is live again.
-        tiny_display_rerender();
+        if (work) tiny_display_rerender();
     }
     return ESP_OK;
 }

@@ -45,6 +45,17 @@ static void sequential() {
         CHECK("work admitted after release", (bool)w);
     }
 
+    // Queue handoff: producer reserves before publishing; consumer adopts the
+    // existing count without incrementing, so sleep stays excluded throughout.
+    reset();
+    CHECK("queue producer reserves", tiny_admit::work_enter());
+    CHECK("sleep refused while work is queued", !tiny_admit::sleep_claim());
+    {
+        tiny_admit::Work queued(tiny_admit::AdoptReserved::Yes);
+        CHECK("queue consumer adopts one count", tiny_admit::work_in_flight() == 1);
+    }
+    CHECK("queue consumer releases reservation", tiny_admit::word().load() == 0);
+
     // The `sleep` verb: it is work itself, and claims only as the sole work.
     reset();
     CHECK("verb enters", tiny_admit::work_enter());
@@ -96,9 +107,70 @@ static void race() {
     CHECK("race: gate idle at end", tiny_admit::word().load() == 0);
 }
 
+// Queue handoff race: producers reserve, then publish into a depth-1
+// mailbox (the firmware queues are depth 1..4, no wait); on a full mailbox
+// they cancel. A consumer adopts the reservation. Sleepers claim and must
+// then see the mailbox EMPTY and nobody inside: an accepted item is never
+// stranded behind a claimed sleep. Before the fix (check sleep_claimed(),
+// then publish unreserved) this property is exactly what failed.
+static void queue_race() {
+    reset();
+    std::atomic<int> mailbox{0};  // 0 empty, 1 holds an item
+    std::atomic<int> inside{0};
+    std::atomic<bool> stop{false};
+    std::atomic<int> violations{0}, claims{0}, consumed{0}, cancelled{0};
+    std::vector<std::thread> ts;
+    for (int i = 0; i < 3; ++i)
+        ts.emplace_back([&] {
+            while (!stop.load()) {
+                if (!tiny_admit::work_enter()) continue;
+                int empty = 0;
+                if (!mailbox.compare_exchange_strong(empty, 1)) {
+                    tiny_admit::work_exit();  // queue full: cancel
+                    cancelled.fetch_add(1);
+                }
+            }
+        });
+    ts.emplace_back([&] {
+        while (!stop.load() || mailbox.load()) {
+            int full = 1;
+            if (!mailbox.compare_exchange_strong(full, 0)) continue;
+            tiny_admit::Work w(tiny_admit::AdoptReserved::Yes);
+            inside.fetch_add(1);
+            if (tiny_admit::sleep_claimed()) violations.fetch_add(1);
+            consumed.fetch_add(1);
+            inside.fetch_sub(1);
+        }
+    });
+    for (int i = 0; i < 2; ++i)
+        ts.emplace_back([&] {
+            while (!stop.load()) {
+                if (!tiny_admit::sleep_claim()) continue;
+                claims.fetch_add(1);
+                if (mailbox.load() != 0 || inside.load() != 0)
+                    violations.fetch_add(1);
+                std::this_thread::yield();
+                if (mailbox.load() != 0 || inside.load() != 0)
+                    violations.fetch_add(1);
+                tiny_admit::sleep_release();
+            }
+        });
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    stop.store(true);
+    for (auto &t : ts) t.join();
+    printf("     queue race: %d consumed, %d cancelled, %d claims\n",
+           consumed.load(), cancelled.load(), claims.load());
+    CHECK("queue race: all sides made progress",
+          consumed.load() > 0 && claims.load() > 0);
+    CHECK("queue race: claimed sleep never saw a queued or running item",
+          violations.load() == 0);
+    CHECK("queue race: gate idle at end", tiny_admit::word().load() == 0);
+}
+
 int main() {
     sequential();
     race();
+    queue_race();
     if (fails) { printf("%d FAILED\n", fails); return 1; }
     return 0;
 }

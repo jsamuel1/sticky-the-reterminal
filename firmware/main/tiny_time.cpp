@@ -1,5 +1,6 @@
 // tiny_time — see tiny/tiny_time.h. UTC everywhere, on purpose.
 #include "tiny/tiny_time.h"
+#include "tiny/tiny_admit.h"
 #include "tiny/tiny_display.h"
 
 #include <cstdio>
@@ -97,7 +98,12 @@ static void sntp_waiter_task(void *arg) {
         // be hours. Redraw the current card once, here, the moment the claim
         // "synced" becomes true. INVALID_STATE (no card yet — boot race)
         // needs no handling: the first card will draw its own clock.
-        (void)tiny_display_rerender();
+        // Work (tiny_admit.h): skipped once a sleep is claimed, so the
+        // clock redraw cannot paint over the goodbye card.
+        {
+            tiny_admit::Work work;
+            if (work) (void)tiny_display_rerender();
+        }
         break;
     }
     if (!s_synced)
