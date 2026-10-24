@@ -29,7 +29,7 @@ recovery/                factory-dump manifest + sha (the 32 MB dump itself is g
 
 Versions live in exactly one place: `firmware/main/tiny/tiny_version.h` —
 `TINY_FW_VERSION` (string, e.g. `0.27.0-u2`) and `TINY_GRAMMAR_VERSION`
-(int, currently 19). CMake reads the first; the heartbeat and `status` report
+(int, currently 20). CMake reads the first; the heartbeat and `status` report
 both. Bump the grammar on **any** change to a verb, its args, or a reply
 shape, and write a line in `CHANGELOG.md`.
 
@@ -117,7 +117,8 @@ Order is load-bearing. Do not reorder without reading the comments in the file.
 3. Cold boot: splash (`tiny` + bar). Deep-sleep wake (EXT1 button / timer) is
    a **glance wake**: no splash, paint home first, init inputs after —
    `first_paint_ms` ≈ 1.1 s is the acceptance, exposed in `status`.
-4. Battery gauge + RTC → system clock (the paint's only data deps).
+4. Battery source (BQ27220 gauge or FNK GPIO 9 ADC divider) + RTC → system
+   clock (the paint's only data deps).
 5. `tiny_shell_init()` renders **home before any network** — navigation must
    work offline.
 6. Auto-rotate, microSD (after first paint, never in the glance budget).
@@ -142,7 +143,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 | `tiny_orient` | 1 Hz IMU classify → auto-rotate (settle before commit) · feeds lock's walk detector |
 | `tiny_audio` | PDM 16 kHz WAV into PSRAM (cap 15 s) · re-claims GPIO19/20 from USB-JTAG before every capture (deep-sleep wake mutes the mic otherwise) · buzzer LEDC GPIO48, silent/soft tiers |
 | `tiny_upload` / `tiny_screenshot` | `POST /api/media` (PSRAM buffer) · framebuffer → 2-bit PNG → URL |
-| `tiny_sensors` | live I²C1 reads: SHT40, LSM6DS3TR-C, PCF8563, BQ27220 — never cached, nulls never fabricated |
+| `tiny_sensors` | live on-demand reads: SHT40, LSM6DS3TR-C, PCF8563, plus battery from BQ27220 or FNK GPIO 9 ADC · ADC burst cached 1 s so status/glass agree · nulls never fabricated |
 | `tiny_time` | RTC→system at boot, SNTP→system→RTC on Wi-Fi; `clock_source` names itself |
 | `tiny_wifi` | STA join + roaming `networks[]` walk · 30 s re-roam task · per-walk failure log (boot "confession" card on wrong password) |
 | `tiny_config` | NVS namespace `tiny`, key `cfg`: ONE JSON blob {device_id, token, api, name, networks[]} · `merge_json` is the single owner of merge semantics (portal, serial, `config` verb all funnel here) |
@@ -156,7 +157,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 
 Other NVS namespaces: `tinywifi` (breadcrumbs), `tinyaskq`, `tinyboot`.
 
-## 5. The verb grammar (v19) and the parity rule
+## 5. The verb grammar (v20) and the parity rule
 
 Dispatched in `tiny_node.cpp::dispatch_inner()` — **23 verbs**:
 

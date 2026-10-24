@@ -16,8 +16,9 @@ config TINY_BOARD_RETERMINAL
 config TINY_BOARD_FNK0104S
     bool "Freenove FNK0104S 4.0\" (ST7796 LCD, 16 MB flash)"
     help
-        Display: ST7796S 320x480 portrait LCD (lcd_canvas). Touch, audio,
-        battery ADC and SD are not driven yet (absent stubs). Console is
+        Display, FT6336U touch, ES8311 audio and the GPIO 9 battery ADC are
+        driven. The ADC reports calibrated pack voltage plus a plausible
+        resting-voltage percent estimate; SDMMC is not driven yet. Console is
         USB-Serial-JTAG (the USB-C port).
 
 config TINY_BOARD_AMOLED18

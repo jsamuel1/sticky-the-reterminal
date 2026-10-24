@@ -1,12 +1,14 @@
 // tiny_sensors — the `sensors` verb: every onboard sensor, read on demand.
 //
 // SHT40 (ambient temp/RH), LSM6DS3TR-C (acceleration + orientation), PCF8563
-// (RTC wall clock), BQ27220 (pack voltage/current/health/charging).
+// (RTC wall clock), and battery from either the BQ27220 gauge or the FNK0104S
+// GPIO 9 ADC divider.
 //
 // Two rules this module exists to enforce:
-//   1. A sensor that failed to read emits JSON null plus an `errors` entry
-//      naming it. Never a zero, never a stale cache — a fabricated 0.0 C reads
-//      as "cold room" to whoever is on the other end.
+//   1. A source that failed to read emits JSON null plus an `errors` entry
+//      naming it. Never a zero or an invented value. Environmental/IMU/RTC
+//      reads are fresh; the ADC battery driver deliberately shares one judged
+//      burst for 1 s so status and glass cannot disagree.
 //   2. No network. `sensors` must answer when the backend is down, exactly
 //      like `status` does.
 #pragma once
@@ -17,10 +19,11 @@
 extern "C" {
 #endif
 
-// Attaches SHT40 + IMU + RTC to the shared sensor I2C bus. The fuel gauge is
-// initialized separately (sticky_battery_init) because it predates this module.
-// Returns ESP_OK if at least one sensor came up; per-sensor failures are logged
-// and then reported honestly as nulls by tiny_sensors_json().
+// Attaches SHT40 + IMU + RTC to the shared sensor I2C bus. The battery source
+// is initialized separately (sticky_battery_init): BQ27220 on reTerminal, ADC
+// divider on FNK0104S. Returns ESP_OK if at least one I2C sensor came up;
+// per-sensor failures are logged and then reported honestly as nulls by
+// tiny_sensors_json().
 esp_err_t tiny_sensors_init(void);
 
 // Reads everything now and writes a JSON object into `out`:
