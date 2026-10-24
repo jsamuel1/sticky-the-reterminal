@@ -1,5 +1,5 @@
 ---
-readtime: 13
+readtime: 18
 description: "Design for spoken agent replies on the codec boards: speech streamed on the ask connection, 16 kHz PCM, no length cap, played as it arrives."
 ---
 
@@ -148,6 +148,49 @@ glass's end of stream, and it runs exactly once:
 The final card stays in its data object, so old firmware keeps rendering it
 at `[DONE]` as it does today.
 
+### Glass takeover before `text_done`
+
+Today any `tiny_display_render_card` call while the text stream is on resets
+the stream ("render during active stream — stream ended by new card"), and the
+ask task keeps calling `stream_append` / `commit` / `end` against a stream
+that no longer exists. Every glass-claiming path goes through that one choke
+point: relay `render_ui`, `say`, `page`, the `messages` and `sensors` cards,
+the home and page buttons, the auth cards and the sleep card. With speech the
+ask lives longer, so the rule becomes explicit:
+
+- `tiny_display_stream_begin` returns a **stream token** (a nonzero `uint32_t`
+  epoch). `stream_append`, `stream_commit`, `stream_note` and `stream_end`
+  take that token. Stream state and the token compare sit under the existing
+  `s_display_mux`, so a reset by another task and an append by the ask worker
+  cannot interleave. The home re-begin used by voice (listening frame, then
+  the SSE begin) keeps the same token.
+- A takeover is any `render_card` that resets an active stream. It retires
+  the token. Later calls with that token return `ESP_ERR_INVALID_STATE` and
+  touch nothing on the glass.
+- On the first stale return the ask marks its glass sink **detached**. The
+  agent turn is not cancelled and speech is not cancelled; the question still
+  gets its answer. Remaining `t` deltas still go into the relay-reply summary
+  and `s_last_answer`, so the remote caller and the home preview keep the full
+  text. The glass does not get them.
+- A detached ask never paints again. A final card carried by `text_done`, an
+  earlier held card, or (old backend) the card at `[DONE]` is freed without
+  rendering. A cut or `error` after takeover adds no ` [stream cut]` to
+  another card. The relay summary gets ` [glass taken by <card_id>]` once.
+- After `text_done` the ask holds no token, so a takeover in the audio tail
+  is just an ordinary card, as described above.
+- A barge-in cancel or `speak stop` before `text_done` ends the ask's own
+  stream, if its token is still valid, with `stream_end(NULL)` on the text so
+  far plus ` [stopped]`. This is the counterpart of today's ` [stream cut]`.
+  A held card is freed unrendered. A replacement ask then begins its own
+  stream.
+- `ask` while an ask is in flight keeps today's refusal before the first audio
+  sample, and cancel-and-replace after it (see below). A replacement begins a
+  new stream and a new token only after the old ask's epilogue, so two asks
+  never share a token.
+
+The classic (non-SSE) JSON path has no stream, so it is unchanged: it renders
+its answer when the body arrives, as today.
+
 Rejected alternatives:
 
 - **A dedicated second connection** for raw chunked PCM, opened from a URL in
@@ -210,13 +253,40 @@ and applying the volume tier as a gain.
 
 ## Cancellation and task ownership
 
-Barge-in is a request to owners, never cross-task resource destruction. A
-small speech controller registers exactly one active producer generation and
-its cancellation sink under a `portMUX_TYPE` critical section; controls copy
-that generation and signal its owner with a task notification outside the
-critical section. Network speech registers the ask worker; `speak test`
-registers its test-producer task. The owner rechecks the generation before
-acting, so a stale notification cannot stop a newer utterance:
+Barge-in is a request to owners, never cross-task resource destruction.
+
+**Signal lifetime.** No control path ever holds a pointer, task handle or
+callback that belongs to a producer. The speech controller owns one static
+event group, created at boot and never deleted, plus three generation words
+(`active_gen`, `cancel_gen`, `ack_gen`) guarded by a `portMUX_TYPE`:
+
+- A producer registers by setting `active_gen` under the lock and clearing
+  `CANCEL_BIT`. It unregisters by setting `active_gen = 0` under the lock.
+  Registration never stores a task handle or a sink.
+- A control reads `active_gen` under the lock. If it is zero the control
+  answers `not speaking`. Otherwise it sets `cancel_gen = active_gen`, leaves
+  the lock, and calls `xEventGroupSetBits(CANCEL_BIT)` on the static group.
+  Every caller (the button callback in the esp_timer task, `node_task`, the
+  sleep path) is a task, never an ISR.
+- The producer's full-ring wait is `xEventGroupWaitBits(SPACE_BIT |
+  CANCEL_BIT)`. On wake it compares `cancel_gen` with its own generation
+  under the lock. A match means cancel; anything else clears the stale bit
+  and continues.
+- The player acknowledges idle the same way: it writes `ack_gen` under the
+  lock and sets `IDLE_BIT`. Waiters compare `ack_gen` with the generation they
+  stopped.
+
+If a producer finishes and unregisters between a control's lookup and its
+`SetBits`, the bit lands on an object that outlives every producer. The next
+producer either sees `cancel_gen` belong to another generation and ignores
+it, or clears the bit when it registers. Nothing can dangle. The other
+cross-task targets are permanent too: the ask worker and the player are
+created at boot and never deleted, and the replacement queue and completion
+queue are static. The only short-lived task, the `speak test` producer, is
+never signalled directly.
+
+Network speech registers the ask worker; `speak test` registers its
+test-producer task:
 
 1. One dedicated ask worker owns `s_ask_mux`, the active
    `esp_http_client_handle_t`, SSE/parser state, ring-producer state and the
@@ -240,8 +310,9 @@ acting, so a stale notification cannot stop a newer utterance:
    requires the measured internal-RAM floor for ask plus one short control
    client. Below it, the ask still runs without `speak:"1"`; this feature never
    turns memory pressure into loss of text or remote reach.
-2. A control path increments the active cancellation generation and signals
-   its registered producer. It never calls `esp_http_client_close`,
+2. A control path follows the signal-lifetime rule above: it sets
+   `cancel_gen` and the static `CANCEL_BIT`, and touches nothing the producer
+   owns. It never calls `esp_http_client_close`,
    `esp_http_client_cancel_request`, releases `s_ask_mux`, mutates parser
    state or drives the amp. ESP-IDF does not document one client handle as
    safe for concurrent task use. The network producer's full-ring wait is on
@@ -259,7 +330,8 @@ acting, so a stale notification cannot stop a newer utterance:
    `s_ask_mux` before it starts any queued replacement. `node_task` sends the
    deferred relay PATCH; no task may capture until the player's acknowledgement.
 4. AI-button and relay `ask` / `voice` barge-in use cancel-and-replace; the
-   button callback only queues the replacement and never waits. Remote stop
+   button callback only queues the replacement and never waits. A hold-to-talk
+   replacement carries its gesture, which the next section defines. Remote stop
    latency is bounded by the forced-active relay cadence (5 s); the physical
    button signals locally. `miccheck`, `speak stop` and `sleep` signal then wait
    on the same bounded idle barrier. A barrier timeout returns `speech stop
@@ -267,6 +339,43 @@ acting, so a stale notification cannot stop a newer utterance:
    and a stop racing natural EOF are idempotent: one generation completes once,
    one old relay reply is sent once, and the newer request cannot inherit old
    bytes.
+
+### Hold-to-talk across barge-in
+
+On the colour boards, BOOT hold arms capture at the 450 ms long-press and
+release ends it. Today release sets a global `s_talk_released`, and capture
+reads it as soon as it starts. With speech playing, capture can only start
+after the player's amp-off acknowledgement, and the user may let go of BOOT
+before that. The global flag would then give a clipped 0.5 s capture of
+nothing, sent as a real voice ask. So the gesture gets a record that it owns:
+
+- `on_talk_start` allocates a **gesture generation** `G` and writes
+  `{G, pressed_at, released = false}` under the gesture `portMUX`. A newer
+  press replaces the record, and an older generation can never consume it.
+  `on_talk_release` sets `released` and `released_at` only when the record
+  still holds the generation that was pressed. Every path uses this record,
+  with or without speech, so the gesture has one meaning.
+- The voice request queued to the ask worker carries `G`. Once the player
+  acknowledges idle, the worker takes the record at **capture eligibility**
+  `E`, which is when the acknowledgement arrives:
+    - **Released before `E`** — the gesture was a stop. Speech ends with
+      `stopped at N s (barge-in)`, no capture runs and no ask is sent. The
+      glass keeps the old answer, ended by the cancellation rule in "Glass
+      takeover". The press-then-let-go gesture people already use to
+      interrupt therefore works.
+    - **Still held at `E`** — capture starts at `E` and runs until release.
+      The 0.5 s floor and the 15 s cap count from `E`, not from the press.
+    - **Released after capture starts** — today's rule: stop at release,
+      but not before 0.5 s of frames.
+- The 3 s arm TTL also counts from `E`, so a bounded stop barrier cannot
+  expire an arm the user is still holding. A barrier timeout drops the
+  gesture with `speech stop timed out` on the status line. The dead-end
+  double beep stays silent, because the player that would play it is the
+  one that did not go idle.
+- The pocket lock is still checked at the capture entry point, so a lock
+  that engages during the barrier refuses the capture as today.
+- Relay `voice <seconds>` and the reTerminal fixed-length click carry a
+  duration and no gesture, so they are unaffected.
 
 Rules:
 
@@ -276,12 +385,13 @@ Rules:
 | owner switches to silent while speaking | signal the active generation; player flushes and turns the amp off. Unmuting does not resume discarded audio |
 | volume tier soft or changed mid-speech | gain ÷ 8; tier is sampled per output chunk, so the next chunk reflects the new setting without rewriting ring bytes |
 | chime while speaking | dropped; the speech is the feedback |
-| AI button or `voice` while speaking (barge-in) | signal cancel-and-replace; the ask worker closes its connection, the player flushes and acknowledges amp-off, then the replacement captures. The mic never records the speaker |
+| AI button or `voice` while speaking (barge-in) | signal cancel-and-replace; the ask worker closes its connection, the player flushes and acknowledges amp-off, then the replacement captures. The mic never records the speaker. BOOT released before amp-off = stop only, no ask; still held = capture from amp-off to release (see hold-to-talk above) |
 | `ask` (typed) while speaking | signal cancel-and-replace; start the new ask only after old worker/player quiescence |
 | `miccheck` while speaking | signal cancellation, wait for amp-off acknowledgement, then capture |
 | `speak stop` | cancel active speech without capture; if no speech is active, reply `not speaking` and do not cancel an ask that is still generating text |
 | `speak test [seconds]` | honour silent mode; refuse while an ask is in flight but has not begun speaking; while speech is active, cancel it, await amp-off, then register the test generation |
-| any new card or `render_ui` | speech continues; audio and glass are independent |
+| any new card or `render_ui` **before** `text_done` | the card takes the glass and retires the stream token; the ask detaches its glass sink, so text goes on into the relay summary only and no final card is painted. Speech continues |
+| any new card or `render_ui` **after** `text_done` | an ordinary card; speech continues. The ask holds no glass token |
 | pocket lock | speech continues. Lock guards inputs, not output (same as `say`) |
 | deep sleep, auto-sleep, OTA reboot or node shutdown | signal cancellation, wait for the bounded player-idle/amp-off barrier, then cross the power boundary; on timeout refuse a requested sleep/OTA, while shutdown's last resort forces the amp GPIO off before teardown |
 | connection cut or 30 s stall mid-speech | terminal state `cut`; the buffered residual drains even below the prebuffer; verdict `cut after N s` |
@@ -295,6 +405,14 @@ Rules:
 is a buzzer (the beacon's historical bit). A new `speech` field means "PCM
 playback through a codec and an amp". FNK0104S: true. AMOLED-1.8: false until
 its ES8311 is proven on hardware. reTerminal: false.
+
+`caps.speech` is a `board_caps` field reported in `status`. It is **not** a
+filter on the verb roster. `s_caps[]` in `tiny_node.cpp` is one static list,
+identical on every board. The heartbeat, `pair/start`, the BLE tool catalog
+and the provisioning tools (`provision_lib.py` and `provision.js` parse it from
+source) all consume it. A runtime filter would make the heartbeat disagree
+with the claim the provisioning tools make from that source. This design adds
+no TinyBeacon capability bit.
 
 ## Grammar v20 (proposed)
 
@@ -328,9 +446,18 @@ speak test [seconds]    a device-generated 440 Hz tone pushed through the ring
 `done 41.3 s, 0 underruns, 0 bad lines`, `stopped at 12.0 s (barge-in)`,
 `cut after 8.2 s (connection closed)`, `refused: codec opus`.
 
-The heartbeat `capabilities[]` lists `speak` only where `caps.speech` is
-true, so the list stays exactly what dispatches. On the other boards the verb
-answers `no speaker on this board (buzzer only)` instead of help text.
+`speak` joins `s_caps[]` unconditionally, in the same commit that adds its
+dispatch branch, with no Kconfig or board `#if` around either. It therefore
+dispatches on every board, and "advertise exactly what dispatches" holds. On
+a board with `caps.speech` false, every subcommand returns a typed refusal,
+`speak refused: no speech playback on this board (buzzer only)`, rather than
+unknown-verb help text. That is the precedent `ota` set: it is listed on
+every board and answers `OTA refused: OTA is disabled on this board` where
+`caps.ota` is false. A caller learns whether speech works from `status`
+`caps.speech` / `speech_ready`, not from the roster. The static
+`provision.js` copies gain `speak` in the same commit; `selftest.py` and
+`provision_host_test.sh` already fail on a mismatch. The `commands.md` verb
+count moves from 23 to 24.
 
 **Status.** `caps.speech` (hardware bool), `speech_ready` (player/ring bool),
 `speaking` (bool), `speak_last` (the `speak status` verdict), and `speakmode`.
@@ -343,7 +470,10 @@ that contains **both S1 and S2**. The slices are implementation order, not
 separately shippable grammar states: S1 may be bench-tested from a development
 build, but no released v20 may advertise `speak`, `caps.speech`, status fields
 or the request/events without the complete S2 parser, cancellation and
-settings contract.
+settings contract. S1 may still add `speak` to `s_caps[]` together with its
+dispatch branch, because the roster rule is about dispatch, not grammar. A
+build between the S1 and S2 commits is a development build and is not
+tagged.
 
 ## Backend contract (tiny.technology, not in this repo)
 
@@ -368,12 +498,43 @@ On `speak:"1"`:
 
 Without the flag, nothing changes.
 
+## Compared with the LLM request
+
+The owner asked how speech compares with the LLM request. The device sends
+one request; the backend runs two generators behind it: the agent's model
+first, then TTS on the model's text.
+
+| | LLM text (today) | TTS speech (this design) |
+|---|---|---|
+| Device request | `POST /api/devices/ask` with `text` or `audioUrl`, `tiny`, `stream:"1"` | the same request with `speak:"1"` added. No second request, URL or socket |
+| What runs | one owner-scoped agent turn: model, tools, memory | the same turn, unchanged. TTS reads the turn's output text and never changes it |
+| Who picks model / provider | backend, from the owner's agent (`tiny` slug) | backend: TTS provider, model and voice are backend configuration. The device sends no provider, model or voice field |
+| Wire | default `message` blocks `{"t"}`, `{"card"}`, `{"error"}`, `[DONE]` | the same blocks, plus `audio_fmt`, `audio`, `audio_error`, `text_done` |
+| Output size | bounded: an 8 KB glass buffer and an 8000 B relay reply | unbounded: about 32 KB/s of PCM, bounded in memory only by the ring |
+| Duration | ends when the model finishes | ends when the speech finishes, usually well after `text_done`, so the connection stays open for the audio tail |
+| Flow control | the device reads as fast as bytes arrive | ring full → the device stops reading → TCP holds the backend's TTS writer |
+| Stall rule | 30 s with no byte is a cut | the same, but only while the ring has room |
+| Failure | `error` is shown as an agent error | `audio_error` changes only the speech verdict; the text stays an answer |
+| Concurrency | a second ask is refused while one is in flight | the same before the first audio sample; after it, barge-in cancels and replaces |
+| Cancellation | none today; the turn runs to `[DONE]` | the device closes the connection; the backend must stop TTS (contract item 6). Tool side effects already done are not rolled back |
+| Glass | typed live, then the final card | unchanged up to `text_done`; audio never touches the glass |
+| Off switch | none | `speakmode`, silent mode, `speech_ready` and heap admission. Any one of them omits `speak:"1"` and leaves the request byte-identical to today |
+
+What stays the same: one turn, one text, one card, one transcript
+(`/api/devices/transcript` records the text, not the audio), one request
+shape. What changes is the lifetime of the response stream: it now follows
+playback rather than generation, so back-pressure, the stall rule and
+cancellation become device-visible. Voice per agent, TTS cost and any storage
+of synthesized audio are backend decisions outside this repo. The input side
+has the same split today: the device uploads WAV, and the backend chooses the
+speech-to-text.
+
 ## Slices
 
 1. **S1, firmware, no backend dependency; not released alone.** `tiny_pcm`
    gets the canonical base64 validator/decoder, the mono→stereo gain expander
-   and the ring. A pure-C speech controller (generation, terminal state,
-   cancellation sink) and a player model get injected clocks, a fake I2S sink
+   and the ring. A pure-C speech controller (generations, terminal state,
+   static cancel/space/idle event bits) and a player model get injected clocks, a fake I2S sink
    and a fake amp pin so they run on the host. `audio_es8311` gets the ring
    player with prebuffer, underrun, residual drain, flush and the amp-off
    acknowledgement. Also: `speak stop|status|test`, `caps.speech`, status
@@ -397,6 +558,27 @@ Without the flag, nothing changes.
       speech; a capture request is admitted only after the idle ack.
     - Controller: a stale-generation stop, a double stop, and a stop racing
       natural EOF each complete the generation exactly once.
+    - Signal lifetime, rendezvous: a fake scheduler pauses a control between
+      its `active_gen` lookup and its `SetBits`. The producer then completes
+      and unregisters, and a second producer registers. On resume, the
+      first producer's resources are already freed (an ASan host build
+      detects any touch), the second producer sees a foreign `cancel_gen`
+      and keeps playing, and the stale control reports its generation
+      finished. A mutation that stores a producer handle in the controller
+      and signals it must fail this test.
+    - Gesture: with a fake player whose idle ack is delayed, (a) press during
+      speech, release before the ack: no capture, no ask, verdict `stopped`;
+      (b) press, ack, release 2 s later: capture length about 2 s counted from
+      the ack, ask sent; (c) press, ack, release at 0.2 s: the 0.5 s floor
+      applies from the ack; (d) a second press during the barrier: only the
+      newest generation is consumed, and the older release is ignored;
+      (e) ack later than 3 s after the press while still held: the arm is not
+      expired. A mutation that reads a global released flag instead of the
+      generation record must fail (a) and (d).
+    - Roster: `speak` is in `s_caps[]` on all three board builds; on a
+      `caps.speech=false` board every `speak` subcommand returns the typed
+      refusal, never help text; the existing provision roster tests pass with
+      the new entry.
 
    Proof on the FNK0104S bench (`speak test` replies `test started`; the
    verdict is read with `speak status`):
@@ -429,7 +611,17 @@ Without the flag, nothing changes.
    `text_done` ending the glass exactly once, later `t`/`card`/duplicate
    `text_done` ignored, `[DONE]` and a post-`text_done` cut leaving the glass
    untouched, and a fake `render_ui` card painted during the audio tail still
-   current at `[DONE]` (no replay of the old final card);
+   current at `[DONE]` (no replay of the old final card); glass takeover
+   before `text_done` (a fake `render_ui`, `say` and `page` each injected
+   after the first delta, and again between the last delta and `text_done`):
+   later deltas still reach the relay summary, no append or commit reaches
+   the glass, the `text_done` card and an old-backend `[DONE]` card are both
+   freed unrendered, the summary gains ` [glass taken by <card_id>]` once,
+   speech keeps playing, and the taking card is still current at `[DONE]`;
+   the same three injected after `text_done` leave the stream untouched,
+   since it has already ended; a cancel before `text_done` ends the ask's own
+   stream with ` [stopped]` exactly once, and a cancel after takeover
+   paints nothing; a mutation that drops the token check must fail;
    button and relay replacement asks; no double reply; and no capture before
    amp-off. Auto-sleep tests pin that ask-worker or speech activity blocks the
    due path; explicit sleep/OTA tests pin cancellation-before-power transition
