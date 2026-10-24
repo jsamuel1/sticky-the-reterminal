@@ -158,7 +158,30 @@ notes. A menu shows up to 24 items and unstages rows that scroll out of view
 
 Any card may declare `"priority":"alert"` — today a `!` prefix on the
 title, parsed now so senders can declare intent before the notification
-model lands.
+model lands. On colour glass the title and its rule also turn red.
+
+### accent *(colour boards, grammar v16)*
+
+```json
+{"type":"list","title":"Errands","accent":"green","items":["milk","post"],
+ "buttons":[{"label":"Done","id":"done"},{"label":"Later","id":"later","accent":"orange"}]}
+```
+
+Optional on any card, on each `composite` part and on each button object:
+`red` `orange` `yellow` `green` `teal` `blue` `purple` `pink`, plus
+`neutral` (black-on-white) and `mono` (literal gray in every theme). It tints
+**chrome only** — title rule, buttons, bullets, the scroll thumb, chart
+series, menu frames, your chat bubble, the keyboard's OK key. Body text stays
+ink. No accent means blue. An unknown name keeps the default and is logged.
+
+The e-ink ignores it: the 800×480 four-gray plane is byte-for-byte what it
+was before v16. A colour board keeps a second 4-bit accent plane beside the
+gray one, and each pixel is drawn as *palette[accent][gray]*: black = the
+accent's ink, dark gray = ink at ⅔, light gray = a ¼ tint, white = the
+background. `status` says `color:true` and `theme:"light"|"dark"`; the
+AMOLED uses the dark theme (light on black). QR modules and server-sent
+`image`/`gallery`/stream frames are always literal gray, so a photo or code
+never inverts on a dark panel. `page palette` paints every accent at once.
 
 ## Scrolling
 

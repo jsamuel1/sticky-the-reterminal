@@ -6,6 +6,26 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware** — colour UI on colour boards, grammar v16. The Canvas gains an
+  optional 4-bit accent plane beside the unchanged 2-bit gray plane; only
+  `lcd_canvas` attaches one, so the reTerminal's canvas is byte-for-byte what
+  it was. `lcd_gray4.h` becomes `lcd_palette.h`: 16 accents × 4 levels per
+  theme (light; dark = light-on-black, used by the AMOLED), expanded to RGB565 per
+  strip, and the partial refresh diffs both planes. Caps gain `color` and
+  `dark_theme`; FNK0104S (light) and AMOLED-1.8 (dark) `color` on.
+- **grammar v16** — cards, composite parts and button objects take an optional
+  `accent` (`red|orange|yellow|green|teal|blue|purple|pink|neutral|mono`,
+  default blue) that tints chrome only; ignored on the e-ink. An `alert` title
+  is red on colour glass. `screenshot` on a colour board is an 8-bit indexed
+  PNG whose PLTE is the glass's palette (the e-ink keeps the 2-bit gray PNG).
+  `status` gains `color` and `theme`. `page palette` previews the accents.
+  Raw `image`/`gallery`/stream frames stay gray (literal, never themed); no
+  RGB565 raw format.
+- **tests** — `tests/host/lcd_palette_host_test.sh` replaces `lcd_gray4`:
+  palette, accent plane, rotation, strips in both themes, dirty band on an
+  accent-only change, the e-ink invariant, and the shipped PNG encoder
+  (`tiny/tiny_png.h`) decoded by python zlib.
+
 - **firmware** — AMOLED-1.8 V2: the CO5300 368×448 AMOLED is driven
   (`lcd_panel_co5300.cpp` behind `lcd_canvas`; replaces the headless canvas,
   which is removed). QSPI on SPI2 (CS 12, PCLK 11, D0–D3 4–7) at

@@ -66,6 +66,29 @@ public:
     uint8_t *data() { return buffer_; }
     const uint8_t *data() const { return buffer_; }
 
+    // ---- accent plane (colour boards only) ---------------------------------
+    // A second, optional plane: 4 bits per PHYSICAL pixel, two pixels per
+    // byte (left pixel in the high nibble), indexing a colour boards' accent
+    // palette (lcd_palette.h). The 2-bit gray plane above is untouched by it:
+    // the e-ink board never attaches one, so its bytes are what they always
+    // were. With a plane attached, every draw_pixel also stamps the current
+    // pen into it — accent 0 = neutral gray, which is what clear() and an
+    // unset pen give, so code that never names a pen draws exactly as before.
+    void set_accent_plane(uint8_t *buffer, size_t buffer_size);
+    bool has_accent() const { return accent_ != nullptr; }
+    uint8_t *accent_data() { return accent_; }
+    const uint8_t *accent_data() const { return accent_; }
+    size_t accent_stride() const { return (width_ + 1U) / 2U; }
+    // Pen = the accent index (0..15) the next draws stamp. No-op storage-wise
+    // without a plane; kept anyway so callers need no #if.
+    void set_pen(uint8_t accent) { pen_ = accent & 0x0FU; }
+    uint8_t pen() const { return pen_; }
+    // Every accent cell := `accent` (clear() does this with 0; raw blits use
+    // the literal-gray index so server pixels never take a theme).
+    void fill_accent(uint8_t accent);
+    // Accent index of PHYSICAL pixel (px, py); 0 without a plane.
+    uint8_t accent_at(int px, int py) const;
+
     void clear(GrayLevel color = GrayLevel::White);
     void draw_pixel(int x, int y, GrayLevel color = GrayLevel::Black);
     void draw_line(int x0, int y0, int x1, int y1,
@@ -83,6 +106,10 @@ private:
     bool clip_on_ = false;
     int clip_y0_ = 0;
     int clip_y1_ = 0;
+
+    uint8_t *accent_ = nullptr;
+    size_t accent_size_ = 0;
+    uint8_t pen_ = 0;
 
     CanvasRotation rotation_ = CanvasRotation::Landscape;
     uint16_t width_;

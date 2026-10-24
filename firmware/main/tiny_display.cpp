@@ -51,6 +51,7 @@
 #include "tiny/tiny_time.h"
 #include "tiny/tiny_wifi.h"
 #include "qrcode.h"   // espressif/qrcode — see firmware/main/idf_component.yml
+#include "lcd_palette.h"  // accent indices + names (grammar v16); pure header
 
 static const char *TAG = "tiny_display";
 
@@ -68,6 +69,44 @@ static void display_lock(void) {
 
 static void display_unlock(void) {
     if (s_display_mux) xSemaphoreGive(s_display_mux);
+}
+
+// ---- colour accents (grammar v16) ---------------------------------------
+// A colour board's canvas carries an accent plane (canvas.h): every pixel
+// drawn while a pen is set remembers that accent, and lcd_palette turns
+// (accent, gray) into the colour on the glass. The e-ink canvas has no plane,
+// so every line below is a no-op there and its bytes do not change.
+//
+// Card JSON: optional "accent":"red|orange|yellow|green|teal|blue|purple|
+// pink|neutral|mono" on the card, on each composite part and on each button
+// object. It tints CHROME only — title rule, buttons, bullets, scroll thumb,
+// chart series, menu frames, the user chat bubble, keyboard OK, home glyphs.
+// Body text stays neutral ink: legibility is not up for a sender's taste.
+// No accent = kDefaultAccent; "neutral" = the e-ink look on colour glass.
+static constexpr uint8_t kDefaultAccent = lcd_palette::kBlue;
+static uint8_t s_accent = kDefaultAccent;   // this card's (or part's) chrome
+
+// Draws inside the scope stamp `accent`; the previous pen comes back after.
+struct PenScope {
+    Canvas &c;
+    uint8_t prev;
+    PenScope(Canvas &cv, uint8_t accent) : c(cv), prev(cv.pen()) { c.set_pen(accent); }
+    ~PenScope() { c.set_pen(prev); }
+    PenScope(const PenScope &) = delete;
+    PenScope &operator=(const PenScope &) = delete;
+};
+
+// `obj.accent` as an index, else `fallback`. An unknown name keeps the
+// fallback and says so in the log — a typo must not blank the chrome.
+static uint8_t parse_accent(const cJSON *obj, uint8_t fallback) {
+    const cJSON *a = obj ? cJSON_GetObjectItem(obj, "accent") : nullptr;
+    if (!cJSON_IsString(a)) return fallback;
+    const int v = lcd_palette::accent_from_name(a->valuestring);
+    if (v < 0) {
+        ESP_LOGW(TAG, "unknown accent \"%.16s\" - using default", a->valuestring);
+        return fallback;
+    }
+    return static_cast<uint8_t>(v);
 }
 
 // ---- layout constants ----
@@ -349,7 +388,7 @@ static int draw_glance_cluster(Canvas &c, int y) {
     return w;  // the title must never paint under this (UI_SPEC §2)
 }
 
-static int draw_title_bar(Canvas &c, const char *title) {
+static int draw_title_bar(Canvas &c, const char *title, bool alert = false) {
     int y = kMargin;
     const int cluster_w = draw_glance_cluster(c, y);
     if (title && *title) {
@@ -367,12 +406,18 @@ static int draw_title_bar(Canvas &c, const char *title) {
                 ft[len] = 0;
             }
         }
+        // An alert title wears red ink on colour glass (its "! " prefix is
+        // what the e-ink gets).
+        PenScope pen(c, alert ? lcd_palette::kRed : lcd_palette::kNeutral);
         c.draw_text(kMargin, y, ft, kTitleScale, GrayLevel::Black);
         y += kGlyphH * kTitleScale + 10;
     } else {
         y += kGlyphH + 6;  // no title: still clear the cluster's strip
     }
-    c.fill_rect(kMargin, y, s_w - 2 * kMargin, 3, GrayLevel::Black);
+    {
+        PenScope pen(c, alert ? lcd_palette::kRed : s_accent);
+        c.fill_rect(kMargin, y, s_w - 2 * kMargin, 3, GrayLevel::Black);
+    }
     return y + 18;
 }
 
@@ -385,6 +430,12 @@ static int draw_title_bar(Canvas &c, const char *title) {
 // 48: a qwerty keyboard card stages 41 key regions. ~9KB of .bss,
 // paid once, guarded by the same staging/publish discipline as before.
 static constexpr int kMaxRegions = 48;
+// Accent per button on the current card; the tap ack (tiny_display_flash_button)
+// repaints a button in the colour it was drawn in. Staged at draw, live at
+// publish — same discipline as the regions themselves.
+static uint8_t s_btn_accent_staged[5];
+static uint8_t s_btn_accent[5];
+
 static tiny_button_region_t s_regions[kMaxRegions];
 static int s_region_count = 0;
 static tiny_button_region_t s_staged[kMaxRegions];
@@ -437,6 +488,7 @@ static void publish_regions(const char *card_id) {
         }
     }
     s_region_count = s_staged_count;
+    memcpy(s_btn_accent, s_btn_accent_staged, sizeof s_btn_accent);
     strlcpy(s_card_id, card_id ? card_id : "", sizeof s_card_id);
     for (int i = 0; i < s_region_count; ++i)
         strlcpy(s_regions[i].card_id, s_card_id, sizeof s_regions[i].card_id);
@@ -485,9 +537,10 @@ static void button_box(int i, int n, int *x, int *y, int *w, int *h) {
 // Draw button i of n into the canvas. `inverted` = filled black with knocked-out
 // text, which is what a tap ack looks like on a 4-gray panel.
 static void draw_button(Canvas &c, int i, int n, const char *label,
-                        bool inverted) {
+                        bool inverted, uint8_t accent) {
     int x, y, w, h;
     button_box(i, n, &x, &y, &w, &h);
+    PenScope pen(c, accent);   // face, frame and label: one accent
     if (inverted) {
         c.fill_rect(x, y, w, h, GrayLevel::Black);
     } else {
@@ -546,7 +599,9 @@ static void draw_buttons(Canvas &c, cJSON *buttons, int *content_bottom) {
         const cJSON *b = cJSON_GetArrayItem(buttons, i);
         const char *label = NULL, *id = NULL;
         button_text(b, &label, &id);
-        draw_button(c, i, n, label, false);
+        s_btn_accent_staged[i] =
+            cJSON_IsObject(b) ? parse_accent(b, s_accent) : s_accent;
+        draw_button(c, i, n, label, false, s_btn_accent_staged[i]);
         int x, y, w, h;
         button_box(i, n, &x, &y, &w, &h);
         // UI_SPEC §3: the strip DRAWS 56px (visual weight) but a fingertip
@@ -701,10 +756,11 @@ extern "C" esp_err_t tiny_display_flash_button(int index) {
     if (!c) return ESP_ERR_INVALID_STATE;
     // invert -> partial refresh (the human's proof the tap landed) -> restore.
     display_lock();
-    draw_button(*c, index, n, regions[index].label, true);
+    const uint8_t acc = index < 5 ? s_btn_accent[index] : s_accent;
+    draw_button(*c, index, n, regions[index].label, true, acc);
     esp_err_t err = sticky_display_refresh_partial();
     vTaskDelay(pdMS_TO_TICKS(220));
-    draw_button(*c, index, n, regions[index].label, false);
+    draw_button(*c, index, n, regions[index].label, false, acc);
     esp_err_t back = sticky_display_refresh_partial();
     display_unlock();
     ESP_LOGI(TAG, "tap ack button=%d \"%s\" -> %s/%s", index,
@@ -821,8 +877,11 @@ static int render_list_card(Canvas &c, cJSON *root, int y, int max_y) {
     cJSON_ArrayForEach(it, items) {
         if (y + kGlyphH * kBodyScale > max_y) break;
         const char *s = cJSON_IsString(it) ? it->valuestring : "?";
-        c.fill_rect(kMargin + 4, y + kGlyphH * kBodyScale / 2 - 4, 10, 10,
-                    GrayLevel::Black);  // bullet
+        {
+            PenScope pen(c, s_accent);
+            c.fill_rect(kMargin + 4, y + kGlyphH * kBodyScale / 2 - 4, 10, 10,
+                        GrayLevel::Black);  // bullet
+        }
         y = draw_wrapped(c, kMargin + 28, y, s, kBodyScale,
                          s_w - 2 * kMargin - 28, max_y);
         y += line_h - (kGlyphH * kBodyScale + 6);
@@ -908,6 +967,7 @@ static void kb_key_face(Canvas &c, int x, int y, int w, int h, const char *lab,
                         int scale, bool dark, bool inverted) {
     // dark: the OK key (black face, white glyph). inverted: active shift.
     if (dark || inverted) {
+        PenScope pen(c, s_accent);
         fill_round_rect(c, x, y, w, h, 8, GrayLevel::Black);
         c.draw_text(x + (w - text_width(lab, scale)) / 2,
                     y + (h - text_ink_h(scale)) / 2, lab, scale, GrayLevel::White);
@@ -926,7 +986,10 @@ static void render_keyboard_card(Canvas &c, cJSON *root, int y, int max_y) {
     const bool sym   = cJSON_IsBool(sy) && cJSON_IsTrue(sy);
     // value box
     const int vh = 44;
-    c.draw_rect(kMargin, y, s_w - 2 * kMargin, vh, GrayLevel::Black);
+    {
+        PenScope pen(c, s_accent);
+        c.draw_rect(kMargin, y, s_w - 2 * kMargin, vh, GrayLevel::Black);
+    }
     char vbuf[64] = "";
     if (cJSON_IsString(val)) strlcpy(vbuf, val->valuestring, sizeof vbuf);
     // TAIL-CLIP (iter-4 finding): right-anchor the tail chars that fit; the
@@ -947,7 +1010,10 @@ static void render_keyboard_card(Canvas &c, cJSON *root, int y, int max_y) {
     int caret_x = kMargin + 10 + text_width(vshow, 2) + 4;  // real ink + gap
     const int caret_max = kMargin + (s_w - 2 * kMargin) - 6;
     if (caret_x > caret_max) caret_x = caret_max;
-    c.fill_rect(caret_x, y + 8, 3, vh - 16, GrayLevel::DarkGray);
+    {
+        PenScope pen(c, s_accent);
+        c.fill_rect(caret_x, y + 8, 3, vh - 16, GrayLevel::DarkGray);
+    }
     int top = y + vh + 12;
 
     // Two planes, same geometry. Symbols follow iOS's ?123 arrangement so a
@@ -1057,7 +1123,10 @@ static int render_menu_card(Canvas &c, cJSON *root, int y, int max_y) {
             if (cJSON_IsString(d)) strlcpy(id, d->valuestring, sizeof id);
             else snprintf(id, sizeof id, "m:%d", i);
         } else continue;
-        c.draw_rect(kMargin, y, s_w - 2 * kMargin, rh, GrayLevel::Black);
+        {
+            PenScope pen(c, s_accent);
+            c.draw_rect(kMargin, y, s_w - 2 * kMargin, rh, GrayLevel::Black);
+        }
         // UI_SPEC §4: interior ink stops >=12px before the border and a cut
         // is visible ("..."), never a mid-token slice against the frame.
         const int row_w = s_w - 2 * kMargin;
@@ -1125,6 +1194,7 @@ static int render_chat_card(Canvas &c, cJSON *root, int y, int max_y) {
         const int bh = th + 2 * pad;
         const int bx = user ? (s_w - kMargin - bw) : kMargin;
         if (user) {
+            PenScope pen(c, s_accent);   // the iOS accent bubble, tinted
             fill_round_rect(c, bx, y, bw, bh, radius, GrayLevel::LightGray);
         } else {
             fill_round_rect(c, bx, y, bw, bh, radius, GrayLevel::White);
@@ -1182,6 +1252,9 @@ static void qr_paint_cb(esp_qrcode_handle_t qr, void *user) {
     // Centre only when it fits; a grown symbol is top-aligned so the flow's
     // end-y (box_y + side) is where the ink actually stops.
     const int oy = side <= p->box_h ? p->box_y + (p->box_h - side) / 2 : p->box_y;
+    // Literal black-on-white in every theme: a camera reads dark modules on a
+    // light quiet zone, and a dark-theme inversion is a scan failure.
+    PenScope pen(*p->c, lcd_palette::kMono);
     p->c->fill_rect(ox, oy, side, side, GrayLevel::White);
     const int dx = ox + quiet * scale;
     const int dy = oy + quiet * scale;
@@ -1341,6 +1414,7 @@ static int render_chart_card(Canvas &c, cJSON *root, int y, int max_y) {
         return py1 - (int)(f * (py1 - py0 - 2)) - 1;
     };
     if (bars) {
+        PenScope series_pen(c, s_accent);   // the series is chrome; axes stay ink
         int bw = std::max(2, pw / n - 2);
         for (int i = 0; i < n; i++) {
             int bx = px0 + 1 + (int)((int64_t)i * pw / n);
@@ -1348,6 +1422,7 @@ static int render_chart_card(Canvas &c, cJSON *root, int y, int max_y) {
             c.fill_rect(bx, by, bw, py1 - by, GrayLevel::Black);
         }
     } else {
+        PenScope series_pen(c, s_accent);
         for (int i = 1; i < n; i++) {
             int xa = px0 + 1 + (int)((int64_t)(i - 1) * (pw - 2) / (n - 1));
             int xb = px0 + 1 + (int)((int64_t)i * (pw - 2) / (n - 1));
@@ -1400,9 +1475,15 @@ static int render_composite_card(Canvas &c, cJSON *root, int y, int max_y) {
             c.fill_rect(kMargin, y, s_w - 2 * kMargin, 1, GrayLevel::Black);
             y += 12;
         }
+        // A part may name its own accent; it tints that part's heading and
+        // chrome, then the card's comes back for the next part.
+        const uint8_t card_accent = s_accent;
+        const bool own = cJSON_GetObjectItem(p, "accent") != nullptr;
+        s_accent = parse_accent(p, card_accent);
         cJSON *pt = cJSON_GetObjectItem(p, "title");
         if (cJSON_IsString(pt) && pt->valuestring[0]) {
             char ft[96]; ascii_fold(ft, sizeof ft, pt->valuestring);
+            PenScope pen(c, own ? s_accent : lcd_palette::kNeutral);
             c.draw_text(kMargin, y, ft, kBodyScale, GrayLevel::Black);
             y += kGlyphH * kBodyScale + 6;
         }
@@ -1412,6 +1493,7 @@ static int render_composite_card(Canvas &c, cJSON *root, int y, int max_y) {
         // in a fitting card it is the real body floor.
         y = render_body(c, p, cJSON_IsString(ptype) ? ptype->valuestring : "text",
                         y, max_y);
+        s_accent = card_accent;
     }
     return y;
 }
@@ -1435,6 +1517,7 @@ static void render_agent_home_card(Canvas &c, cJSON *root, int y, int max_y) {
     // ---- corner targets ----
     const int T = 88;                       // tap square (≥80px law)
     const int icon_y = y + 2;
+    PenScope chrome(c, s_accent);           // glyphs + input bar; text below resets
     {   // settings: slider-triplet glyph in a rounded outline (drawable with
         // rect primitives, reads as "controls" at arm's length)
         const int gx = kMargin, gy = icon_y, gs = 60;
@@ -1523,6 +1606,7 @@ static void render_agent_home_card(Canvas &c, cJSON *root, int y, int max_y) {
         c.fill_rect(cx - 1, cy + 10, 3, 8, GrayLevel::Black);
         c.fill_rect(cx - 10, cy + 18, 21, 3, GrayLevel::Black);
     }
+    c.set_pen(lcd_palette::kNeutral);       // conversation text is ink, not chrome
     {   // v11: the placeholder names the active agent — "Message @slug..."
         char ph[TINY_AGENT_SLUG_MAX + 16];
         snprintf(ph, sizeof ph, "Message %s%s...",
@@ -1695,8 +1779,12 @@ extern "C" esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size
 // Blit fetched canvas-space bytes onto the panel. Caller holds NO lock; the
 // canvas is pinned landscape because raw frames are packed at the panel's
 // native origin — rotation belongs to drawn cards, not server bytes.
+// Server pixels are literal gray in every theme (a photo must not invert on
+// a dark-theme AMOLED): the accent plane is set to kMono under the frame.
 static void blit_raw_locked(Canvas *c, const uint8_t *buf, size_t len) {
     c->set_rotation(CanvasRotation::Landscape);
+    c->fill_accent(lcd_palette::kMono);
+    c->set_pen(lcd_palette::kMono);
     if (len == img_gray4_len()) {
         memcpy((void *)c->data(), buf, len);      // canvas is 2bpp packed
     } else {
@@ -1707,6 +1795,7 @@ static void blit_raw_locked(Canvas *c, const uint8_t *buf, size_t len) {
                 c->draw_pixel(x, y, black ? GrayLevel::Black : GrayLevel::White);
             }
     }
+    c->set_pen(lcd_palette::kNeutral);   // overlays (gallery chip) are themed
 }
 
 // ---- photos-on-SD (the 128GB card is the photo home).
@@ -2159,8 +2248,10 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     s_w = c->width();
     s_h = c->height();
 
-    c->clear(GrayLevel::White);
-    int y = draw_title_bar(*c, title_s);
+    c->clear(GrayLevel::White);   // also resets the accent plane to neutral
+    c->set_pen(lcd_palette::kNeutral);
+    s_accent = parse_accent(root, kDefaultAccent);
+    int y = draw_title_bar(*c, title_s, is_alert);
     int max_y = s_h - kMargin;
 
     cJSON *buttons = cJSON_GetObjectItem(root, "buttons");
@@ -2202,6 +2293,7 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
         if (s_content_h > view_h) {
             // Track + thumb at the right edge, inside the margin.
             const int tx = s_w - 12, tw = 5;
+            PenScope pen(*c, s_accent);
             c->fill_rect(tx, y, tw, view_h, GrayLevel::LightGray);
             int th = std::max(24, view_h * view_h / s_content_h);
             th = std::min(th, view_h);
@@ -2227,6 +2319,7 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
         const int ch = kGlyphH * kBodyScale;
         if (tail_y > max_y - ch) tail_y = max_y - ch;
         if (tail_y < y) tail_y = y;
+        PenScope pen(*c, s_accent);
         c->fill_rect(kMargin, tail_y, 10, ch, GrayLevel::DarkGray);
     }
 
@@ -2307,6 +2400,7 @@ extern "C" esp_err_t tiny_display_splash(const char *version, const char *state)
     const int kSplashBarX = ((int)c->width() - kSplashBarW) / 2;
     const int kSplashBarY = (int)c->height() / 2 + 20;
     c->clear(GrayLevel::White);
+    c->set_pen(lcd_palette::kNeutral);
     c->draw_text(kSplashBarX, kSplashBarY - 70, "tiny", 10, GrayLevel::Black);
     // ONE hollow bar at a fixed 25%. It used to advance by partial refresh
     // at boot stages; those partials were the prime suspect in a boot-bounce
@@ -2339,11 +2433,14 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     // auto-rotate on a pocket device) remaps/clips every draw_pixel and the
     // "frame" arrives as white glass: take 2's white-paint bug, convicted.
     c->set_rotation(CanvasRotation::Landscape);
-    for (int y = 0; y < s_ph; ++y) {
-        for (int x = 0; x < s_pw; ++x) {
-            size_t bit = (size_t)y * s_pw + x;
-            bool black = !(buf[bit / 8] & (0x80 >> (bit % 8)));
-            c->draw_pixel(x, y, black ? GrayLevel::Black : GrayLevel::White);
+    {
+        PenScope pen(*c, lcd_palette::kMono);   // stream frames: literal gray
+        for (int y = 0; y < s_ph; ++y) {
+            for (int x = 0; x < s_pw; ++x) {
+                size_t bit = (size_t)y * s_pw + x;
+                bool black = !(buf[bit / 8] & (0x80 >> (bit % 8)));
+                c->draw_pixel(x, y, black ? GrayLevel::Black : GrayLevel::White);
+            }
         }
     }
     esp_err_t err = partial ? sticky_display_refresh_partial()
@@ -2354,25 +2451,33 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     return err;
 }
 
-extern "C" esp_err_t tiny_display_snapshot_gray8(uint8_t **out, size_t *out_len) {
+extern "C" esp_err_t tiny_display_snapshot_index8(uint8_t **out, size_t *out_len,
+                                                  bool *has_accent) {
     Canvas *c = sticky_display_canvas();
     if (!c || !out || !out_len) return ESP_ERR_INVALID_ARG;
     const size_t len = (size_t)s_pw * s_ph;
     uint8_t *buf = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
     if (!buf) buf = (uint8_t *)malloc(len);
     if (!buf) return ESP_ERR_NO_MEM;
-    // Canvas stores 2 bits/pixel packed; expand via its data() + stride.
+    // Gray plane: 2 bits/pixel packed. Accent plane (colour boards): 4 bits.
     const uint8_t *src = c->data();
     const size_t stride = c->stride();
-    static const uint8_t lut[4] = {0x00, 0x55, 0xAA, 0xFF};
     display_lock();  // a screenshot taken mid-render would be half a card
+    const uint8_t *acc = c->accent_data();
+    const size_t astride = c->accent_stride();
     for (int y = 0; y < s_ph; ++y) {
         for (int x = 0; x < s_pw; ++x) {
-            uint8_t byte = src[y * stride + x / 4];
-            uint8_t px = (byte >> (6 - 2 * (x % 4))) & 0x3;
-            buf[(size_t)y * s_pw + x] = lut[px];
+            const uint8_t byte = src[y * stride + x / 4];
+            const uint8_t lvl = (byte >> (6 - 2 * (x % 4))) & 0x3;
+            uint8_t a = 0;
+            if (acc) {
+                const uint8_t ab = acc[(size_t)y * astride + x / 2];
+                a = (x & 1) ? (ab & 0x0F) : (ab >> 4);
+            }
+            buf[(size_t)y * s_pw + x] = lcd_palette::index_of(a, lvl);
         }
     }
+    if (has_accent) *has_accent = acc != nullptr;
     display_unlock();
     *out = buf;
     *out_len = len;
