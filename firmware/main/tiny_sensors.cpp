@@ -291,7 +291,8 @@ extern "C" esp_err_t tiny_sensors_render_card(void) {
     RtcDateTime now = {};
     const bool have_rtc = s_rtc_up && sticky_rtc_read(now) == ESP_OK;
     BatteryDetail bat = {};
-    const bool have_bat = sticky_battery_read_detail(bat) == ESP_OK;
+    const esp_err_t be = sticky_battery_read_detail(bat);
+    const bool have_bat = (be == ESP_OK);
 
     cJSON *c = cJSON_CreateObject();
     if (!c) return ESP_ERR_NO_MEM;
@@ -353,11 +354,15 @@ extern "C" esp_err_t tiny_sensors_render_card(void) {
     }
     cJSON_AddItemToObject(c, "rows", kv);
     char foot[96];
-    // bat.source is set even when the read fails, so a divider board with no
-    // plausible cell still names its real source instead of an I2C gauge.
+    // bat.source is set even when the read fails, so a divider board still
+    // names its real source instead of an I2C gauge. Only
+    // ESP_ERR_INVALID_RESPONSE means "measured, not a cell"; an ADC init,
+    // read or calibration fault is no reading, not evidence of no cell.
     if (strcmp(bat.source, "adc") == 0)
         snprintf(foot, sizeof foot, "battery from GPIO 9 voltage - %s",
-                 have_bat ? "percent is an estimate" : "no plausible cell");
+                 have_bat ? "percent is an estimate"
+                 : be == ESP_ERR_INVALID_RESPONSE ? "no plausible cell"
+                                                  : "no reading");
     else if (have_bat)
         snprintf(foot, sizeof foot,
                  "read live over I2C1 - pack health %d%%, %d cycles, gauge %.0fC",

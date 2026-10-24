@@ -5,7 +5,9 @@
 # the count must be labelled "errors". It was "(%d unread)", which turned
 # "adc: no plausible cell (180 mV)" on a USB-only FNK0104S into "(1 unread)".
 # The glass footer must also name the divider when the ADC read fails, not
-# fall through to the reTerminal's "read live over I2C1".
+# fall through to the reTerminal's "read live over I2C1", and must say "no
+# plausible cell" only for ESP_ERR_INVALID_RESPONSE (other ADC faults: "no
+# reading").
 set -euo pipefail
 cd "$(dirname "$0")"
 python3 - ../../firmware/main/tiny_sensors.cpp <<'PY'
@@ -38,5 +40,17 @@ if not first or "have_bat" in first.group(1) or '"adc"' not in first.group(1):
 if "no plausible cell" not in body:
     sys.exit("FAIL footer has no ADC-failure wording ('no plausible cell')")
 print("PASS footer names the GPIO 9 divider on ADC failure")
+
+# "no plausible cell" is a claim about the hardware: only
+# ESP_ERR_INVALID_RESPONSE (measured, not a resting cell) earns it. An ADC
+# init/read/calibration fault must say "no reading", so the footer has to
+# test the exact error, not have_bat alone.
+render = code[code.index("tiny_sensors_render_card"):]
+if not re.search(r"esp_err_t\s+be\s*=\s*sticky_battery_read_detail\(\s*bat\s*\)", render):
+    sys.exit("FAIL render_card drops sticky_battery_read_detail's error code")
+cell = re.search(r'be\s*==\s*ESP_ERR_INVALID_RESPONSE\s*\?\s*"no plausible cell"\s*:\s*"no reading"', body)
+if not cell:
+    sys.exit("FAIL footer must say 'no plausible cell' only for ESP_ERR_INVALID_RESPONSE, else 'no reading'")
+print("PASS footer reserves 'no plausible cell' for ESP_ERR_INVALID_RESPONSE")
 print("sensors summary host test passed")
 PY
