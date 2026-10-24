@@ -1,9 +1,9 @@
 ---
-readtime: 6
+readtime: 13
 description: "Design for spoken agent replies on the codec boards: speech streamed on the ask connection, 16 kHz PCM, no length cap, played as it arrives."
 ---
 
-# Spoken replies — design (grammar v19, proposed)
+# Spoken replies — design (grammar v20, proposed)
 
 Status: **proposal, no code**. Third person. It covers the agent's reply audio
 (TTS) on the boards that have a real speaker: today the FNK0104S, and the
@@ -82,10 +82,17 @@ data: [DONE]
 The parser changes from today's data-line shortcut to an SSE block state
 machine:
 
-- It accepts LF or CRLF, accumulates `event:` and `data:` fields until the
-  blank-line dispatch boundary, then resets the event type to the default
-  `message`. Field order inside a block is irrelevant. Comment lines and
-  unknown `id:` / `retry:` fields are ignored.
+- It accepts LF, CRLF or a lone CR as a line end, and it is fed raw read
+  chunks whose boundaries may fall anywhere: inside a field name, inside the
+  base64, or between the CR and LF of one CRLF. A CR that ends a chunk sets a
+  pending flag, and an LF that opens the next chunk is swallowed rather than
+  read as a blank line (which would dispatch a block early). It accumulates
+  `event:` and `data:` fields until the blank-line dispatch boundary, then
+  resets event type, data length, field count and poison flag to the default
+  `message` state, whether the block was accepted, rejected or ignored. Field
+  order inside a block is irrelevant. Comment lines and unknown `id:` /
+  `retry:` fields are ignored. The parser is a host-testable C module
+  (`tiny_sse`) with no ESP-IDF dependency, the `tiny_pcm` pattern.
 - This protocol emits exactly one `data:` field per block. A second `data:`
   field, an overlong physical line, or EOF before the blank boundary drops the
   **whole block** and increments `bad_lines`; no retained prefix is parsed.
@@ -121,11 +128,25 @@ audio sends neither `audio_fmt` nor `text_done`; `[DONE]` keeps its old
 meaning.
 
 **`text_done`** is new. Text runs ahead of speech, so the final card would
-otherwise wait behind the audio tail. On this event the device ends the glass
-stream (`tiny_display_stream_end`) and keeps reading audio until `[DONE]`.
-It is accepted once; duplicates are counted and ignored. The final card stays
-in its data object so old firmware retains its current render-at-`[DONE]`
-behaviour.
+otherwise wait behind the audio tail. The first accepted `text_done` is the
+glass's end of stream, and it runs exactly once:
+
+- It calls `tiny_display_stream_end` with its own `card`, if any, or with a
+  `card` held from an earlier block of this ask. The ask then frees that
+  pointer and keeps no final-card ownership after this point.
+- The ask moves to an audio-only phase. Later `t`, `card` and `error`
+  objects are counted and ignored, and so is a duplicate `text_done`. Nothing
+  more is appended to the glass or the relay summary.
+- The later `[DONE]` only ends the audio producer. It does not call
+  `tiny_display_stream_end` again and does not render a card. A `render_ui`,
+  relay card or page change that lands during the audio tail therefore stays
+  on the glass; the old answer never overwrites it.
+- A cut, refusal or cancellation after `text_done` changes only the speech
+  verdict. The glass already shows the finished answer, so no ` [stream cut]`
+  is appended to it. A cut **before** `text_done` keeps today's cut handling.
+
+The final card stays in its data object, so old firmware keeps rendering it
+at `[DONE]` as it does today.
 
 Rejected alternatives:
 
@@ -148,8 +169,10 @@ drains the ring to I2S, expanding mono to the stereo slots in 240-frame chunks
 and applying the volume tier as a gain.
 
 - **Ring**: `CONFIG_TINY_SPEAK_RING_KB`, default 1024, which holds about 32 s
-  of speech. Kconfig constrains it to a power-of-two multiple accepted by the
-  indexer. It is allocated from PSRAM when the codec player starts. Allocation
+  of speech. It is a Kconfig `choice` of 256, 512, 1024 or 2048 KB, so only a
+  power of two can be configured. A `static_assert` that the byte size is a
+  nonzero power of two, at least 64 KB, backs the index mask in code. It is
+  allocated from PSRAM when the codec player starts. Allocation
   failure leaves static `caps.speech` as hardware truth but makes player
   readiness false, suppresses `speak:"1"`, and reports `speech refused: no
   PSRAM`; no null ring reaches the parser.
@@ -179,8 +202,9 @@ and applying the volume tier as a gain.
   chime behind speech after the drop decision. Played/received sample and
   error counters are saturating `uint64_t`; an intentionally unbounded stream
   cannot wrap a verdict or duration counter.
-- **Mutex.** The ask worker, and `s_ask_mux` with it, lasts until `[DONE]` and
-  the player's idle acknowledgement, so speech belongs to the ask that
+- **Mutex.** The ask worker, and `s_ask_mux` with it, lasts until the producer
+  has published its terminal state (`done`, `cut`, `refused` or `cancelled`)
+  and the player has sent its idle acknowledgement, so speech belongs to the ask that
   produced it. No producer holds a ring lock while blocking on I/O or waiting
   for free space.
 
@@ -260,8 +284,10 @@ Rules:
 | any new card or `render_ui` | speech continues; audio and glass are independent |
 | pocket lock | speech continues. Lock guards inputs, not output (same as `say`) |
 | deep sleep, auto-sleep, OTA reboot or node shutdown | signal cancellation, wait for the bounded player-idle/amp-off barrier, then cross the power boundary; on timeout refuse a requested sleep/OTA, while shutdown's last resort forces the amp GPIO off before teardown |
-| connection cut mid-speech | play what is buffered, verdict `cut after N s` |
-| a bad base64 line | skipped and counted; the stream carries on (same as a torn text frame) |
+| connection cut or 30 s stall mid-speech | terminal state `cut`; the buffered residual drains even below the prebuffer; verdict `cut after N s` |
+| a malformed audio block | dropped whole, the ring unchanged, counted in `bad_lines`; the stream carries on |
+| a malformed text line | skipped as a torn frame, as today |
+| text, card or error after `text_done` | counted and ignored; the glass is not touched again |
 
 ## Capability: `caps.speech`, separate from `caps.speaker`
 
@@ -270,7 +296,10 @@ is a buzzer (the beacon's historical bit). A new `speech` field means "PCM
 playback through a codec and an amp". FNK0104S: true. AMOLED-1.8: false until
 its ES8311 is proven on hardware. reTerminal: false.
 
-## Grammar v19 (proposed)
+## Grammar v20 (proposed)
+
+The main branch is already at grammar 19, which is strict direct-artifact OTA
+arguments. Spoken replies are the next grammar change, v20.
 
 **Ask opt-in.** Each queued request carries an explicit origin:
 `physical_voice`, `relay_voice`, `typed`, or `offline_typed`; mode decisions do
@@ -309,10 +338,10 @@ answers `no speaker on this board (buzzer only)` instead of help text.
 **Settings.** One row on the settings page, persisted in NVS
 (`tinycfg/speakmode`): `off | voice asks | all asks`, default `voice asks`.
 
-CHANGELOG and `TINY_GRAMMAR_VERSION` move to 19 only in the firmware release
+CHANGELOG and `TINY_GRAMMAR_VERSION` move to 20 only in the firmware release
 that contains **both S1 and S2**. The slices are implementation order, not
 separately shippable grammar states: S1 may be bench-tested from a development
-build, but no released v19 may advertise `speak`, `caps.speech`, status fields
+build, but no released v20 may advertise `speak`, `caps.speech`, status fields
 or the request/events without the complete S2 parser, cancellation and
 settings contract.
 
@@ -342,13 +371,45 @@ Without the flag, nothing changes.
 ## Slices
 
 1. **S1, firmware, no backend dependency; not released alone.** `tiny_pcm`
-   gets a streaming base64 decoder, the mono→stereo gain expander and the ring
-   index math, all with host tests. `audio_es8311` gets the ring player with
-   prebuffer and underrun handling. Also: `speak stop|status|test`,
-   `caps.speech`, status fields and barge-in at the capture entry point;
-   grammar v19. Proof on the FNK0104S bench: `speak test 60` reaches
-   `done 60.0 s, 0 underruns`, `miccheck` reads quiet afterwards (the amp is
-   really off), and the AI button pressed mid-test stops it.
+   gets the canonical base64 validator/decoder, the mono→stereo gain expander
+   and the ring. A pure-C speech controller (generation, terminal state,
+   cancellation sink) and a player model get injected clocks, a fake I2S sink
+   and a fake amp pin so they run on the host. `audio_es8311` gets the ring
+   player with prebuffer, underrun, residual drain, flush and the amp-off
+   acknowledgement. Also: `speak stop|status|test`, `caps.speech`, status
+   fields and barge-in at the capture entry point, behind a development-build
+   flag (grammar stays 19 until S2; see above). S1 host tests, each pinning
+   one contract:
+    - Ring: whole commits straddling the buffer end at every offset of a small
+      ring read back byte for byte; a commit without room for the whole chunk
+      is refused and leaves the write index unchanged; index wrap keeps fill
+      correct; flush empties it.
+    - Player model, ticked: prebuffer holds output to 300 ms; an open-stream
+      gap gives one underrun, 2 s of amp-on silence, amp off, fresh prebuffer;
+      `done`/`cut` with 50 ms buffered, and `done` arriving while the player
+      waits after an underrun below the threshold, both drain to empty,
+      zero-pad the last chunk, write the tail, turn the amp off and
+      acknowledge; `refused`/`cancelled` flush within one DMA ring. No run
+      ends with bytes in the ring or the amp on.
+    - Amp ownership: a chime enqueued at every point of a session's life
+      (before arm, mid-speech, racing the stop, after idle ack) is either
+      played after idle ack or dropped and counted, never interleaved with
+      speech; a capture request is admitted only after the idle ack.
+    - Controller: a stale-generation stop, a double stop, and a stop racing
+      natural EOF each complete the generation exactly once.
+
+   Proof on the FNK0104S bench (`speak test` replies `test started`; the
+   verdict is read with `speak status`):
+    - `speak test 60` reaches `done 60.0 s, 0 underruns`, and `miccheck`
+      reads the room floor afterwards (the amp is really off).
+    - A 1 s test, which is longer than the prebuffer but proves nothing about
+      the tail, and a test whose producer is paused halfway to force an
+      underrun followed by a sub-prebuffer tail, both end `done` with the amp
+      off.
+    - The AI button pressed mid-test stops it, and capture starts only after
+      the log's amp-off acknowledgement.
+    - Relay `speak stop` sent twice gives the verdict, then `not speaking`.
+    - A chiming `render_ui` mid-test is dropped and counted.
 2. **S2, firmware, against the backend contract.** The dedicated ask worker,
    deferred relay replies and offline-drain completion, ask opt-in, SSE block
    parser, audio and `text_done` handling, back-pressure, cancellation barrier,
@@ -361,7 +422,14 @@ Without the flag, nothing changes.
    `audio_error`; ignored audio after terminal error; invalid producer;
    stale-generation stop; player-allocation failure; full-ring back-pressure;
    open-stream underrun; EOF with less than one prebuffer; natural EOF racing
-   stop; repeated stop; pre-audio busy refusal;
+   stop; repeated stop; pre-audio busy refusal; a stalled producer (fake
+   transport returns `idle` for 30 s with ring room → `cut`, residual drains,
+   epilogue runs) versus a full ring held 60 s with no read (not a stall);
+   a cancel arriving while the producer waits for ring space (wakes at once);
+   `text_done` ending the glass exactly once, later `t`/`card`/duplicate
+   `text_done` ignored, `[DONE]` and a post-`text_done` cut leaving the glass
+   untouched, and a fake `render_ui` card painted during the audio tail still
+   current at `[DONE]` (no replay of the old final card);
    button and relay replacement asks; no double reply; and no capture before
    amp-off. Auto-sleep tests pin that ask-worker or speech activity blocks the
    due path; explicit sleep/OTA tests pin cancellation-before-power transition
