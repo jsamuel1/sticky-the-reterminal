@@ -3,7 +3,7 @@ readtime: 18
 description: "Design for spoken agent replies on the codec boards: speech streamed on the ask connection, 16 kHz PCM, no length cap, played as it arrives."
 ---
 
-# Spoken replies — design (grammar v22, proposed)
+# Spoken replies — design (grammar v23, proposed)
 
 Status: **proposal, no code**. Third person. It covers the agent's reply audio
 (TTS) on the boards that have a real speaker: today the FNK0104S, and the
@@ -256,10 +256,9 @@ an impl, names a public painting entry point.
   owns, using only the record; (3) retake `s_stream_mux`, and paint through
   the impl only if `s_glass_gen == my`. If a newer claim landed during the
   fetch — a new stream begin, another takeover of either kind, a redraw —
-  the fetched frame is **superseded**: it is not painted, the gallery page
-  index and its NVS save are not advanced, its buffer enters the PSRAM LRU
-  only if its set is still the current set (otherwise it is freed), and the
-  call returns `TINY_ERR_GLASS_SUPERSEDED` (a distinct code, mapped onto
+  the fetched frame is **superseded**: it is not painted, it changes nothing
+  in the media store (below), its buffer is freed, and the call returns
+  `TINY_ERR_GLASS_SUPERSEDED` (a distinct code, mapped onto
   `ESP_ERR_NOT_FINISHED`). The image card's network fetch therefore never
   holds `s_stream_mux`, an old stream cannot repaint during it (its token
   died at the claim), and a late fetch cannot overwrite a newer owner. Two
@@ -271,24 +270,31 @@ an impl, names a public painting entry point.
   `s_stream_mux`.
 - **Media store across a fetch.** Paint generation fences only the glass.
   The gallery and photo state that a fetch reads or writes is a separate
-  shared store, and a superseded claim must not change it. That store is:
+  shared store. The invariant is strict and has no set-scoped exception:
+  **a superseded claim leaves the store exactly as if it had never run**,
+  apart from releasing what it reserved itself (its own buffer, its own
+  target-page reservation). That holds whether the newer claim is a new set,
+  the same set, a stream begin or a redraw. Every store mutation a fetch
+  causes therefore happens in phase 3, after the paint, in the same
+  `s_stream_mux` critical section as the generation check that let it
+  paint. That store is:
   the gallery set (`s_gal_urls`, `s_gal_count`), the page indices
   (`s_gal_index`, the painted page, and `s_gal_target` with its owner
   `s_gal_target_gen`, the page the latest gallery claim asked for), a new
   set epoch `s_gal_set` (`uint32_t`, never
   0, bumped by every set commit), the two-slot PSRAM LRU, the SD files
   `/sdcard/gallery/NNN.raw` and `manifest.json`, the NVS manifest and page
-  index, the photos archive `/sdcard/photos/NNNNN.raw`, and
-  `s_photo_last_url`. The rules:
+  index, the photos archive `/sdcard/photos/NNNNN.raw`, its next sequence
+  number `s_photo_seq`, and `s_photo_last_url`. The rules:
     - **Two guards.** A new non-recursive `s_media_mux` guards every SD
-      gallery or photos file operation, `s_photo_last_url` and the NVS
-      gallery writes. `s_stream_mux` guards the set, both indices, the LRU
-      and the lazy NVS restore. `s_gal_set`, `s_gal_urls` and `s_gal_count`
-      change only with **both** held, so either one is enough to read them.
-      The order extends one way: `s_stream_mux` → `s_media_mux` → the SD
-      driver lock and NVS (leaves). `s_media_mux` is never held together
-      with `s_display_mux` or `s_region_mux`, and never across a network
-      fetch.
+      gallery or photos file operation, `s_photo_seq`, `s_photo_last_url`
+      and the NVS gallery writes. `s_stream_mux` guards the set, both
+      indices, the LRU and the lazy NVS restore. `s_gal_set`, `s_gal_urls`
+      and `s_gal_count` change only with **both** held, so either one is
+      enough to read them. The order extends one way: `s_stream_mux` →
+      `s_media_mux` → the SD driver lock and NVS (leaves). `s_media_mux` is
+      never held together with `s_display_mux` or `s_region_mux`, and never
+      across a network fetch.
     - **Set commit.** A gallery spec that is a new set (not a re-layout)
       commits in phase 1 with both locks held: write the URLs and count,
       bump `s_gal_set`, clear the LRU, reset the SD gallery directory and
@@ -298,8 +304,8 @@ an impl, names a public painting entry point.
       let a replayed old spec of the same length keep a newer set's frames.
       The lazy NVS restore runs in the same place. A commit is bounded file
       work (at most 2 × `kGalMax` unlinks plus two manifest writes) and no
-      network, so a stream op waits at most one paint, or one SD frame read
-      or write plus that reset when a commit lands behind one.
+      network. A set commit is made only by a claim that is current at that
+      moment, so it is not a superseded mutation.
     - **Immutable fetch record.** Phase 1 copies everything the fetch
       needs into a per-claim record: `{glass = my, set = s_gal_set,
       idx, count, url[256], replay}`. `idx` is computed from
@@ -316,35 +322,48 @@ an impl, names a public painting entry point.
       of `s_stream_mux`: an LRU hit is painted in phase 1, and the LRU frees
       a buffer (eviction, replacement, set commit) only under
       `s_stream_mux`. A buffer fetched in phase 2 belongs to its claim until
-      phase 3 either hands it to the LRU or frees it. A claim frees only
-      buffers it owns, so no claim can free a frame another claim is
-      painting.
-    - **SD under a set check.** A phase-2 SD read takes `s_media_mux`,
-      proceeds only if `record.set == s_gal_set`, reads the frame into a
-      claim-owned buffer and releases. A network-fetched gallery frame is
-      written to `NNN.raw` the same way: take `s_media_mux`, write only if
-      `record.set == s_gal_set`, release. A commit holds `s_media_mux`
-      while it resets the directory, so no read sees a half-reset directory
-      and no old-set frame lands under a new set's name. An SD read or write
-      never holds `s_stream_mux`.
-    - **Phase 3 side effects.** With `s_stream_mux` retaken: if
-      `record.set != s_gal_set`, the frame belongs to a dead set and is
-      freed; no LRU, SD, index or NVS change. If the set is current, the
-      frame enters the LRU keyed by `(set, idx)`. Only a claim that paints
-      advances `s_gal_index` and saves the NVS page index (it takes
-      `s_media_mux` after its paint has released `s_display_mux`, still
-      under `s_stream_mux`, which keeps the stream → media order). A
-      superseded claim resets `s_gal_target` to `s_gal_index` only if
-      `s_gal_target_gen == my`; a newer gallery claim has already taken the
-      target over.
-    - **Photos archive.** An image card is archived only if it painted:
-      after phase 3 releases `s_stream_mux`, the claim takes `s_media_mux`,
-      skips the archive if `record.replay` or the URL equals
-      `s_photo_last_url`, scans for the next sequence number, writes
-      `NNNNN.raw`, updates `s_photo_last_url` and releases. Two image cards
-      can no longer both pick the same sequence number, and a superseded
-      picture that never reached the glass is not archived. The claim keeps
-      its buffer until the archive step and frees it after.
+      phase 3 either hands it to the LRU (painted) or frees it (superseded).
+      A claim frees only buffers it owns, so no claim can free a frame
+      another claim is painting.
+    - **Phase 2 is read-only.** The one SD operation phase 2 may do is a
+      gallery frame read: take `s_media_mux`, proceed only if `record.set ==
+      s_gal_set`, read `NNN.raw` into a claim-owned buffer, release. A file
+      of the wrong size is reported as a miss and left in place (today's
+      read path unlinks it); the painting claim's own frame write replaces
+      it in phase 3, which already unlinks before its rename. A commit holds
+      `s_media_mux` while it resets the directory, so no read sees a
+      half-reset directory. A phase-2 read never holds `s_stream_mux`.
+    - **Phase 3, superseded.** With `s_stream_mux` retaken and `s_glass_gen
+      != my`: free the buffer; if `s_gal_target_gen == my` (no newer gallery
+      claim has taken the target over) reset `s_gal_target` to
+      `s_gal_index`. Nothing else: no LRU insert, eviction or age bump, no
+      `NNN.raw` write, no index or NVS change, no archive.
+    - **Phase 3, painting.** With `s_stream_mux` retaken and `s_glass_gen ==
+      my`: paint (taking and releasing `s_display_mux` as today), then, still
+      under `s_stream_mux` and with `s_display_mux` released, take
+      `s_media_mux` and do the claim's store effects in this order: a
+      network-fetched gallery frame is written to `NNN.raw` (tmp then
+      rename); the page index is saved to NVS if it moved; an image card is
+      archived (below). Release `s_media_mux`. Then the gallery frame
+      enters the LRU keyed by `(set, idx)` and `s_gal_index` advances. The
+      set is necessarily current here: a set commit is itself a claim, so
+      a painting claim's set cannot have been replaced. The cost is that a
+      stream op can wait one paint plus one frame write and one archive
+      write (bounded file work, no network, no directory scan) behind a
+      painting fetch claim.
+    - **Photos archive, in paint order.** The archive is part of the
+      painting claim's phase-3 section, so archive order is paint order by
+      construction: a newer claim cannot paint, and so cannot archive,
+      until the older one has archived and released `s_stream_mux`. Inside
+      `s_media_mux`: skip if `record.replay` or the URL equals
+      `s_photo_last_url`; otherwise write `/sdcard/photos/<s_photo_seq>.raw`
+      (tmp then rename), and only after the rename succeeds advance
+      `s_photo_seq` and set `s_photo_last_url` to the URL. `s_photo_seq` is
+      found by one directory scan, the first time the archive runs after
+      boot or after the card is remounted, not on every image (today's scan
+      per image is unbounded in the archive's size). A failed write leaves
+      both unchanged, so the next paint of the same URL tries again. A
+      superseded picture that never reached the glass is not archived.
     - `tiny_display_gallery_count` takes `s_stream_mux` (it may run the lazy
       restore, which also takes `s_media_mux`) instead of reading the count
       bare.
@@ -531,7 +550,7 @@ one owner:
   `tiny_led_speech(bool)`. **The player is the only writer.** It sets
   `speaking` when it turns the amp on for a speech generation, and clears it
   in the same step as its idle acknowledgement, after amp-off. Chimes and
-  `play` frames never set it. The S1 bench harness and, from grammar 22,
+  `play` frames never set it. The S1 bench harness and, from grammar 23,
   `speak test` do, because they go through the same player path.
 - The ask lowers its own field from `THINKING` to `IDLE` at the first
   accepted `text_done`: the text is finished, so it is no longer thinking.
@@ -808,20 +827,27 @@ playback through a codec and an amp". FNK0104S: true. AMOLED-1.8: false until
 its ES8311 is proven on hardware. reTerminal: false.
 
 `caps.speech` is a `board_caps` field reported in `status`. It is **not** a
-filter on the verb roster. `s_caps[]` in `tiny_node.cpp` is one static list,
-identical on every board. The heartbeat, `pair/start`, the BLE tool catalog
-and the provisioning tools (`provision_lib.py` and `provision.js` parse it from
-source) all consume it. A runtime filter would make the heartbeat disagree
-with the claim the provisioning tools make from that source. This design adds
-no TinyBeacon capability bit.
+filter on the verb roster. Since grammar 22 the roster has two parts in
+`tiny_node.cpp`: `s_caps[]`, the static list every board shares (the
+provisioning tools, `provision_lib.py` and `provision.js`, parse it from
+source), and `s_board_verbs[]`, verbs appended only where a board-table bit
+is set (today only `brightness`, on `caps.brightness`). The heartbeat,
+`pair/start` and the BLE tool catalog all read the combined list. `speak`
+goes in `s_caps[]`, not `s_board_verbs[]`: whether speech works is not a
+fixed board fact (AMOLED-1.8 stays false until its ES8311 is proven, and
+`speech_ready` is a runtime result), so a board-gated entry would either
+advertise a verb that refuses or hide one that a later build enables. This
+design adds no TinyBeacon capability bit.
 
-## Grammar v22 (proposed)
+## Grammar v23 (proposed)
 
-The main branch is already at grammar 21: v19 is strict direct-artifact OTA
+The main branch is already at grammar 22: v19 is strict direct-artifact OTA
 arguments; v20 adds `sensors` `battery.source` and FNK0104S `battery_pct`;
 v21 adds AMOLED-1.8 QMI8658 orientation/acceleration, `rotate auto`, and the
-related capability/status shapes. Spoken replies are the next grammar change,
-v22. If another grammar change lands first, this proposal takes the next free
+related capability/status shapes; v22 adds the colour-board `brightness`
+verb (board-gated through `s_board_verbs[]`), `caps.brightness` and the
+`status` `brightness` field. Spoken replies are the next grammar change,
+v23. If another grammar change lands first, this proposal takes the next free
 number; the number is assigned when the complete public firmware slice is cut,
 not by this document.
 
@@ -863,7 +889,8 @@ every board and answers `OTA refused: OTA is disabled on this board` where
 `caps.speech` / `speech_ready`, not from the roster. The static
 `provision.js` copies gain `speak` in the same commit; `selftest.py` and
 `provision_host_test.sh` already fail on a mismatch. The `commands.md` verb
-count moves from 23 to 24.
+count moves from 23 shared verbs (24 on the colour boards, with
+`brightness`) to 24 shared verbs (25 on the colour boards).
 
 **Status.** `caps.speech` (hardware bool), `speech_ready` (player/ring bool),
 `speaking` (bool), `speak_last` (the `speak status` verdict), and `speakmode`.
@@ -874,14 +901,14 @@ This is a closed enum and an owner decision (2026-10-24): `all asks` is
 public, so typed and offline-typed asks may opt into speech. An unknown
 stored value reads as the default.
 
-CHANGELOG and `TINY_GRAMMAR_VERSION` move to 22 in the same atomic public
+CHANGELOG and `TINY_GRAMMAR_VERSION` move to 23 in the same atomic public
 change that adds the request/events, `speak` verb, `caps.speech`, status reply
 fields and setting. The slices below are implementation order, not permission
 to expose a partial grammar. S1 keeps new helpers unreachable from existing
 verbs/status and uses host tests plus a compile-time bench harness; it may land
 alone only in that wire-inert state. Otherwise S1 and S2 are squashed into one
 buildable commit. No build—tagged or not—may dispatch or advertise any new
-speech surface while reporting grammar 21.
+speech surface while reporting grammar 22.
 
 ## Backend contract (tiny.technology, not in this repo)
 
@@ -949,10 +976,10 @@ speech-to-text.
    flush and the amp-off acknowledgement. The status-light resolver may gain
    an internal `speaking` input because that changes no wire shape. S1 does
    **not** add `speak` dispatch, `s_caps[]`, `caps.speech`, speech status fields,
-   `speakmode`, ask opt-in or SSE parsing while grammar remains 21. Its hardware
+   `speakmode`, ask opt-in or SSE parsing while grammar remains 22. Its hardware
    proof uses a compile-time bench harness that invokes the player directly;
    the harness is off in normal builds. If implementation needs the public
-   `speak test` vehicle instead, S1 and S2 land atomically with grammar 22.
+   `speak test` vehicle instead, S1 and S2 land atomically with grammar 23.
    S1 host tests, each pinning one contract:
     - Ring: whole commits straddling the buffer end at every offset of a small
       ring read back byte for byte; a commit without room for the whole chunk
@@ -1028,13 +1055,15 @@ speech-to-text.
       gesture record but leaves the pending request's old `G`, or reads a global
       released flag, must fail (a) and (d).
     - Public roster/grammar (S2 or the atomic S1+S2 commit): `speak` is in
-      `s_caps[]` on all three board builds; on a `caps.speech=false` board every
-      `speak` subcommand returns the typed refusal, never help text; the existing
-      provision roster tests pass with the new entry; every build exposing the
-      entry reports grammar 22.
+      `s_caps[]` (not `s_board_verbs[]`) on all three board builds, so the
+      combined roster is 24 verbs on the reTerminal and 25 on FNK0104S and
+      AMOLED-1.8; on a `caps.speech=false` board every `speak` subcommand
+      returns the typed refusal, never help text; the existing provision
+      roster tests pass with the new entry; every build exposing the entry
+      reports grammar 23.
 
    Proof on the FNK0104S bench uses the direct compile-time S1 harness, or the
-   `speak test` verb only after the atomic grammar-22 public slice. The latter
+   `speak test` verb only after the atomic grammar-23 public slice. The latter
    replies `test started`; its verdict is read with `speak status`:
     - `speak test 60` reaches `done 60.0 s, 0 underruns`, and `miccheck`
       reads the room floor afterwards (the amp is really off).
@@ -1124,17 +1153,17 @@ speech-to-text.
    and gallery B (set `b0..b3`, same length, different bytes) throughout:
    (ix) network path: an A flip pauses in its network fetch of `a2`, B
    commits and paints `b0`, then the fetch completes: A returns
-   `superseded`, `/sdcard/gallery/002.raw` is absent (or still B's bytes),
-   the manifest and the NVS manifest name B's URLs, the NVS page index is
+   `superseded`, `/sdcard/gallery/002.raw` is absent, the manifest and the NVS manifest name B's URLs, the NVS page index is
    B's, the LRU holds only B-set entries, and a later B flip to page 2
    fetches B's URL, not A's; (x) SD path: the same with A paused inside its
    SD read of `002.raw`: B's commit waits for that read to finish, then
    resets the directory; A's buffer is freed by A, and nothing of A is in
    the LRU; and the reverse order, B's commit holding the media lock while
    A's read arrives, makes A's read miss (set changed) without touching a
-   file; (xi) LRU path: A's page is an LRU hit and B commits during A's
-   paint: A paints, B's commit runs after it and frees the LRU entries, and
-   the tracking allocator sees no read of a freed buffer; (xii) a fetch
+   file; (xi) LRU path: A's page is an LRU hit, so A paints in phase 1 and
+   B's commit, arriving during that paint, waits on `s_stream_mux`, then
+   frees the LRU entries; the tracking allocator sees no read of a freed
+   buffer; (xii) a fetch
    paused across two commits (A → B → A again, same URLs as the first A)
    is still superseded, since the set epoch, not the URL list, names the
    set; (xiii) two quick flips on one set, the first paused in its fetch,
@@ -1148,11 +1177,38 @@ speech-to-text.
    archives and frees only its own URL copy and buffer; (xvi) a
    lock-order checker over all of
    the above fails on any `media` → `stream`, `media` + `display` or
-   `media` held across a fake network call. Mutations that read
-   `s_gal_urls` after phase 1, drop the set check before an SD write or LRU
-   insert, let a superseded claim save the page index, or free an LRU
-   entry outside `s_stream_mux` must fail (ix), (x)/(ix), (xiii) and (xi)
-   respectively.
+   `media` held across a fake network call; (xvii) **same-set
+   supersession**, one set A with the LRU preloaded as `{a0 (older),
+   a1 (newer)}` and `000.raw`/`001.raw` on the fake SD: a flip to page 2
+   pauses in its network fetch of `a2` (and, as a second arm, a flip to
+   page 3 pauses in its SD read of `003.raw` placed there first), then a
+   newer claim lands on the same set, once for each kind: a new
+   `stream_begin`; a rerender of the cached gallery spec (same set, LRU
+   hit, so no fetch); another gallery claim to page 1 (LRU hit) and, as a
+   further arm, to page 3 by network. When the paused fetch completes it
+   returns `superseded` and the test asserts the exact store against a
+   snapshot taken before it started, minus only what the newer claim did:
+   the fake SD's files and bytes (`002.raw` never written; `003.raw`
+   neither written nor unlinked), the LRU's entries, keys and age order
+   (no insert, no eviction of `a0`, no age bump), `s_gal_index`, the NVS
+   page index and its write count, and that the target page is the newer
+   gallery claim's, or back at `s_gal_index` when the newer claim was a
+   stream or rerender; the tracking allocator shows the superseded buffer
+   freed exactly once by its own claim; (xviii) **archive order**: image
+   A paints and pauses inside its archive write (fake SD write paused,
+   `s_stream_mux` held); image B's fetch completes and blocks retaking
+   `s_stream_mux`; A resumes and finishes; B paints and archives; then B
+   is sent again. The archive holds exactly `00001.raw` = A's bytes and
+   `00002.raw` = B's bytes, `s_photo_last_url` is B's URL, the B resend
+   writes nothing, and a later resend of A archives `00003.raw`; a fake
+   SD write failure for A leaves `s_photo_seq` and `s_photo_last_url`
+   unchanged. Mutations that read
+   `s_gal_urls` after phase 1, drop the set check before an SD read, let a
+   superseded claim save the page index, free an LRU entry outside
+   `s_stream_mux`, let a superseded claim write `NNN.raw` or insert into
+   the LRU when its set is still current, or run the archive after
+   `s_stream_mux` is released must fail (ix), (x), (xiii), (xi), (xvii)
+   and (xviii) respectively.
    Ask-side tokens, with fake display seams: (a) a voice ask runs
    listening begin → `(( thinking ))` note → SSE continuation begin →
    deltas → `text_done`, and every call carries one token that the
