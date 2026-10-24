@@ -50,10 +50,13 @@ if [ "$DO_BUILD" = 1 ] || ! build_matches; then
   build_matches || { echo "package: build does not contain $VER" >&2; exit 1; }
 fi
 
-# Rule 4: never publish a -dirty artifact. The sha is embedded by gen_commit.cmake.
-# (No `grep -q` here: under pipefail, grep exiting early makes `strings` die of
-# EPIPE and the pipeline reports failure — the check would silently pass.)
-DIRTY_SHA=$(strings "$BUILD/tiny_sticky.bin" | grep -E '^[0-9a-f]{7,8}-dirty$' || true)
+# Rule 4: never publish a -dirty artifact. The sha is embedded by gen_commit.cmake;
+# read the stamp from that build's own generated header (= the CI gate) rather
+# than pattern-matching strings in the image: a tagged build is v0.28.0-dirty or
+# v0.28.0-3-g<sha>-dirty, which a bare-sha pattern never matched.
+COMMIT_H="$BUILD/esp-idf/main/gen/tiny_commit.h"
+[ -f "$COMMIT_H" ] || { echo "package: REFUSED — no $COMMIT_H (rebuild with --build)" >&2; exit 1; }
+DIRTY_SHA=$(sed -n 's/^#define TINY_FW_COMMIT "\(.*-dirty\)"$/\1/p' "$COMMIT_H")
 if [ -n "$DIRTY_SHA" ]; then
   echo "package: REFUSED — tiny_sticky.bin carries a -dirty fw_commit ($DIRTY_SHA)." >&2
   echo "         Commit firmware/ and rebuild (tools/playground_package.sh --build)." >&2

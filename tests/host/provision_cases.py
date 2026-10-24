@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -69,6 +70,20 @@ shutil.rmtree(alt)
 HEAD = "3ffffd7f" + "0" * 32
 check(refused(pl.check_provenance, "3ffffd7f", HEAD) is None, "clean stamp == HEAD passes")
 check(refused(pl.check_provenance, "v0.31.0-3-g3ffffd7f", HEAD) is None, "describe-with-tag stamp == HEAD passes")
+tagrepo = tempfile.mkdtemp()
+subprocess.run(["git", "-C", tagrepo, "init", "-q"], check=True)
+open(os.path.join(tagrepo, "x"), "w").write("x\n")
+subprocess.run(["git", "-C", tagrepo, "add", "x"], check=True)
+subprocess.run(["git", "-C", tagrepo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], check=True)
+subprocess.run(["git", "-C", tagrepo, "-c", "user.email=t@t", "-c", "user.name=t", "tag", "-a", "v0.31.0", "-m", "tag"], check=True)
+tagsha = subprocess.check_output(["git", "-C", tagrepo, "rev-parse", "HEAD"], text=True).strip()
+check(refused(pl.check_provenance, "v0.31.0", tagsha, False, tagrepo) is None,
+      "exact annotated-tag stamp resolves to source HEAD")
+check(refused(pl.check_provenance, "v0.31.0", HEAD, False, tagrepo) is not None,
+      "tag stamp pointing at another source HEAD refuses")
+check(refused(pl.check_provenance, "v0.31.0", tagsha) is not None,
+      "tag-only stamp without its source checkout refuses")
+shutil.rmtree(tagrepo)
 for bad, what in (("3ffffd7f-dirty", "-dirty"), ("nogit", "nogit"), (None, "missing stamp"),
                   ("0123abcd", "stale build (other sha)")):
     check(refused(pl.check_provenance, bad, HEAD) is not None, "%s refuses" % what)

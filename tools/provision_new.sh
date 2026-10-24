@@ -267,7 +267,7 @@ lib plan "$BUILD" "$BOARD" --out "$WORK/plan.json"
 COMMIT="$(lib json-get "$WORK/plan.json" commit || echo nogit)"
 # The stamp must name this exact tree: refuse -dirty, nogit, or a sha that is not
 # the source HEAD (a stale --no-build dir) unless --allow-dirty.
-lib provenance "$COMMIT" "$SHA" ${DIRTY_FLAG:+"$DIRTY_FLAG"} \
+lib provenance "$COMMIT" "$SHA" --source "$SRC" ${DIRTY_FLAG:+"$DIRTY_FLAG"} \
   || die "refusing to flash an image that cannot name its exact tree"
 
 # ---- 4. enrol (session or pairing code; token shown once) --------------------

@@ -55,5 +55,31 @@ git -C "$R" checkout -q -- . && git -C "$R" clean -qfd
 stamp >/dev/null
 DATE="$(sed -n 's/.*TINY_FW_COMMIT_DATE "\(.*\)"/\1/p' "$T/out.h")"
 if [ "$DATE" = "2026-10-24 11:05 UTC" ]; then echo "  ok   commit date → $DATE"; else echo "  FAIL commit date → '$DATE' (want 2026-10-24 11:05 UTC)"; FAILS=$((FAILS + 1)); fi
+# Exact annotated tag (the `provision_new.sh --branch <tag>` path): the shipped
+# stamp stays the public tag-only `git describe` form, and provision_lib's
+# provenance gate must prove it against the source checkout's refs/tags entry.
+prov() { python3 "$ROOT/tools/provision_lib.py" provenance "$@" >/dev/null 2>&1; }
+res() { if [ "$2" = 0 ]; then echo "  ok   $1"; else echo "  FAIL $1"; FAILS=$((FAILS + 1)); fi; }
+is() { [ "$1" = "$2" ]; echo $?; }
+passes() { prov "$@"; echo $?; }
+refuses() { prov "$@" && echo 1 || echo 0; }
+git -C "$R" -c user.email=t@t -c user.name=t tag -a v9.9.9 -m tag
+FULL="$(git -C "$R" rev-parse HEAD)"
+got="$(stamp)"
+res "exact tag → $got (tag-only, as shipped)" "$(is "$got" v9.9.9)"
+res "exact-tag stamp passes provenance for the tagged source" "$(passes "$got" "$FULL" --source "$R")"
+res "exact-tag stamp without --source refuses" "$(refuses "$got" "$FULL")"
+printf 'edit\n' >>"$R/firmware/main/tiny_node.cpp"
+got="$(stamp)"
+res "dirty exact tag → $got" "$(is "$got" v9.9.9-dirty)"
+res "dirty exact-tag stamp refuses" "$(refuses "$got" "$FULL" --source "$R")"
+git -C "$R" checkout -q -- .
+printf 'more\n' >>"$R/docs/x.md"
+git -C "$R" -c user.email=t@t -c user.name=t commit -qam after-tag
+FULL2="$(git -C "$R" rev-parse HEAD)"; SHA2="$(git -C "$R" rev-parse --short=8 HEAD)"
+got="$(stamp)"
+res "commit after tag → $got" "$(is "$got" "v9.9.9-1-g$SHA2")"
+res "post-tag stamp passes for its own HEAD" "$(passes "$got" "$FULL2" --source "$R")"
+res "tag stamp refuses once HEAD moved past the tag (stale build)" "$(refuses v9.9.9 "$FULL2" --source "$R")"
 [ "$FAILS" = 0 ] || { echo "gen_commit host test: $FAILS FAILED"; exit 1; }
 echo "gen_commit host test: ALL GREEN"

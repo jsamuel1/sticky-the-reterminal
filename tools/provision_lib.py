@@ -24,6 +24,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import time
 import urllib.error
@@ -128,26 +129,50 @@ def board_flash_size(fw_dir, board):
 
 
 def commit_of(fw_commit):
-    """The sha inside a `git describe --always --abbrev=8 [--dirty]` stamp:
-    'bb2f9323', 'bb2f9323-dirty', or 'v0.31.0-3-gbb2f9323[-dirty]' (= ota_push.py)."""
+    """Commit abbreviation in a git-describe stamp, or empty for a tag-only stamp.
+
+    Accepted: bare 7-40 hex sha, or ``<tag>-<distance>-g<7-40 hex sha>``.
+    Exact annotated tags are resolved separately against the source checkout.
+    """
     s = str(fw_commit or "")
     if s.endswith("-dirty"):
         s = s[: -len("-dirty")]
-    if "-g" in s:
-        s = s.rsplit("-g", 1)[1]
-    return s
+    if re.fullmatch(r"[0-9a-f]{7,40}", s):
+        return s
+    m = re.search(r"-\d+-g([0-9a-f]{7,40})$", s)
+    return m.group(1) if m else ""
 
 
-def check_provenance(fw_commit, sha, allow_dirty=False):
+def _exact_tag_commit(tag, source_dir):
+    """Resolve only an exact local tag ref; never interpret a revision expression."""
+    if not source_dir or not tag:
+        return None
+    ref = "refs/tags/" + str(tag)
+    try:
+        subprocess.run(["git", "-C", source_dir, "check-ref-format", ref],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        p = subprocess.run(["git", "-C", source_dir, "rev-parse", "--verify", ref + "^{commit}"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           universal_newlines=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    commit = p.stdout.strip().lower()
+    return commit if re.fullmatch(r"[0-9a-f]{40}", commit) else None
+
+
+def check_provenance(fw_commit, sha, allow_dirty=False, source_dir=None):
     """Refuse an image that cannot name its exact tree: no stamp, a -dirty stamp,
-    or a stamp that is not the source HEAD (a stale --no-build dir). allow_dirty
-    downgrades all three to a warning."""
+    or a stamp that is not the source HEAD (a stale --no-build dir). An exact
+    annotated tag is verified through that source checkout's refs/tags entry.
+    allow_dirty downgrades all three to a warning."""
     c = commit_of(fw_commit)
-    if not fw_commit or fw_commit == "nogit" or len(c) < 7:
+    sha_ok = bool(re.fullmatch(r"[0-9a-f]{40}", sha or ""))
+    tag_commit = _exact_tag_commit(fw_commit, source_dir) if sha_ok and not c else None
+    if not fw_commit or fw_commit == "nogit":
         why = "build carries no fw_commit stamp (%s)" % (fw_commit or "missing tiny_commit.h")
     elif str(fw_commit).endswith("-dirty"):
         why = "build is %s (uncommitted firmware/ or vendor/ source)" % fw_commit
-    elif not re.fullmatch(r"[0-9a-f]{40}", sha or "") or not sha.startswith(c):
+    elif not sha_ok or not (sha.startswith(c) if len(c) >= 7 else tag_commit == sha):
         why = "build says fw_commit %s but the source HEAD is %s (stale --no-build dir?)" % (fw_commit, sha)
     else:
         return
@@ -553,6 +578,7 @@ def main(argv=None):
     a = sub.add_parser("check-size"); a.add_argument("board", choices=BOARDS); a.add_argument("detected")
     a.add_argument("--fw", default=DEFAULT_FW)
     a = sub.add_parser("provenance"); a.add_argument("fw_commit"); a.add_argument("sha")
+    a.add_argument("--source", help="source checkout used to verify an exact tag stamp")
     a.add_argument("--allow-dirty", action="store_true")
     a = sub.add_parser("plan"); a.add_argument("build_dir"); a.add_argument("board", choices=BOARDS)
     a.add_argument("--out", required=True); a.add_argument("--allow-unbuilt", action="store_true")
@@ -573,7 +599,7 @@ def main(argv=None):
         elif o.cmd == "check-size":
             check_size(o.board, o.detected, o.fw)
         elif o.cmd == "provenance":
-            check_provenance(o.fw_commit, o.sha, o.allow_dirty)
+            check_provenance(o.fw_commit, o.sha, o.allow_dirty, o.source)
         elif o.cmd == "plan":
             plan = make_plan(o.build_dir, o.board, o.allow_unbuilt)
             with open(o.out, "w") as f:
