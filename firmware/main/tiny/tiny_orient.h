@@ -1,9 +1,10 @@
 // tiny_orient — the accelerometer decides which way up the UI is.
 //
 // This is the difference between a screen and a body: pick the device off the
-// wall, stand it on its side, and the card should turn with it. The panel takes
-// ~600 ms per full refresh and every refresh is visible, so the rule is "turn
-// once the human has clearly finished turning" — never chase a wobble.
+// wall, stand it on its side, and the card should turn with it. An e-ink panel
+// takes ~600 ms per full refresh and every refresh is visible (an AMOLED turn
+// is cheap, so it polls faster), so the rule is "turn once the human has
+// clearly finished turning" — never chase a wobble.
 //
 // Policy, deliberately small:
 //   * sample sticky_imu_read() every kPollMs;

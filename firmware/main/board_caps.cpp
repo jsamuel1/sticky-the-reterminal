@@ -65,7 +65,8 @@ constexpr tiny_board_caps_t kCaps = {
 #elif defined(CONFIG_TINY_BOARD_AMOLED18)
 // Phase 2b: CO5300 AMOLED (lcd_canvas) and ES8311 audio code are built;
 // P3b: CST820 touch (tiny_touch.cpp). QMI8658 accelerometer
-// (sticky_imu_qmi8658.cpp) drives auto-rotate and pocket lock. P7: the
+// (sticky_imu_qmi8658.cpp) drives auto-rotate and sensor reports; IMU auto-lock
+// stays disabled because this board has no local unlock chord. P7: the
 // AXP2101 fuel gauge + ADC (battery %, mV, charging, USB) and the PCF85063A
 // wall clock are driven. SD lands in a later phase.
 // mic/buzzer/speaker stay false until a board proves them.

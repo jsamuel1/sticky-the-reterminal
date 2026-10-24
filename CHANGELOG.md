@@ -102,12 +102,17 @@ release, newest first.
   EXIO6 and leaves INT2 unconnected, so v1 polls. `tiny_orient` now reads
   per-board axis tables from `tiny/tiny_orient_map.h` (the reTerminal table
   is unchanged). On the AMOLED it polls every 300 ms with the same
-  3-sample debounce, so the card turns about 1 s after the board does;
-  `tiny_lock` is still fed at 1 Hz. The AMOLED signs come from Waveshare's
-  demo and the board layout, not from a measurement on the owner's board.
+  3-sample debounce, so the card turns about 1 s after the board does; IMU
+  samples reach lock policy no faster than 1 Hz. The AMOLED signs come from
+  Waveshare's demo and the board layout, not from a measurement on the owner's
+  board.
   `caps.imu` is true and `absent` drops `imu`. Boards with no UP+DOWN unlock
-  chord no longer auto-lock from the IMU, so face-down on a desk cannot
-  strand the glass. `tests/host/orient_host_test.sh` checks each axis against
+  chord (the AMOLED) never auto-lock from the IMU, so face-down on a desk
+  cannot strand the glass. Unlock guidance is per board too: `lock`, the
+  locked `voice`/mic refusals and the locked sleep card say "hold UP+DOWN 1s
+  or send unlock" only on the reTerminal and "send unlock (no on-device
+  chord)" on the colour boards (`tiny_lock_unlock_hint()`); the onboarding
+  tour teaches BOOT and swipes there instead of UP/DOWN. `tests/host/orient_host_test.sh` checks each axis against
   the shipped Canvas, and the render goldens gain 18 `amoled18-90` frames
   (448×368).
 

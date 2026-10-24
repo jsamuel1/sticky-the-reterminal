@@ -67,7 +67,9 @@ use_device invoke → prompt: "status"
 - **`grammar_version`** — the integer consumers gate on; a version *string* can lie.
 
 Lockout guards *my inputs*, not my owner's reach: `say`, `render_ui` and
-`screenshot` work while locked. Chord: [stickyOS](stickyos.md).
+`screenshot` work while locked. The UP+DOWN unlock chord exists only on the
+reTerminal; the colour boards leave lockout through `unlock`. See
+[stickyOS](stickyos.md).
 
 ## Not in the firmware
 

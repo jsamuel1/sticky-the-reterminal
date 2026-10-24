@@ -107,9 +107,9 @@ extern "C" esp_err_t tiny_sensors_json(char *out, size_t cap) {
         cJSON_AddNullToObject(s, "orientation");
         cJSON_AddNullToObject(s, "accel_g");
     }
-    // The gyro used to be a permanent null with errors:[] — honest but
-    // unexplained, which the spec's own rule forbids. It is
-    // now really read: powered up for ~110 ms, sampled, powered down.
+    // Gyroscope capability is board-selected behind sticky_imu.h. reTerminal
+    // powers its gyro for one ~110 ms sample and then powers it down; an
+    // accelerometer-only board returns NOT_SUPPORTED, which errors[] records.
     StickyGyroReading gyro = {};
     bool have_gyro = false;
     if (s_imu_up) {

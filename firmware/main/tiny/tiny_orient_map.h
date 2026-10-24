@@ -31,8 +31,11 @@ struct TinyOrientMap {
 constexpr float kTinyOrientFlatG = 0.35F;
 
 // reTerminal (LSM6DS3TR-C). Measured, not derived: the driver rotates every
-// framebuffer 180 degrees at push, so the vendor's axis comments describe the
-// raw panel, not the picture. Owner-on-hardware calibration (tiny_orient.cpp).
+// framebuffer 180 degrees at push (rotate_framebuffer_180 in
+// sticky_display.cpp), so the vendor's axis comments describe the raw panel,
+// not the picture. The first table, read off those comments (-x -> 0,
+// +x -> 180, -y -> 90, +y -> 270), tracked the owner's hand but showed every
+// pose upside down; both pairs were swapped to this one.
 constexpr TinyOrientMap kTinyOrientMapReterminal = {
     {180, "landscape"},
     {0, "landscape-flipped"},

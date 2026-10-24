@@ -31,8 +31,10 @@ export function GlassBanner() {
 export function PocketRow() {
   // Pocket lockout, owner-facing: lock/unlock/glance are real advertised
   // verbs. lock/unlock/glance paint → they respect glass etiquette (409 shows
-  // as the message). Unlock-from-web is deliberate: the chord (UP+DOWN 1s)
-  // stays the on-device rail; this is the couch rail.
+  // as the message). Unlock-from-web is deliberate: on the reTerminal the
+  // UP+DOWN 1s chord is the on-device rail and this is the couch rail; the
+  // colour boards (FNK0104S, AMOLED-1.8) have no chord, so this is their
+  // only way out of lockout.
   const [msg, setMsg] = useState('')
   const send = async (verb: string) => {
     setMsg(`${verb}…`)
@@ -46,7 +48,7 @@ export function PocketRow() {
   return (
     <p>
       <button className="ghost" title="pocket lockout: buttons+mic+touch refuse until unlocked" onClick={() => send('lock')}>lock</button>{' '}
-      <button className="ghost" title="remote unlock (on-device chord: UP+DOWN 1s)" onClick={() => send('unlock')}>unlock</button>{' '}
+      <button className="ghost" title="remote unlock (reTerminal also has an on-device chord: UP+DOWN 1s; colour boards unlock only here)" onClick={() => send('unlock')}>unlock</button>{' '}
       <button className="ghost" title="glance card: time/battery/unread — partial refresh" onClick={() => send('glance')}>glance</button>{' '}
       <Receipt msg={msg} inline />
     </p>

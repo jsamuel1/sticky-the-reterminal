@@ -1,6 +1,7 @@
 // tiny_sensors — the `sensors` verb: every onboard sensor, read on demand.
 //
-// SHT40 (ambient temp/RH), LSM6DS3TR-C (acceleration + orientation), PCF8563
+// SHT40 (ambient temp/RH), the board accelerometer via sticky_imu.h
+// (LSM6DS3TR-C on the reTerminal, QMI8658 on the AMOLED-1.8), PCF8563
 // (RTC wall clock), and battery from either the BQ27220 gauge or the FNK0104S
 // GPIO 9 ADC divider. AMOLED-1.8: QMI8658, PCF85063A and the AXP2101 PMU.
 //

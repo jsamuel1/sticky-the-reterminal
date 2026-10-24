@@ -34,7 +34,7 @@ typedef struct {
                           // ADC voltage estimate: status battery.source)
     bool battery_voltage; // pack voltage measurable (gauge or ADC divider)
     bool rtc;             // battery-backed wall clock
-    bool imu;             // accelerometer (orientation + pocket lock)
+    bool imu;             // accelerometer (orientation; auto-lock is board-specific)
     bool env;             // temperature/humidity sensor
     bool sd;              // microSD driven
     bool power_latch;     // board powers itself off unless firmware holds a latch

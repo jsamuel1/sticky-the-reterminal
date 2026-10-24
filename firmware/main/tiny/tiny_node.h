@@ -12,8 +12,9 @@ esp_err_t tiny_node_start(void);   // spawns node task; needs wifi up + provisio
 // The verb roster the heartbeat advertises (also served over BLE by tiny_beacon).
 const char *const *tiny_node_caps(int *count);
 void      tiny_node_stop(void);
-// Reset the idle/cadence activity clock from outside the node (the unlock
-// chord restores the full auto-sleep budget starting at unlock).
+// Reset the idle/cadence activity clock from outside the node (leaving
+// lockout — UP+DOWN chord where fitted, or relay unlock — restores the full
+// auto-sleep budget starting at unlock).
 void      tiny_node_note_activity(void);
 // Local deep sleep now (a hardware key, not a verb): paints the sleep card
 // and does not return. ESP_ERR_INVALID_STATE (and no sleep) while any work

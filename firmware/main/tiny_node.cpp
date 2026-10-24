@@ -612,7 +612,7 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
             // errno — the entry-point gate returns NOT_ALLOWED only for lock.
             if (r == ESP_ERR_NOT_ALLOWED)
                 snprintf(out, out_cap, "mic refused: device is pocket-locked "
-                         "(S11) - unlock (UP+DOWN 1s) or send unlock");
+                         "(S11) - %s", tiny_lock_unlock_hint());
             else
                 snprintf(out, out_cap, "record failed: %s", esp_err_to_name(r));
             voice_fail_card("couldn't record", out, r);
@@ -2369,9 +2369,11 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                (prompt[4] == 0 || prompt[4] == ' ')) {
         // §11 manual entry (and the designer's acceptance-chain test verb).
         tiny_lock_set(true, "relay lock verb");
-        reply(envelope_id, "{\"locked\":true,\"summary\":\"pocket lockout "
-              "engaged: touch+buttons+mic dead, relay answers, unlock = "
-              "hold UP+DOWN 1s or unlock verb\"}");
+        char lr[192];
+        snprintf(lr, sizeof lr, "{\"locked\":true,\"summary\":\"pocket lockout "
+                 "engaged: touch+buttons+mic dead, relay answers, unlock = "
+                 "%s\"}", tiny_lock_unlock_hint());
+        reply(envelope_id, lr);
     } else if (strncmp(prompt, "unlock", 6) == 0 &&
                (prompt[6] == 0 || prompt[6] == ' ')) {
         tiny_lock_set(false, "relay unlock verb");
@@ -2381,9 +2383,11 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         // §11: a remote-triggered recording from a pocket is the same privacy
         // incident with extra steps. Text asks carry no microphone — allowed.
         if (strncmp(prompt, "voice", 5) == 0 && tiny_lock_is_locked()) {
-            reply(envelope_id, "voice refused: device is pocket-locked (S11) "
-                  "- the mic stays dead until the owner unlocks (UP+DOWN 1s) "
-                  "or sends unlock");
+            char vr[160];
+            snprintf(vr, sizeof vr, "voice refused: device is pocket-locked "
+                     "(S11) - the mic stays dead until unlock: %s",
+                     tiny_lock_unlock_hint());
+            reply(envelope_id, vr);
             return;
         }
         // ask <text>  — owner-scoped agent turn via /api/devices/ask.
@@ -2769,11 +2773,13 @@ void tiny_node_sleep_idle_set(int minutes) {
         s_sleep_idle_min = minutes;
 }
 static bool s_timer_wake = false;  // set in tiny_node_start from wake cause
-// A LOCKED session is not a session. With three buttons arming
-// EXT1, a pocket bumps the glass awake constantly — and while locked there is
-// nothing a human can do except the UP+DOWN unlock chord, so a 30 min budget
-// would burn radio for a device nobody is holding. Locked ⇒ 45 s: long enough
-// to boot, paint the glance and hold the chord twice, short enough that a
+// A LOCKED session is not a session. Wake buttons (three on the reTerminal,
+// BOOT on the colour boards) let a pocket bump the glass awake — and while
+// locked a human can do nothing locally except the UP+DOWN chord on boards
+// that have one (no-chord boards leave lockout only over the relay), so a
+// 30 min budget would burn radio for a device nobody is holding. Locked ⇒
+// 45 s: long enough to boot, paint the glance and hold the chord (or catch a
+// relay `unlock`) twice, short enough that a
 // pocket wake costs seconds, not half an hour. Read LIVE (not latched at
 // boot): unlocking mid-window restores the full budget, and tiny_lock_set
 // pushes the activity clock on the way out so the restored budget starts now.
@@ -3026,15 +3032,16 @@ static void node_task(void *) {
                          : s_timer_wake        ? "(timer check-in over)"
                                                : "30 min",
                          pct_s, AUTOSLEEP_WAKE_SECS / 60);
-                char bye[112];
+                char bye[128];
                 // The locked glass holds this card for HOURS — it must
-                // teach the exit (§11: the lockout card teaches the chord),
+                // teach the exit (§11: the lockout card teaches the board's
+                // own exit — the chord where fitted, the relay elsewhere),
                 // not promise "any button" to a pocket that can't use one.
                 if (tiny_lock_is_locked())
                     snprintf(bye, sizeof bye,
                              "locked - sleeping to save battery (%s). "
-                             "any button wakes me; hold up+down 1s to unlock.",
-                             pct_s);
+                             "any button wakes me; to unlock, %s.",
+                             pct_s, tiny_lock_unlock_hint());
                 else
                     snprintf(bye, sizeof bye,
                              "idle - sleeping to save battery (%s). any button wakes me.",
@@ -3092,7 +3099,8 @@ esp_err_t tiny_node_start(void) {
 
 void tiny_node_stop(void) { s_stop = true; }
 
-// The unlock chord is the one input the locked window must not
+// Leaving lockout (the UP+DOWN chord where fitted, or the relay `unlock`) is
+// the one transition the locked window must not
 // punish — tiny_lock_set(false) calls this so the full idle budget starts at
 // the unlock, not at whatever the pocket last did.
 void tiny_node_note_activity(void) { note_activity(); }

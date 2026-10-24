@@ -176,11 +176,22 @@ static esp_err_t render_welcome(void) {
              "I'm the e-ink body of your tiny. Three short steps and I'm yours: "
              "Wi-Fi, pairing, a 20-second tour.");
     cJSON_AddItemToArray(parts, part_text(NULL, body));
+    // Physical-input copy is per board: only the reTerminal has the three
+    // top keys; the colour boards have BOOT alone (click = home, hold = talk;
+    // see tiny_button.cpp). Never teach a key the board does not have.
+#if defined(CONFIG_TINY_BOARD_RETERMINAL)
     static const char *const items[] = {
         "top buttons: AI (left) - hold to talk to me",
         "UP / DOWN - flip pages, or tap Next below",
         "the glass is touch - tap what you read",
     };
+#else
+    static const char *const items[] = {
+        "BOOT button: hold to talk to me, click = home",
+        "swipe sideways to flip pages, or tap Next below",
+        "the glass is touch - tap what you read",
+    };
+#endif
     cJSON_AddItemToArray(parts, part_list(items, 3));
     cJSON *btns = cJSON_AddArrayToObject(c, "buttons");
     add_button(btns, "Next", "ob:next");
@@ -382,12 +393,23 @@ static esp_err_t render_ready(void) {
     cJSON_AddStringToObject(p, "type", "text");
     cJSON_AddStringToObject(p, "body", b);
     cJSON_AddItemToArray(parts, p);
+    // The lock line is the board's own exit: the UP+DOWN chord exists only
+    // where both keys do; no-chord boards leave lockout over the relay.
+#if defined(CONFIG_TINY_BOARD_RETERMINAL)
     static const char *const items[] = {
         "hold the AI button 1 s, talk - I answer here",
         "UP / DOWN: home, status, sensors, settings",
         "swipe up from the bottom edge = home",
         "pocket-locked? hold UP + DOWN for 1 s",
     };
+#else
+    static const char *const items[] = {
+        "hold BOOT, talk, let go - I answer here",
+        "swipe sideways: home, status, sensors, settings",
+        "swipe up from the bottom edge = home",
+        "locked? send unlock (no on-device chord)",
+    };
+#endif
     cJSON_AddItemToArray(parts, part_list(items, 4));
     cJSON *btns = cJSON_AddArrayToObject(c, "buttons");
     add_button(btns, "Start", "ob:start");

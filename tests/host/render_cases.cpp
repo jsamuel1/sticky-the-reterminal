@@ -30,12 +30,21 @@ static Canvas *g_canvas = nullptr;
 static std::vector<uint8_t> g_buf;
 static std::vector<uint8_t> g_acc;   // accent plane (colour boards only)
 
+static bool g_fail_next_full = false;
+static int g_full_refreshes = 0;
 Canvas *sticky_display_canvas() { return g_canvas; }
 esp_err_t sticky_display_init() { return 0; }
 esp_err_t sticky_display_refresh() { return 0; }
 esp_err_t sticky_display_refresh_partial() { return 0; }
 esp_err_t sticky_display_refresh_partial_baseline(const uint8_t *) { return 0; }
-esp_err_t sticky_display_refresh_monochrome() { return 0; }
+esp_err_t sticky_display_refresh_monochrome() {
+    ++g_full_refreshes;
+    if (g_fail_next_full) {
+        g_fail_next_full = false;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
 esp_err_t sticky_display_clear() { return 0; }
 esp_err_t sticky_display_sleep() { return 0; }
 esp_err_t sticky_display_set_brightness(uint8_t) { return ESP_ERR_NOT_SUPPORTED; }
@@ -257,6 +266,29 @@ int main(int argc, char **argv) {
                     free(idx);
                 }
             }
+        }
+
+        if (!strcmp(sz.tag, "amoled18-90")) {
+            // A failed panel commit must not publish the requested angle as
+            // current. tiny_orient compares against this state before calling
+            // again; retaining the failed target would suppress every
+            // same-pose retry indefinitely.
+            const int before = tiny_display_rotation();
+            const int target = (before + 90) % 360;
+            const int refreshes = g_full_refreshes;
+            g_fail_next_full = true;
+            CHECK(tiny_display_set_rotation(target) == ESP_FAIL,
+                  "rotation: injected panel failure is returned");
+            CHECK(tiny_display_rotation() == before,
+                  "rotation: failed commit keeps prior glass angle");
+            CHECK(g_full_refreshes == refreshes + 1,
+                  "rotation: failed request reaches panel once");
+            CHECK(tiny_display_set_rotation(target) == ESP_OK,
+                  "rotation: same angle retries after failure");
+            CHECK(tiny_display_rotation() == target,
+                  "rotation: successful retry commits target angle");
+            CHECK(g_full_refreshes == refreshes + 2,
+                  "rotation: retry reaches panel again");
         }
     }
 

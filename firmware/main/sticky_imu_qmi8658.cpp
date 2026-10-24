@@ -1,7 +1,8 @@
 // sticky_imu (AMOLED-1.8 V2) — QMI8658 accelerometer, one-shot reads.
 //
 // Same API as the reTerminal's LSM6DS3TR-C driver (sticky_imu.h), so
-// tiny_orient, tiny_lock and the `sensors` verb need no board #if.
+// tiny_orient and the `sensors` verb need no board #if. (tiny_lock ignores the
+// feed here: no UP+DOWN unlock chord on this board.)
 //
 // Accelerometer only, at a low rate: +/-2 g, 31.25 Hz, gyro never enabled.
 // The orient task samples a few times a second; nothing here needs more, and

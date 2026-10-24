@@ -51,8 +51,9 @@ screen. No app required.
   `page` `rotate` `glance` `tap` `swipe` `scroll` `lock` `unlock` `sleep` `ota`
   `messages` `config` `sd`. All in [Commands](docs/commands.md).
 - **OTA.** sha256-pinned updates with a trial boot; no heartbeat, roll back.
-- **Pocket safety.** The IMU locks touch, buttons and the mic when the device
-  is face-down or you're walking.
+- **Pocket safety.** On the reTerminal the IMU locks touch, buttons and the
+  mic when the device is face-down or you're walking; hold UP+DOWN to unlock.
+  Every board takes `lock` / `unlock` over the relay.
 - **Sleep.** Deep sleep at 10–20 µA with the last card still on the glass.
 - **A local shell.** Home, status, sensors, settings, Wi-Fi and messages work
   without the network.
