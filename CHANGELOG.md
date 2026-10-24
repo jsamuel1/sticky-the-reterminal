@@ -6,6 +6,16 @@ release, newest first.
 
 ## Unreleased
 
+- **bench OTA fixes** — `ota <url> <sha256>` now sends every argument with a
+  scheme (`http://`, `ftp://`, …) to the URL guard, so it is refused instead
+  of being read as a channel name. This matches the v15 contract, so the
+  grammar is unchanged. `tools/ota_push.py` counts only a reply starting
+  `OTA staged` as success (`... - nothing staged` used to pass), and a
+  configured bench board that is offline now fails the job instead of
+  skipping. Each CI `build` job asserts its app's board stamp
+  (`--inspect`: ok, own board, `tiny_sticky`). `tests/host/ota_push_cases.py`
+  covers the reply classes and the offline exit.
+
 - **firmware, grammar v18** — card layouts fit the small colour panels.
   A panel whose short side is under 480 px (FNK0104S 320×480, AMOLED-1.8
   368×448) gets a compact profile: 16 px margin, wrapping by the true glyph

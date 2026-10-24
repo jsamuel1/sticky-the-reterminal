@@ -201,6 +201,23 @@ def commit_of(fw_commit):
     return s
 
 
+def ota_reply_kind(res):
+    """Classify the device's reply to `ota <url> <sha256>` (tiny_node.cpp).
+
+    'staged'      only the success line, which starts "OTA staged"
+    'board-guard' the board-id refusal
+    'refused'     everything else, including every "... - nothing staged"
+                  refusal and "already up to date": a substring match on
+                  "staged" would read those as success.
+    """
+    s = str(res or "").strip()
+    if s.startswith("OTA staged"):
+        return "staged"
+    if s.startswith("OTA refused: board guard"):
+        return "board-guard"
+    return "refused"
+
+
 def same_commit(fw_commit, sha):
     # describe --abbrev=8 grows past 8 when 8 is ambiguous: prefix-compare.
     c = commit_of(fw_commit)
@@ -255,8 +272,9 @@ def main():
     dev_id = str(dev["id"])
     step(f"device {dev.get('name')} ({dev_id[:8]}…) online={dev.get('online')}")
     if dev.get("online") is False:
-        print(f"::warning::ota_push: {dev.get('name')} is offline (unplugged or asleep) - skipped", flush=True)
-        return 0
+        # A board with a TINY_BENCH_DEVICES entry is expected to be updated;
+        # only a missing secret or entry may skip (the workflow's notice).
+        die(f"{dev.get('name')} is offline (unplugged or asleep) - bench not updated")
 
     step("status (before)")
     s0 = api.status(dev_id)
@@ -294,8 +312,9 @@ def main():
     if res is None:
         die("ota: no reply within 240 s")
     step(f"device: {res}")
-    if "staged" not in str(res):
-        if a.board_override and "board guard" in str(res):
+    kind = ota_reply_kind(res)
+    if kind != "staged":
+        if a.board_override and kind == "board-guard":
             step("board guard refused the foreign image, as it must")
             s1 = api.status(dev_id) or {}
             if str(s1.get("fw_commit")) != before:

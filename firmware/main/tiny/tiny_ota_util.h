@@ -156,5 +156,12 @@ inline bool sha256_hex_ok(const char *h) {
     return h[64] == 0;
 }
 
+// Dispatch for the `ota` verb: any argument carrying a scheme ("://") is the
+// direct-URL form, so `ota http://...` or `ota ftp://...` reaches the URL
+// guard and is refused there, instead of being read as a channel name.
+inline bool ota_arg_is_url(const char *a) {
+    return a && strstr(a, "://") != nullptr;
+}
+
 }  // namespace tiny_ota_util
 #endif

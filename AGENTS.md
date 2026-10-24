@@ -372,8 +372,13 @@ gh secret set TINY_BENCH_DEVICES -R jsamuel1/sticky-the-reterminal \
 ```
 
 - A missing secret or a board with no entry is a `::notice::` and a skip,
-  never a failure. A JWT with under 14 days left fails the job loudly; refresh
+  never a failure. A board that HAS an entry but is offline fails the job:
+  the bench was not updated. A JWT with under 14 days left fails the job loudly; refresh
   with the two commands above. The token is never printed.
+- Each `build` job runs `tools/ota_push.py --inspect` on its app and fails
+  unless the stamp is `ok`, its own board, project `tiny_sticky`.
+- Only a reply starting `OTA staged` counts as success; every refusal
+  (`... - nothing staged`, `already up to date`) fails the push.
 - Bootstrap: an image from before grammar v15 refuses OTA on the colour
   boards and has no board stamp, so the first v15 image goes on by USB
   (devbench). From then on CI keeps the bench current.

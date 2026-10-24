@@ -104,6 +104,16 @@ int main(int argc, char **argv) {
     CHECK(!media_url_ok(longkey.c_str()), "U11 overlong key refused");
     CHECK(!media_url_ok(nullptr), "U12 null refused");
 
+    // --- verb dispatch: any scheme is the URL form, so the guard sees it ---
+    CHECK(ota_arg_is_url("https://plugin.tiny.technology/media/a.bin"), "D1 https is url form");
+    CHECK(ota_arg_is_url("http://plugin.tiny.technology/media/a.bin"), "D2 http is url form");
+    CHECK(ota_arg_is_url("ftp://x/a.bin"), "D3 ftp is url form");
+    CHECK(!ota_arg_is_url("sticky-dev"), "D4 channel name is not url form");
+    CHECK(!ota_arg_is_url(""), "D5 empty is channel form (default)");
+    CHECK(!media_url_ok("http://plugin.tiny.technology/media/a.bin") &&
+              ota_arg_is_url("http://plugin.tiny.technology/media/a.bin"),
+          "D6 http url reaches the guard and is refused");
+
     // --- sha256 guard ---
     const std::string h64(64, 'a');
     CHECK(sha256_hex_ok(h64.c_str()), "H1 64 hex accepted");

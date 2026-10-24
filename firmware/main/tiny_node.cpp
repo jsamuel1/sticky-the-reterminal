@@ -52,6 +52,7 @@
 #include "tiny/tiny_audio.h"
 #include "tiny/tiny_upload.h"
 #include "tiny/tiny_ota.h"
+#include "tiny/tiny_ota_util.h"
 #include "esp_ota_ops.h"
 #include "esp_heap_caps.h"
 #include "sticky_battery.h"
@@ -2420,7 +2421,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         const char *arg = prompt[3] == ' ' ? prompt + 4 : "";
         char a1[200] = "", a2[80] = "", extra[2] = "";
         const int na = sscanf(arg, "%199s %79s %1s", a1, a2, extra);
-        const bool url_form = strncmp(a1, "https://", 8) == 0;
+        const bool url_form = tiny_ota_util::ota_arg_is_url(a1);
         esp_err_t r;
         if (url_form && na != 2) {
             reply(envelope_id, "OTA refused: usage ota <url> <sha256>");

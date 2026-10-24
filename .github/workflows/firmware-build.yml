@@ -47,6 +47,13 @@ jobs:
           h="$d/esp-idf/main/gen/tiny_commit.h"
           cat "$h"
           ! grep -Eq -- '-dirty|nogit' "$h"
+          # The uploaded app must carry this board's stamp (bench OTA's board
+          # guard reads it): verdict ok, board = matrix board, project tiny_sticky.
+          stamp=$(python3 tools/ota_push.py --inspect "$d/tiny_sticky.bin") || true
+          echo "board stamp: $stamp"
+          python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if (d["verdict"],d["board"],d["project"])==("ok",sys.argv[2],"tiny_sticky") else 1)' \
+            "$stamp" "${{ matrix.board }}" \
+            || { echo "::error::$d/tiny_sticky.bin is not stamped for ${{ matrix.board }}: $stamp"; exit 1; }
           echo "BUILD_DIR=$d" >> "$GITHUB_ENV"
       - name: devbench image set
         shell: bash

@@ -26,6 +26,9 @@ want "$fx/foreign.bin" ok amoled18
 want "$fx/unstamped.bin" unstamped
 want "$fx/truncated.bin" truncated
 
+# Pusher decisions: reply classification, offline configured board fails.
+python3 ota_push_cases.py
+
 for b in build:reterminal build-fnk0104s:fnk0104s build-amoled18:amoled18; do
   bin=../../firmware/${b%%:*}/tiny_sticky.bin
   [ -f "$bin" ] || continue
