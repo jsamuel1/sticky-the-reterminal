@@ -146,6 +146,7 @@ constexpr LcdPanelOps kOps = {
     .name = "ST7796S",
     .width = kWidth,
     .height = kHeight,
+    .row_align = 1,
     .init = init,
     .draw = draw,
     .wait_done = wait_done,
