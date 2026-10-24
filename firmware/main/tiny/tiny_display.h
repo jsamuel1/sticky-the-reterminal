@@ -23,10 +23,13 @@ esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size_t *out_len
 // ESP_ERR_INVALID_STATE when no set has been sent yet.
 esp_err_t tiny_display_gallery_nav(int dir);
 int tiny_display_gallery_count(void);
-// Screenshot support: copy of the LAST RENDERED framebuffer as 8-bit grayscale
-// rows (panel-native: 800x480 e-ink, 320x480 FNK0104S), for the screenshot
-// verb -> PNG -> /api/media.
-esp_err_t tiny_display_snapshot_gray8(uint8_t **out, size_t *out_len);
+// Screenshot support: copy of the LAST RENDERED framebuffer, one byte per
+// pixel, rows panel-native (800x480 e-ink, 320x480 FNK0104S). Each byte is a
+// lcd_palette index: (accent << 2) | gray level 0..3. The e-ink canvas has no
+// accent plane, so there every byte is just the gray level. For the
+// screenshot verb -> PNG -> /api/media. *has_accent says which it was.
+esp_err_t tiny_display_snapshot_index8(uint8_t **out, size_t *out_len,
+                                       bool *has_accent);
 // Button hit-regions of the LAST rendered card (for tiny_touch + ui_tap).
 // Returns count; fills up to max entries. Regions are published atomically
 // with the render commit (copy-out under a mutex), so a tap can never resolve

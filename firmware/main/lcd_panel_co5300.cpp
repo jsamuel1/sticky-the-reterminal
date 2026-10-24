@@ -152,7 +152,7 @@ esp_err_t init(size_t max_transfer_bytes)
     const int x_gap = probe_x_gap();
     ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(s_panel, x_gap, 0), kTag, "gap");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), kTag, "disp on");
-    // No INVON: RGB565 0x0000 is a pixel switched off, matching lcd_gray4's
+    // No INVON: RGB565 0x0000 is a pixel switched off, matching lcd_palette's
     // level 0 = black, so the gray ramp needs no inversion on this panel.
     ESP_LOGI(kTag, "QSPI SPI2 %d MHz, %ux%u RGB565, x-gap %d (%s), dark until first frame",
              CONFIG_TINY_LCD_SPI_MHZ, kWidth, kHeight, x_gap,

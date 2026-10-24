@@ -29,7 +29,7 @@ recovery/                factory-dump manifest + sha (the 32 MB dump itself is g
 
 Versions live in exactly one place: `firmware/main/tiny/tiny_version.h` —
 `TINY_FW_VERSION` (string, e.g. `0.27.0-u2`) and `TINY_GRAMMAR_VERSION`
-(int, currently 15). CMake reads the first; the heartbeat and `status` report
+(int, currently 16). CMake reads the first; the heartbeat and `status` report
 both. Bump the grammar on **any** change to a verb, its args, or a reply
 shape, and write a line in `CHANGELOG.md`.
 
@@ -69,6 +69,12 @@ tests/run.sh                                 # host tests: askq, bootmark, sleep
   USB-Serial-JTAG, and accept `ota` only for images stamped with their own
   board id (see §10b). Shared
   `tiny_*` code takes no board `#if` beyond touch/audio/buttons/console.
+
+- Colour: every board draws into the same 2-bit gray `Canvas`. Colour panels
+  (`lcd_canvas.cpp`) attach a 4-bit accent plane beside it; the renderer sets
+  a pen (`PenScope` in `tiny_display.cpp`) and `lcd_palette.h` maps
+  (accent, gray) to RGB565 per theme. The e-ink never gets a plane, so its
+  bytes cannot change. Card chrome takes `accent`; body text stays neutral.
 
 - `tools/port.sh` resolves the port and **refuses to guess** when several
   CH343 "USB Single Serial" adapters are present (SO-101 servo buses share the

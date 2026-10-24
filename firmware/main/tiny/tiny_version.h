@@ -114,4 +114,15 @@
 //        "OTA refused: board guard ...", "OTA refused: sha256 mismatch ...",
 //        "OTA refused: url must be ...".
 //      + fnk0104s and amoled18 accept OTA: status `absent` drops "ota".
-#define TINY_GRAMMAR_VERSION 15  // v15: ota <url> <sha256> + board stamp
+// v16 = colour UI on colour boards (FNK0104S light theme, AMOLED dark):
+//      + card/composite-part/button-object field accent:"red|orange|yellow|
+//        green|teal|blue|purple|pink|neutral|mono" (default blue) tints
+//        chrome only; the e-ink ignores it (its canvas bytes are unchanged).
+//        priority:"alert" titles render red on colour glass.
+//      + screenshot on a colour board: 8-bit indexed PNG (colour type 3) with
+//        the theme's 64-entry PLTE; the e-ink keeps the 2-bit gray PNG. The
+//        reply text is unchanged (still the hosted URL).
+//      + status gains color:bool and theme:"light"|"dark".
+//      + page palette: preview card of every accent.
+//      + raw image/gallery/stream frames are unchanged: gray, drawn literal.
+#define TINY_GRAMMAR_VERSION 16  // v16: card accent + colour screenshot

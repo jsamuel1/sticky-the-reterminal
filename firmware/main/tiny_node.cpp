@@ -840,6 +840,9 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
         };
         for (const auto &p : parts)
             if (!p.have) cJSON_AddItemToArray(ab, cJSON_CreateString(p.name));
+        // v16: whether the glass shows card accents, and its theme.
+        cJSON_AddBoolToObject(s, "color", bc->color);
+        cJSON_AddStringToObject(s, "theme", bc->dark_theme ? "dark" : "light");
     }
     // v11: who answers the asks. "" = the owner's own tiny (default). The
     // dashboard/reviewer verify agent switching without eyes on the glass.
@@ -2238,6 +2241,23 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         else if (!strncmp(a, "universe", 8) || !strncmp(a, "agents", 6))
             // v11: the relay twin of the settings row / home badge tap.
             r = tiny_shell_universe_route("u:open");
+        else if (!strncmp(a, "palette", 7))
+            // v16: every accent at every level, for a photo of the glass and
+            // a screenshot to hold against it. Gray on the e-ink by design.
+            r = tiny_display_render_card(
+                "{\"type\":\"composite\",\"title\":\"palette\",\"card_id\":\"palette\","
+                "\"parts\":["
+                "{\"type\":\"list\",\"title\":\"blue (default)\",\"items\":[\"bullet + rule\"]},"
+                "{\"type\":\"chat\",\"accent\":\"green\",\"title\":\"green\","
+                "\"messages\":[{\"role\":\"user\",\"body\":\"tinted bubble\"}]},"
+                "{\"type\":\"chart\",\"accent\":\"orange\",\"title\":\"orange\","
+                "\"style\":\"bar\",\"data\":[3,5,2,6,4,7]},"
+                "{\"type\":\"list\",\"accent\":\"purple\",\"title\":\"purple\",\"items\":[\"x\"]},"
+                "{\"type\":\"list\",\"accent\":\"teal\",\"title\":\"teal\",\"items\":[\"x\"]},"
+                "{\"type\":\"list\",\"accent\":\"neutral\",\"title\":\"neutral\",\"items\":[\"x\"]}],"
+                "\"buttons\":[{\"label\":\"red\",\"id\":\"home\",\"accent\":\"red\"},"
+                "{\"label\":\"yellow\",\"id\":\"home\",\"accent\":\"yellow\"},"
+                "{\"label\":\"pink\",\"id\":\"home\",\"accent\":\"pink\"}]}");
         else if (!strncmp(a, "back", 4))        r = tiny_shell_back();
         else if (!strncmp(a, "next", 4))        r = tiny_shell_cycle(+1);
         else if (!strncmp(a, "prev", 4))        r = tiny_shell_cycle(-1);
@@ -2254,7 +2274,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                 return;
             }
         }
-        else { reply(envelope_id, "page: home|status|sensors|settings|wifi|ble|gallery|universe|onboard|back|next|prev"); return; }
+        else { reply(envelope_id, "page: home|status|sensors|settings|wifi|ble|gallery|universe|onboard|palette|back|next|prev"); return; }
         char out[96];
         snprintf(out, sizeof out, "page %s -> %s (card_id=%s)", what,
                  esp_err_to_name(r), tiny_display_current_card_id());

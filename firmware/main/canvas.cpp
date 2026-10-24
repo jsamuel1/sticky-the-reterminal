@@ -22,6 +22,34 @@ void Canvas::clear(GrayLevel color)
     if (buffer_ != nullptr) {
         std::memset(buffer_, packed, buffer_size_);
     }
+    fill_accent(0);
+}
+
+void Canvas::set_accent_plane(uint8_t *buffer, size_t buffer_size)
+{
+    // A plane too small for the panel would make draw_pixel write past it.
+    if (buffer != nullptr && buffer_size < accent_stride() * height_) {
+        buffer = nullptr;
+    }
+    accent_ = buffer;
+    accent_size_ = buffer != nullptr ? buffer_size : 0;
+    fill_accent(0);
+}
+
+void Canvas::fill_accent(uint8_t accent)
+{
+    if (accent_ == nullptr) return;
+    const uint8_t a = accent & 0x0FU;
+    std::memset(accent_, static_cast<uint8_t>((a << 4) | a), accent_size_);
+}
+
+uint8_t Canvas::accent_at(int px, int py) const
+{
+    if (accent_ == nullptr || px < 0 || py < 0 || px >= width_ || py >= height_)
+        return 0;
+    const uint8_t b = accent_[static_cast<size_t>(py) * accent_stride() +
+                              static_cast<size_t>(px) / 2U];
+    return (px & 1) ? (b & 0x0FU) : (b >> 4);
 }
 
 void Canvas::to_physical(int lx, int ly, int &px, int &py) const
@@ -106,6 +134,13 @@ void Canvas::draw_pixel(int x, int y, GrayLevel color)
     const uint8_t mask = static_cast<uint8_t>(0x03U << shift);
     const uint8_t value = static_cast<uint8_t>(color) << shift;
     buffer_[index] = static_cast<uint8_t>((buffer_[index] & ~mask) | value);
+
+    if (accent_ != nullptr) {
+        uint8_t &a = accent_[static_cast<size_t>(y) * accent_stride() +
+                             static_cast<size_t>(x) / 2U];
+        a = (x & 1) ? static_cast<uint8_t>((a & 0xF0U) | pen_)
+                    : static_cast<uint8_t>((a & 0x0FU) | (pen_ << 4));
+    }
 }
 
 void Canvas::draw_line(int x0, int y0, int x1, int y1, GrayLevel color)

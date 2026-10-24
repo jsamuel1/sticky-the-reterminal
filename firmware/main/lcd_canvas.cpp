@@ -12,8 +12,9 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lcd_band.h"
-#include "lcd_gray4.h"
+#include "lcd_palette.h"
 #include "sticky_display.h"
+#include "tiny/board_caps.h"
 
 namespace {
 
@@ -26,11 +27,15 @@ constexpr uint32_t kDrawTimeoutMs = 1000;
 
 const LcdPanelOps *s_ops = nullptr;
 Canvas *s_canvas = nullptr;
-uint8_t *s_fb = nullptr;        // the canvas the UI draws into (PSRAM)
-uint8_t *s_pushed = nullptr;    // copy of the last frame on the glass (PSRAM)
+uint8_t *s_fb = nullptr;        // gray plane the UI draws into (PSRAM)
+uint8_t *s_pushed = nullptr;    // copy of the last gray plane on the glass
+uint8_t *s_acc = nullptr;       // accent plane (PSRAM), 4 bpp
+uint8_t *s_acc_pushed = nullptr;
 uint16_t *s_strip[2] = {nullptr, nullptr};
-lcd_gray4::Lut *s_lut = nullptr;
+lcd_palette::Palette565 *s_pal = nullptr;
+lcd_palette::Theme s_theme = lcd_palette::Theme::Light;
 size_t s_fb_len = 0;
+size_t s_acc_len = 0;
 bool s_awake = false;           // panel out of SLPIN and backlight lit
 bool s_slept = false;           // sticky_display_sleep() sent SLPIN
 uint8_t s_brightness = 80;
@@ -43,6 +48,7 @@ esp_err_t push_rows(int y0, int y1)
 {
     const int w = s_ops->width;
     const size_t stride = s_canvas->stride();
+    const size_t astride = s_canvas->accent_stride();
     bool inflight[2] = {false, false};
     esp_err_t err = ESP_OK;
     int k = 0;
@@ -54,8 +60,9 @@ esp_err_t push_rows(int y0, int y1)
             if (err != ESP_OK) break;
         }
         const int rows = (y1 - y < kStripRows) ? (y1 - y) : kStripRows;
-        lcd_gray4::expand_rows(s_fb + static_cast<size_t>(y) * stride, stride, w,
-                               rows, *s_lut, s_strip[b]);
+        lcd_palette::expand_rows(s_fb + static_cast<size_t>(y) * stride, stride,
+                                 s_acc + static_cast<size_t>(y) * astride, astride,
+                                 w, rows, *s_pal, s_strip[b]);
         err = s_ops->draw(y, y + rows, s_strip[b]);
         inflight[b] = (err == ESP_OK);
     }
@@ -92,6 +99,10 @@ esp_err_t commit(int y0, int y1, const char *kind)
     memcpy(s_pushed + static_cast<size_t>(y0) * stride,
            s_fb + static_cast<size_t>(y0) * stride,
            static_cast<size_t>(y1 - y0) * stride);
+    const size_t astride = s_canvas->accent_stride();
+    memcpy(s_acc_pushed + static_cast<size_t>(y0) * astride,
+           s_acc + static_cast<size_t>(y0) * astride,
+           static_cast<size_t>(y1 - y0) * astride);
     if (!s_awake) {
         err = s_ops->brightness(s_brightness);
         if (err != ESP_OK) return err;
@@ -110,9 +121,15 @@ esp_err_t full(const char *kind) { return commit(0, s_ops->height, kind); }
 esp_err_t partial(const char *kind)
 {
     if (s_canvas == nullptr) return ESP_ERR_INVALID_STATE;
-    int y0 = 0, y1 = 0;
-    if (!lcd_gray4::dirty_band(s_pushed, s_fb, s_canvas->stride(), s_ops->height,
-                               &y0, &y1)) {
+    int g0 = 0, g1 = 0, a0 = 0, a1 = 0, y0 = 0, y1 = 0;
+    // A pixel can change colour without changing gray (same text, new
+    // accent), so the band covers both planes.
+    const bool g = lcd_palette::dirty_band(s_pushed, s_fb, s_canvas->stride(),
+                                           s_ops->height, &g0, &g1);
+    const bool a = lcd_palette::dirty_band(s_acc_pushed, s_acc,
+                                           s_canvas->accent_stride(),
+                                           s_ops->height, &a0, &a1);
+    if (!lcd_palette::band_union(g, g0, g1, a, a0, a1, &y0, &y1)) {
         // Nothing changed; still make sure a sleeping panel comes back.
         return commit(0, 0, kind);
     }
@@ -126,12 +143,14 @@ void release()
     s_canvas = nullptr;
     heap_caps_free(s_fb);
     heap_caps_free(s_pushed);
+    heap_caps_free(s_acc);
+    heap_caps_free(s_acc_pushed);
     heap_caps_free(s_strip[0]);
     heap_caps_free(s_strip[1]);
-    heap_caps_free(s_lut);
-    s_fb = s_pushed = nullptr;
+    heap_caps_free(s_pal);
+    s_fb = s_pushed = s_acc = s_acc_pushed = nullptr;
     s_strip[0] = s_strip[1] = nullptr;
-    s_lut = nullptr;
+    s_pal = nullptr;
 }
 
 }  // namespace
@@ -150,16 +169,22 @@ esp_err_t sticky_display_init()
     const size_t strip_bytes = static_cast<size_t>(w) * kStripRows * 2;
 
     s_fb_len = static_cast<size_t>(w) / 4 * h;
-    s_fb = static_cast<uint8_t *>(
-        heap_caps_malloc(s_fb_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    s_pushed = static_cast<uint8_t *>(
-        heap_caps_malloc(s_fb_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    s_lut = static_cast<lcd_gray4::Lut *>(
-        heap_caps_malloc(sizeof(lcd_gray4::Lut), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    s_acc_len = static_cast<size_t>(w) / 2 * h;
+    auto psram = [](size_t n) {
+        return static_cast<uint8_t *>(
+            heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    };
+    s_fb = psram(s_fb_len);
+    s_pushed = psram(s_fb_len);
+    s_acc = psram(s_acc_len);
+    s_acc_pushed = psram(s_acc_len);
+    s_pal = reinterpret_cast<lcd_palette::Palette565 *>(
+        psram(sizeof(lcd_palette::Palette565)));
     for (auto &s : s_strip)
         s = static_cast<uint16_t *>(heap_caps_malloc(
             strip_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
-    if (!s_fb || !s_pushed || !s_lut || !s_strip[0] || !s_strip[1]) {
+    if (!s_fb || !s_pushed || !s_acc || !s_acc_pushed || !s_pal || !s_strip[0] ||
+        !s_strip[1]) {
         release();
         return ESP_ERR_NO_MEM;
     }
@@ -168,7 +193,10 @@ esp_err_t sticky_display_init()
         release();
         return ESP_ERR_NO_MEM;
     }
-    lcd_gray4::build(*s_lut);
+    s_canvas->set_accent_plane(s_acc, s_acc_len);
+    s_theme = tiny_board_caps()->dark_theme ? lcd_palette::Theme::Dark
+                                            : lcd_palette::Theme::Light;
+    lcd_palette::build(*s_pal, s_theme);
     s_canvas->clear();
 
     esp_err_t err = s_ops->init(strip_bytes);
@@ -177,14 +205,20 @@ esp_err_t sticky_display_init()
         release();
         return err;
     }
-    // Panel RAM is random after power-on: paint white before the backlight
-    // ever comes up, so the first thing a human sees is a clean page.
+    // Panel RAM is random after power-on: paint the theme background before
+    // the backlight ever comes up, so the first thing a human sees is a
+    // clean page.
     s_awake = false;
     err = push_rows(0, h);
-    if (err == ESP_OK) memcpy(s_pushed, s_fb, s_fb_len);
-    ESP_LOGI(kTag, "%s %dx%d gray4 canvas, %d-row DMA strips (%u B x2): %s",
-             s_ops->name, w, h, kStripRows, static_cast<unsigned>(strip_bytes),
-             esp_err_to_name(err));
+    if (err == ESP_OK) {
+        memcpy(s_pushed, s_fb, s_fb_len);
+        memcpy(s_acc_pushed, s_acc, s_acc_len);
+    }
+    ESP_LOGI(kTag, "%s %dx%d gray4+accent4 canvas, %s theme, %d-row DMA strips "
+             "(%u B x2): %s",
+             s_ops->name, w, h,
+             s_theme == lcd_palette::Theme::Dark ? "dark" : "light", kStripRows,
+             static_cast<unsigned>(strip_bytes), esp_err_to_name(err));
     if (err != ESP_OK) release();
     return err;
 }

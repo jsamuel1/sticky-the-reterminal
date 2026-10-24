@@ -22,6 +22,8 @@ typedef struct {
     const char *display_short;  // status summary word ("800x480", "headless")
     bool eink;            // SSD1677 e-paper panel driven
     bool panel;           // any panel driven (false = headless canvas)
+    bool color;           // glass shows the accent palette (lcd_palette.h)
+    bool dark_theme;      // light-on-black theme (AMOLED: no static white)
     bool touch;           // touch controller driven
     bool mic;             // voice capture available
     bool buzzer;          // feedback tones available
