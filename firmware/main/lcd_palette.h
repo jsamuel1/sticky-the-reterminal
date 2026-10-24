@@ -53,23 +53,32 @@ struct Rgb {
     uint8_t r, g, b;
 };
 
-// Ink per accent. Light-theme inks are dark enough for text on white;
-// dark-theme inks bright enough for text on black. Index 0/1 unused here.
-constexpr Rgb kInkLight[kNamedAccents] = {
-    {0, 0, 0},       {0, 0, 0},       {0xC6, 0x28, 0x28}, {0xB9, 0x4A, 0x00},
-    {0x9A, 0x7B, 0x00}, {0x2E, 0x7D, 0x32}, {0x00, 0x79, 0x6B}, {0x15, 0x65, 0xC0},
-    {0x6A, 0x1B, 0x9A}, {0xC2, 0x18, 0x5B},
+// Ink per named colour accent, indexed by accent - kRed. Light-theme inks are
+// dark enough for text on white; dark-theme inks bright enough on black.
+// kNeutral/kMono have no ink row: color() resolves them as grays, and ink()
+// refuses them, so a bypassed guard cannot silently paint pure black.
+constexpr int kInkCount = kNamedAccents - kRed;
+constexpr Rgb kInkLight[kInkCount] = {
+    {0xC6, 0x28, 0x28}, {0xB9, 0x4A, 0x00}, {0x9A, 0x7B, 0x00}, {0x2E, 0x7D, 0x32},
+    {0x00, 0x79, 0x6B}, {0x15, 0x65, 0xC0}, {0x6A, 0x1B, 0x9A}, {0xC2, 0x18, 0x5B},
 };
-constexpr Rgb kInkDark[kNamedAccents] = {
-    {0, 0, 0},       {0, 0, 0},       {0xFF, 0x6B, 0x6B}, {0xFF, 0xA9, 0x4D},
-    {0xFF, 0xD4, 0x3B}, {0x69, 0xDB, 0x7C}, {0x4F, 0xD1, 0xC5}, {0x74, 0xC0, 0xFC},
-    {0xB1, 0x97, 0xFC}, {0xF7, 0x83, 0xAC},
+constexpr Rgb kInkDark[kInkCount] = {
+    {0xFF, 0x6B, 0x6B}, {0xFF, 0xA9, 0x4D}, {0xFF, 0xD4, 0x3B}, {0x69, 0xDB, 0x7C},
+    {0x4F, 0xD1, 0xC5}, {0x74, 0xC0, 0xFC}, {0xB1, 0x97, 0xFC}, {0xF7, 0x83, 0xAC},
 };
 // Dark-theme neutral: the light grays inverted, ink kept off full white
 // (an AMOLED should not hold large static #FFFFFF areas).
 constexpr uint8_t kDarkNeutral8[4] = {0xE8, 0xA0, 0x3A, 0x00};
 
 constexpr Rgb gray(uint8_t v) { return Rgb{v, v, v}; }
+
+// A colour accent's ink. Only kRed..kPink have one; anything else answers
+// false and leaves *out alone.
+constexpr bool ink(Theme t, uint8_t accent, Rgb *out) {
+    if (accent < kRed || accent >= kNamedAccents) return false;
+    *out = (t == Theme::Light ? kInkLight : kInkDark)[accent - kRed];
+    return true;
+}
 
 // p/q of `ink` over `bg`, per channel, rounded.
 constexpr uint8_t mixc(uint8_t ink, uint8_t bg, int p, int q) {
@@ -85,15 +94,16 @@ constexpr Rgb mix(Rgb ink, Rgb bg, int p, int q) {
 constexpr Rgb color(Theme t, uint8_t accent, uint8_t level) {
     level &= 3;
     accent &= 0x0F;
+    const Rgb neutral =
+        t == Theme::Light ? gray(kLevel8[level]) : gray(kDarkNeutral8[level]);
     if (accent == kMono) return gray(kLevel8[level]);
-    if (accent == kNeutral || accent >= kNamedAccents)
-        return t == Theme::Light ? gray(kLevel8[level]) : gray(kDarkNeutral8[level]);
+    Rgb in{0, 0, 0};
+    if (!ink(t, accent, &in)) return neutral;   // kNeutral and unassigned 10..15
     const Rgb bg = t == Theme::Light ? gray(0xFF) : gray(0x00);
-    const Rgb ink = t == Theme::Light ? kInkLight[accent] : kInkDark[accent];
     switch (level) {
-        case 0: return ink;
-        case 1: return mix(ink, bg, 2, 3);
-        case 2: return mix(ink, bg, 1, 4);
+        case 0: return in;
+        case 1: return mix(in, bg, 2, 3);
+        case 2: return mix(in, bg, 1, 4);
         default: return bg;
     }
 }
