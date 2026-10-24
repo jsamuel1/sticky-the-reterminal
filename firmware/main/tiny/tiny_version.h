@@ -129,4 +129,20 @@
 //      + status reply gains fw_date: committer date (UTC, "YYYY-MM-DD HH:MM
 //        UTC") of fw_commit, build-injected beside it; "?" if git was absent.
 //      + settings page fw row reads "<version> (<commit>)" plus a date row.
-#define TINY_GRAMMAR_VERSION 17  // v17: status fw_date
+// v18 = layouts for small panels + per-board caps (P5):
+//      + status gains caps:{eink, panel, touch, mic, buzzer, speaker,
+//        battery_gauge, battery_voltage, rtc, imu, env, sd, page_buttons,
+//        ota, color, dark_theme, flash_mb} — the board table itself;
+//        `absent` is derived from it and stays for v13 clients.
+//      + status gains battery_mv (null when unmeasurable). FNK0104S reads it
+//        from the GPIO 9 divider; its battery_pct stays null (no gauge).
+//      + card layout on a panel whose short side is < 480 px (FNK0104S
+//        320x480, AMOLED-1.8 368x448) uses the compact profile: 16 px
+//        margin, exact glyph-advance wrapping, kv value column after the
+//        widest key, stacked menu notes, title drops to body scale before
+//        it is cut, one label scale per button bar, footers cut with
+//        "...". The card JSON is unchanged; the reTerminal frame is
+//        byte-identical (tests/host/render_golden.txt).
+//      + `rotate auto` on a board with no IMU stays manual (reply mode
+//        "manual"); settings hides the follow-gravity row there.
+#define TINY_GRAMMAR_VERSION 18  // v18: status caps + battery_mv; compact layouts

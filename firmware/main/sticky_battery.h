@@ -42,3 +42,10 @@ esp_err_t sticky_battery_read(BatteryReading &reading);
 
 // Reads the full gauge register set (voltage, current, health, status flags).
 esp_err_t sticky_battery_read_detail(BatteryDetail &detail);
+
+// Pack voltage alone, for boards that can measure it but have no fuel gauge
+// (FNK0104S: ADC on GPIO 9 behind a 2:1 divider). A voltage is NOT a state of
+// charge: those boards answer ESP_ERR_NOT_SUPPORTED from the two readers
+// above, so every percentage stays null. The reTerminal answers from the
+// BQ27220; boards that measure nothing answer ESP_ERR_NOT_SUPPORTED.
+esp_err_t sticky_battery_read_voltage(int &millivolts);

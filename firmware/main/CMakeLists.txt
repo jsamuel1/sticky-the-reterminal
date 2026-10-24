@@ -17,7 +17,7 @@ if(CONFIG_TINY_BOARD_FNK0104S)
   # FNK0104S: ST7796S LCD behind the shared colour-panel canvas (lcd_canvas).
   set(TINY_BOARD_SRCS
     "board_generic.cpp" "sticky_power_generic.cpp" "lcd_canvas.cpp" "lcd_panel_st7796.cpp"
-    "hal_absent.cpp"
+    "hal_absent.cpp" "sticky_battery_adc.cpp"
     "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp")
 elseif(CONFIG_TINY_BOARD_AMOLED18)
   # AMOLED-1.8 V2: CO5300 QSPI AMOLED behind the shared colour-panel canvas.
@@ -37,7 +37,7 @@ idf_component_register(
   INCLUDE_DIRS "." "tiny"
   REQUIRES bt esp_wifi esp_http_server mbedtls esp_http_client esp_https_ota nvs_flash app_update json esp_netif lwip
            seeed_epaper gt911 bq27220 button driver esp_driver_ledc esp_driver_uart esp_driver_i2s vfs
-           fatfs sdmmc esp_driver_sdspi esp_driver_usb_serial_jtag esp_psram spi_flash
+           fatfs sdmmc esp_driver_sdspi esp_driver_usb_serial_jtag esp_psram spi_flash esp_adc
            esp_lcd
 )
 

@@ -29,6 +29,7 @@
 #include "freertos/task.h"
 
 #include "sticky_imu.h"
+#include "tiny/board_caps.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_lock.h"
 
@@ -152,6 +153,14 @@ extern "C" esp_err_t tiny_orient_start(void) {
 extern "C" bool tiny_orient_auto(void) { return s_auto; }
 
 extern "C" void tiny_orient_set_auto(bool on) {
+    // No accelerometer = nothing to follow. Reporting "auto" there would be a
+    // mode that never acts (FNK0104S; the AMOLED until its QMI8658 lands), so
+    // the request is refused into manual and the log says why.
+    if (on && !tiny_board_caps()->imu) {
+        ESP_LOGI(TAG, "auto-rotate refused: board has no IMU (manual)");
+        s_auto = false;
+        return;
+    }
     s_auto = on;
     ESP_LOGI(TAG, "auto-rotate %s", on ? "on" : "off");
 }

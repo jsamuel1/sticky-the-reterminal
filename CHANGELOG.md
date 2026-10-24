@@ -6,6 +6,27 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware, grammar v18** — card layouts fit the small colour panels.
+  A panel whose short side is under 480 px (FNK0104S 320×480, AMOLED-1.8
+  368×448) gets a compact profile: 16 px margin, wrapping by the true glyph
+  advance, a kv value column after the widest key (a long atomic value takes
+  its own indented line instead of shrinking to 7 px glyphs), menu notes
+  stacked under the label, titles drop to body scale before they are cut,
+  one label scale per button bar, `...` on cut footers, and a wrapped
+  unknown-type line. The card JSON is unchanged and the reTerminal frame is
+  byte-identical. `status` gains `caps{}` (the board table) and `battery_mv`;
+  the FNK0104S reads pack voltage from the GPIO 9 divider (calibrated ADC)
+  and keeps `battery_pct` null, because it has no gauge. On a board with no
+  IMU, auto-rotate is refused (`rotate auto` stays manual) and settings
+  hides the follow-gravity row. `caps` includes the colour fields
+  (`color`, `dark_theme`). The status buffers are now 2 KB.
+- **tests** — `tests/host/render_host_test.sh` compiles the shipped
+  `tiny_display.cpp` with the device's own cJSON 1.7.18 and qrcodegen
+  (`tests/host/third_party/`). It renders 18 cards at 800×480, 480×800,
+  320×480 and 368×448, fails on edge-band ink or out-of-panel tap regions,
+  and pins every frame in `render_golden.txt`. Set `RENDER_OUT=dir` to get
+  the PNGs. A 1 px reTerminal margin mutation fails all 36 reTerminal frames.
+
 - **firmware** — colour UI on colour boards, grammar v16. The Canvas gains an
   optional 4-bit accent plane beside the unchanged 2-bit gray plane; only
   `lcd_canvas` attaches one, so the reTerminal's canvas is byte-for-byte what

@@ -8,7 +8,8 @@ description: "The card grammar Sticky renders — text, list, kv, composite, qr,
 Everything on my panel is a card. Agent answers, my own pages, the setup
 screen — one renderer draws them all from JSON. The rule inherited from
 tiny's `render_ui`: **no code ships in a card, only data.** I render each
-type natively, 800×480, four grays.
+type natively, four grays: 800×480 on the reTerminal, and a compact layout
+on the smaller colour panels (see [Small panels](#small-panels-fnk0104s-320480-amoled-18-368448)).
 
 <figure class="sk-diagram sk-diagram--card">
 --8<-- "assets/card-anatomy.svg"
@@ -188,6 +189,21 @@ never inverts on a dark panel. `page palette` paints every accent at once.
 A body taller than my panel scrolls: right-edge scrollbar, partial-refresh
 steps, driven by swipe, UP/DOWN, or the `scroll` verb, whose reply carries
 the whole model (`offset` / `content_h` / `view_h`).
+
+## Small panels (FNK0104S 320×480, AMOLED-1.8 368×448)
+
+The card JSON doesn't change between bodies; the layout does. On a panel
+whose short side is under 480 px I use a compact profile: a 16 px margin,
+wrapping by the real glyph advance, a kv value column that starts just
+after the widest key, menu notes on their own line when the row can't hold
+both, a title that drops to body scale before it gets cut, one label size
+per button bar, and footers that end in `...` when they're cut. The
+reTerminal frame is byte-identical to before. `tests/host/render_host_test.sh`
+draws every type at all four sizes, fails on ink in the outer 4 px or on a
+tap region outside the panel, and pins every frame's hash.
+
+![Every card type at 320×480](img/glass/compact/sheet-fnk0104s.png)
+![Every card type at 368×448](img/glass/compact/sheet-amoled18.png)
 
 ## Refresh policy
 

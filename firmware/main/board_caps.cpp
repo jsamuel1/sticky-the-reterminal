@@ -20,6 +20,7 @@ constexpr tiny_board_caps_t kCaps = {
     .buzzer = true,
     .speaker = true,  // buzzer chimes; the beacon's historical "speaker" bit
     .battery_gauge = true,
+    .battery_voltage = true,
     .rtc = true,
     .imu = true,
     .env = true,
@@ -30,8 +31,8 @@ constexpr tiny_board_caps_t kCaps = {
     .flash_mb = 32,
 };
 #elif defined(CONFIG_TINY_BOARD_FNK0104S)
-// Phase 2: ST7796S LCD (lcd_canvas) and FT6336U touch are driven. ES8311,
-// battery ADC and SDMMC land in later phases and flip their fields.
+// ST7796S LCD (lcd_canvas), FT6336U touch and the battery-voltage ADC are
+// driven. ES8311 caps flip after hardware proof; SDMMC lands later.
 // The board has no RTC, IMU, env sensor, fuel gauge, buzzer or power latch.
 constexpr tiny_board_caps_t kCaps = {
     .id = "fnk0104s",
@@ -47,6 +48,7 @@ constexpr tiny_board_caps_t kCaps = {
     .buzzer = false,
     .speaker = false,
     .battery_gauge = false,
+    .battery_voltage = true,  // ADC GPIO 9, 2:1 divider (sticky_battery_adc.cpp)
     .rtc = false,
     .imu = false,
     .env = false,
@@ -74,6 +76,7 @@ constexpr tiny_board_caps_t kCaps = {
     .buzzer = false,
     .speaker = false,
     .battery_gauge = false,
+    .battery_voltage = false,
     .rtc = false,
     .imu = false,
     .env = false,

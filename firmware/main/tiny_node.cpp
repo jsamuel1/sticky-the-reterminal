@@ -847,6 +847,22 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
         // v16: whether the glass shows card accents, and its theme.
         cJSON_AddBoolToObject(s, "color", bc->color);
         cJSON_AddStringToObject(s, "theme", bc->dark_theme ? "dark" : "light");
+        // v18: the whole capability table, so a client gates verbs on
+        // what THIS body drives instead of keeping its own per-board list.
+        // `absent` above stays for v13 clients; it is derived from the same
+        // table and cannot disagree with it.
+        cJSON *cp = cJSON_AddObjectToObject(s, "caps");
+        const struct { const char *k; bool v; } caps[] = {
+            {"eink", bc->eink}, {"panel", bc->panel}, {"touch", bc->touch},
+            {"mic", bc->mic}, {"buzzer", bc->buzzer}, {"speaker", bc->speaker},
+            {"battery_gauge", bc->battery_gauge},
+            {"battery_voltage", bc->battery_voltage}, {"rtc", bc->rtc},
+            {"imu", bc->imu}, {"env", bc->env}, {"sd", bc->sd},
+            {"page_buttons", bc->page_buttons}, {"ota", bc->ota},
+            {"color", bc->color}, {"dark_theme", bc->dark_theme},
+        };
+        for (const auto &k : caps) cJSON_AddBoolToObject(cp, k.k, k.v);
+        cJSON_AddNumberToObject(cp, "flash_mb", bc->flash_mb);
     }
     // v11: who answers the asks. "" = the owner's own tiny (default). The
     // dashboard/reviewer verify agent switching without eyes on the glass.
@@ -900,6 +916,16 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     cJSON_AddStringToObject(s, "device_id", s_cfg.device_id);
     if (have_batt) cJSON_AddNumberToObject(s, "battery_pct", br.percent);
     else           cJSON_AddNullToObject(s, "battery_pct");
+    // v18: pack voltage wherever it is measurable — the gauge on the
+    // reTerminal, the GPIO 9 divider on the FNK0104S. A voltage is not a
+    // percentage: battery_pct stays null on a board with no gauge.
+    {
+        int mv = 0;
+        if (have_batt) cJSON_AddNumberToObject(s, "battery_mv", bd.voltage_mv);
+        else if (sticky_battery_read_voltage(mv) == ESP_OK)
+            cJSON_AddNumberToObject(s, "battery_mv", mv);
+        else cJSON_AddNullToObject(s, "battery_mv");
+    }
     // charging comes from the BQ27220 DSG status bit; still null (not false)
     // when the gauge did not answer, because "not charging" is a claim.
     if (have_batt) cJSON_AddBoolToObject(s, "charging", bd.charging);
@@ -1925,7 +1951,9 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         // bytes of headroom (measured worst case ~529 B with a 32-char SSID and
         // a full summary) and two callers of the same writer disagreeing on the
         // buffer size means one of them breaks first, quietly.
-        EXT_RAM_BSS_ATTR static char st[1024];  // PSRAM .bss
+        // 2048: v18 `caps` (~290 B) pushed the worst case (pair_url +
+        // died_doing + ssid) past 1 KB; the refusal below names the bytes.
+        EXT_RAM_BSS_ATTR static char st[2048];  // PSRAM .bss
         // The writer now REFUSES rather than truncating, and its refusal is
         // parseable JSON naming the byte count it needed — so do not clobber it
         // with a generic sentence. Only substitute when nothing usable came back.

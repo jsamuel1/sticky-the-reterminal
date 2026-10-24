@@ -1,0 +1,11 @@
+third_party — the exact library sources the device links, vendored so the host
+render test (render_host_test.sh) draws with the same code as the glass.
+
+- cjson/      cJSON 1.7.18, MIT. Copied byte-for-byte from ESP-IDF v5.4
+              components/json/cJSON (the espressif/idf:v5.4 image CI builds in).
+- qrcodegen/  espressif/qrcode 0.2.0, Apache-2.0 (wrapper) + nayuki
+              QR-Code-generator, MIT (qrcodegen.c/.h). Copied byte-for-byte
+              from the managed component firmware/main/idf_component.yml pins.
+
+Do not edit. To refresh, copy from the same upstream locations and note the
+version here.

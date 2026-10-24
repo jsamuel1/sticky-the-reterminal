@@ -120,12 +120,31 @@ static int s_pw = 800, s_ph = 480;
 // the physical pair in landscape, swapped in portrait. Refreshed from the canvas
 // at the top of every render, so every helper below sees one consistent frame.
 static int s_w = 800, s_h = 480;
-static constexpr int kMargin = 24;
 static constexpr int kTitleScale = 3;   // 24x48 glyphs
 static constexpr int kBodyScale = 2;    // 16x32 glyphs
 static constexpr int kSmallScale = 1;   // 8x16 glyphs
-static constexpr int kGlyphW = 8, kGlyphH = 16;
-static constexpr int kButtonH = 56;
+// ---- layout profile (set once per panel in tiny_display_init) ----
+// The metrics below were tuned for the 800x480 e-ink, whose SHORT side is
+// 480 px in either orientation. A panel with a shorter short side (FNK0104S
+// 320x480, AMOLED-1.8 368x448) gets the compact profile: a 16 px margin, the
+// real 6 px glyph advance for wrapping (the regular 8 px cell under-fills a
+// line by 25%, which a 320 px panel cannot afford), a 10 px glyph cell for
+// line spacing (ink is 7 px) and a 48 px button strip. The names keep their
+// k-prefix because they ARE constants for the life of the panel; they are
+// only not compile-time, so every helper below scales without being touched.
+// The regular profile is the historical constants exactly: the reTerminal
+// frame is byte-identical (tests/host/render_golden.txt pins it).
+static int kMargin = 24;
+static int kGlyphW = 8, kGlyphH = 16;
+static int kButtonH = 56;
+static bool s_compact = false;          // short side < 480: compact profile
+static void apply_layout_profile(int phys_w, int phys_h) {
+    s_compact = std::min(phys_w, phys_h) < 480;
+    kMargin = s_compact ? 16 : 24;
+    kGlyphW = s_compact ? 6 : 8;
+    kGlyphH = s_compact ? 10 : 16;
+    kButtonH = s_compact ? 48 : 56;
+}
 
 // Text-centering fix: the estimator claimed an 8px cell but
 // Canvas::draw_text advances (kFontWidth+kFontSpacing)=6px per char and the
@@ -274,7 +293,13 @@ static int draw_wrapped(Canvas &c, int x, int y, const char *raw_text, int scale
         strcpy(folded + folded_cap - 7, " [cut]");
     const char *text = folded;
     const int line_h = kGlyphH * scale + 6;
-    const int chars_per_line = std::max(1, max_w / (kGlyphW * scale));
+    // n glyphs need n*advance - spacing px (the last glyph has no gap after
+    // it); the compact profile counts that exactly, or a chip fitted to its
+    // own text_width() would wrap its last character ("Yes" + ".").
+    // The regular profile keeps the historical cell math (golden-pinned).
+    const int cell = kGlyphW * scale;
+    const int chars_per_line = std::max(
+        1, s_compact ? (max_w + kFontSpacing * scale) / cell : max_w / cell);
     const char *p = text;
     char line[128];
     while (*p && y + kGlyphH * scale <= max_y) {
@@ -398,11 +423,18 @@ static int draw_title_bar(Canvas &c, const char *title, bool alert = false) {
         // cluster. A title that does not fit is CUT AND SAYS SO ("...") —
         // never inked to the glass edge, never painted under the clock.
         const int max_w = s_w - 2 * kMargin - cluster_w - 16;
-        if (text_width(ft, kTitleScale) > max_w) {
-            size_t len = strlen(ft);
+        // Compact: a title that misses at scale 3 tries body scale before it
+        // is cut - "wi-fi password" reads whole rather than "wi-fi pas...".
+        int tscale = kTitleScale;
+        if (s_compact && text_width(ft, kTitleScale) > max_w) tscale = kBodyScale;
+        if (text_width(ft, tscale) > max_w) {
+            // Reserve room for the "..." (a 127-char title used to write 3
+            // bytes past ft[128]).
+            size_t len = std::min(strlen(ft), sizeof ft - 4);
+            ft[len] = 0;
             while (len > 0) {
                 strcpy(ft + len, "...");
-                if (text_width(ft, kTitleScale) <= max_w) break;
+                if (text_width(ft, tscale) <= max_w) break;
                 --len;
                 ft[len] = 0;
             }
@@ -410,8 +442,9 @@ static int draw_title_bar(Canvas &c, const char *title, bool alert = false) {
         // An alert title wears red ink on colour glass (its "! " prefix is
         // what the e-ink gets).
         PenScope pen(c, alert ? lcd_palette::kRed : lcd_palette::kNeutral);
-        c.draw_text(kMargin, y, ft, kTitleScale, GrayLevel::Black);
-        y += kGlyphH * kTitleScale + 10;
+        c.draw_text(kMargin, y + (text_ink_h(kTitleScale) - text_ink_h(tscale)) / 2,
+                    ft, tscale, GrayLevel::Black);
+        y += kGlyphH * kTitleScale + 10;   // bar height fixed whatever the scale
     } else {
         y += kGlyphH + 6;  // no title: still clear the cluster's strip
     }
@@ -528,7 +561,9 @@ static void stage_region(int x, int y, int w, int h, const char *label,
 // Button geometry — the ONE definition. tiny_touch hit-tests against the
 // regions this produces, and the dashboard mirror mirrors the same math.
 static void button_box(int i, int n, int *x, int *y, int *w, int *h) {
-    const int gap = 16;
+    // Compact: 8 px gutters buy four buttons ~66 px faces on a 320 px panel,
+    // enough for "Wi-Fi"/"Home" at body scale instead of 7 px glyphs.
+    const int gap = s_compact ? 8 : 16;
     *w = (s_w - 2 * kMargin - gap * (n - 1)) / n;
     *x = kMargin + i * (*w + gap);
     *y = s_h - kMargin - kButtonH;
@@ -537,6 +572,9 @@ static void button_box(int i, int n, int *x, int *y, int *w, int *h) {
 
 // Draw button i of n into the canvas. `inverted` = filled black with knocked-out
 // text, which is what a tap ack looks like on a 4-gray panel.
+// Compact panels: the label scale is chosen once per bar so a strip never
+// mixes 14 px and 7 px faces ("Wi-Fi" big beside "Bluetooth" tiny).
+static int s_btn_scale = kBodyScale;
 static void draw_button(Canvas &c, int i, int n, const char *label,
                         bool inverted, uint8_t accent) {
     int x, y, w, h;
@@ -555,10 +593,12 @@ static void draw_button(Canvas &c, int i, int n, const char *label,
     // ("Bluetooth" at scale 2 = 108px in a 96px button -> 3px visual gap).
     // Ink stays inside the box: drop a scale, then truncate honestly.
     int scale = kBodyScale;
-    if (text_width(label, scale) > w - 12) scale = 1;
-    if (text_width(label, scale) > w - 12) {
+    const int pad = 12;   // ink-to-frame clearance, both sides
+    if (s_compact) scale = s_btn_scale;   // one scale per bar (draw_buttons)
+    if (text_width(label, scale) > w - pad) scale = 1;
+    if (text_width(label, scale) > w - pad) {
         size_t len = strlen(fl);
-        while (len > 0 && text_width(fl, scale) > w - 12) fl[--len] = 0;
+        while (len > 0 && text_width(fl, scale) > w - pad) fl[--len] = 0;
         if (len > 2) { fl[len - 2] = '.'; fl[len - 1] = '.'; }
     }
     const int tw = text_width(label, scale);
@@ -596,6 +636,17 @@ static void draw_buttons(Canvas &c, cJSON *buttons, int *content_bottom) {
     int n = cJSON_GetArraySize(buttons);
     if (n <= 0) return;
     n = std::min(n, 5);  // settings needs 5; button_box math is generic (§1)
+    s_btn_scale = kBodyScale;
+    if (s_compact) {
+        for (int i = 0; i < n; ++i) {
+            const char *label = NULL, *id = NULL;
+            button_text(cJSON_GetArrayItem(buttons, i), &label, &id);
+            char fl[64]; ascii_fold(fl, sizeof fl, label);
+            int x, y, w, h;
+            button_box(i, n, &x, &y, &w, &h);
+            if (text_width(fl, kBodyScale) > w - 12) s_btn_scale = 1;
+        }
+    }
     for (int i = 0; i < n; ++i) {
         const cJSON *b = cJSON_GetArrayItem(buttons, i);
         const char *label = NULL, *id = NULL;
@@ -903,7 +954,29 @@ static int render_kv_card(Canvas &c, cJSON *root, int y, int max_y) {
     }
     const int line_h = kGlyphH * kBodyScale + 14;
     const int key_col = kMargin;
-    const int val_col = s_w / 2 - 40;
+    int val_col = s_w / 2 - 40;
+    if (s_compact) {
+        // Half the width is ~140 px on a 320 px panel: values wrapped after
+        // nine characters while the keys used two thirds of their column.
+        // Measure the widest key instead (capped at half the lane), so the
+        // value column starts 12 px after the keys actually end.
+        int kw = 0;
+        auto measure = [&](const char *k) {
+            char fk[96]; ascii_fold(fk, sizeof fk, k);
+            kw = std::max(kw, text_width(fk, kBodyScale));
+        };
+        if (cJSON_IsObject(rows)) {
+            cJSON *row = nullptr;
+            cJSON_ArrayForEach(row, rows) measure(row->string ? row->string : "?");
+        } else if (cJSON_IsArray(rows)) {
+            cJSON *pair = nullptr;
+            cJSON_ArrayForEach(pair, rows) {
+                cJSON *k = cJSON_IsArray(pair) ? cJSON_GetArrayItem(pair, 0) : nullptr;
+                if (cJSON_IsString(k)) measure(k->valuestring);
+            }
+        }
+        val_col = kMargin + std::min(kw + 12, (s_w - 2 * kMargin) / 2);
+    }
     // Rows that do not fit used to vanish without a trace: the 6th row of the
     // 0.9.6-m9 sensors card was simply absent, and nothing anywhere said so.
     // Count them and admit it on the last usable line.
@@ -917,12 +990,24 @@ static int render_kv_card(Canvas &c, cJSON *root, int y, int max_y) {
         // on ONE line instead of shedding orphan fragments.
         const int val_w = s_w - kMargin - val_col;
         int vscale = kBodyScale;
-        if (!strchr(v, ' ') && text_width(v, kBodyScale) > val_w) vscale = 1;
+        int vx = val_col, vw = val_w;
+        const bool atomic = !strchr(v, ' ');
+        if (s_compact && atomic && text_width(v, kBodyScale) > val_w &&
+            text_width(v, kBodyScale) <= s_w - 2 * kMargin - 12) {
+            // Compact: a MAC or SSID that misses the value column by a few
+            // glyphs drops to its own indented line at body scale instead of
+            // shrinking to 7 px ink nobody can read on a 4" panel.
+            y += kGlyphH * kBodyScale + 6;
+            vx = kMargin + 12;
+            vw = s_w - 2 * kMargin - 12;
+        } else if (atomic && text_width(v, kBodyScale) > val_w) {
+            vscale = 1;
+        }
         // draw_wrapped returns the y AFTER the last wrapped line — a long
         // value must push the next row down, not overprint it (bug found by
         // the device's own screenshot verb, 0.8.0-m8 boot card).
-        int after = draw_wrapped(c, val_col, y, v, vscale,
-                                 val_w, max_y);
+        int after = draw_wrapped(c, vx, y, v, vscale,
+                                 vw, max_y);
         y = (after > y + line_h) ? after + 8 : y + line_h;
     };
     if (cJSON_IsObject(rows)) {
@@ -1131,7 +1216,11 @@ static int render_menu_card(Canvas &c, cJSON *root, int y, int max_y) {
         // UI_SPEC §4: interior ink stops >=12px before the border and a cut
         // is visible ("..."), never a mid-token slice against the frame.
         const int row_w = s_w - 2 * kMargin;
-        const int note_w = note[0] ? text_width(note, 1) + 16 : 0;
+        // Compact: when the label and its note cannot share one line, the note
+        // takes a second line inside the same 64 px row (label stays whole).
+        const bool stack = s_compact && note[0] &&
+                           text_width(lab, 2) > row_w - 24 - (text_width(note, 1) + 16);
+        const int note_w = note[0] && !stack ? text_width(note, 1) + 16 : 0;
         const int lab_max = row_w - 12 - 12 - note_w;
         if (text_width(lab, 2) > lab_max) {
             size_t ll = strlen(lab);
@@ -1141,11 +1230,19 @@ static int render_menu_card(Canvas &c, cJSON *root, int y, int max_y) {
                 lab[--ll] = 0;
             }
         }
+        if (stack) {
+            c.draw_text(kMargin + 12, y + 14, lab, 2, GrayLevel::Black);
+            if (text_width(note, 1) > row_w - 24)
+                note[std::min<size_t>((row_w - 24) / 6, sizeof note - 1)] = 0;
+            c.draw_text(kMargin + 12, y + rh - 14 - text_ink_h(1), note, 1,
+                        GrayLevel::DarkGray);
+        } else {
         c.draw_text(kMargin + 12, y + (rh - kGlyphH * 2) / 2, lab, 2,
                     GrayLevel::Black);
         if (note[0]) {
             int nx = s_w - kMargin - 12 - text_width(note, 1);
             c.draw_text(nx, y + (rh - kGlyphH) / 2, note, 1, GrayLevel::DarkGray);
+        }
         }
         // Off-window rows (scrolled away) are drawn-and-clipped, never tappable.
         if (y >= s_view_top - 4 && y + rh <= s_view_bot + 4)
@@ -1712,6 +1809,10 @@ static int render_body(Canvas &c, cJSON *root, const char *type_s, int y,
         // `body` it carried — never a blank screen.
         char msg[96];
         snprintf(msg, sizeof(msg), "unsupported card type: %s", type_s);
+        if (s_compact) {   // a short panel wraps the confession, never clips it
+            y = draw_wrapped(c, kMargin, y, msg, kBodyScale, s_w - 2 * kMargin, max_y);
+            return render_text_card(c, root, y + 6, max_y);
+        }
         c.draw_text(kMargin, y, msg, kBodyScale, GrayLevel::Black);
         return render_text_card(c, root, y + kGlyphH * kBodyScale + 12, max_y);
     }
@@ -1723,6 +1824,7 @@ extern "C" esp_err_t tiny_display_init(void) {
         s_pw = s_w = c->physical_width();
         s_ph = s_h = c->physical_height();
     }
+    apply_layout_profile(s_pw, s_ph);
     if (!s_display_mux) s_display_mux = xSemaphoreCreateMutex();
     if (!s_region_mux) s_region_mux = xSemaphoreCreateMutex();
     if (!s_ack_q) {
@@ -2262,6 +2364,18 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     if (cJSON_IsString(footer)) {
         max_y -= kGlyphH + 10;
         char ff[160]; ascii_fold(ff, sizeof ff, footer->valuestring);
+        // Compact: a footer wider than the glass is cut AND SAYS SO (title
+        // rule). Room for "..." is reserved before the loop writes it.
+        const int fmax = s_w - 2 * kMargin;
+        if (s_compact && text_width(ff, kSmallScale) > fmax) {
+            size_t len = std::min(strlen(ff), sizeof ff - 4);
+            ff[len] = 0;
+            while (len > 0) {
+                strcpy(ff + len, "...");
+                if (text_width(ff, kSmallScale) <= fmax) break;
+                ff[--len] = 0;
+            }
+        }
         c->draw_text(kMargin, max_y + 4, ff, kSmallScale,
                      GrayLevel::Black);
     }
