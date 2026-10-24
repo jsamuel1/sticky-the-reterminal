@@ -161,7 +161,10 @@ esp_err_t amoled_touch_reset()
     if (err == ESP_OK) {
         step = "assert reset";
         err = tca_write(dev, kTcaOutput, static_cast<uint8_t>(out & ~kTouchBit));
-        if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(20));
+        // A failed transmit may still have reached the expander. Preserve the
+        // minimum reset-low pulse before release on both success and ambiguous
+        // failure; otherwise the recovery can emit only a sub-millisecond edge.
+        vTaskDelay(pdMS_TO_TICKS(20));
         // A failed assertion write may still have reached the expander. Release
         // using the latch byte read above; never invent 0xFF when that read
         // failed, because doing so could change LCD_RST or DSI_PWR_EN.
