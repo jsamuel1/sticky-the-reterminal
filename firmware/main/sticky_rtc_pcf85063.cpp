@@ -115,27 +115,29 @@ esp_err_t sticky_rtc_write(const RtcDateTime &date_time)
         ESP_LOGE(kTag, "Refusing to write an invalid date/time");
         return ESP_ERR_INVALID_ARG;
     }
-    // Run in 24-hour mode before the time lands, so the hour byte means what
-    // encode() wrote. Other CTRL1 bits (capacitor select, CIE) stay as found.
-    uint8_t ctrl1 = 0;
-    esp_err_t e = rd(pcf85063::kRegCtrl1, &ctrl1, 1);
-    if (e != ESP_OK) return e;
-    const uint8_t want =
-        ctrl1 & static_cast<uint8_t>(~(pcf85063::kCtrl1Stop | pcf85063::kCtrl1Mode12h));
-    if (want != ctrl1) {
-        const uint8_t c[2] = {pcf85063::kRegCtrl1, want};
-        if ((e = i2c_master_transmit(s_dev, c, sizeof c, kTimeoutMs)) != ESP_OK)
-            return e;
-    }
-    uint8_t payload[8] = {pcf85063::kRegSeconds};
-    pcf85063::encode(f, payload + 1);  // seconds bit7 = 0 clears the OS flag
-    e = i2c_master_transmit(s_dev, payload, sizeof payload, kTimeoutMs);
-    if (e != ESP_OK) {
-        ESP_LOGE(kTag, "Write failed: %s", esp_err_to_name(e));
+    // Stop the divider while replacing all seven fields, then start it. This
+    // prevents a second rollover between bytes from producing a mixed date.
+    struct RtcBus {
+        int read_ctrl(uint8_t &v) { return rd(pcf85063::kRegCtrl1, &v, 1); }
+        int write_ctrl(uint8_t v) {
+            const uint8_t b[2] = {pcf85063::kRegCtrl1, v};
+            return i2c_master_transmit(s_dev, b, sizeof b, kTimeoutMs);
+        }
+        int write_time(const uint8_t raw[7]) {
+            uint8_t b[8] = {pcf85063::kRegSeconds};
+            for (int i = 0; i < 7; ++i) b[i + 1] = raw[i];
+            return i2c_master_transmit(s_dev, b, sizeof b, kTimeoutMs);
+        }
+    } bus;
+    const pcf85063::WriteResult wr = pcf85063::run_write(bus, f);
+    if (wr.err) {
+        const esp_err_t e = static_cast<esp_err_t>(wr.err);
+        ESP_LOGE(kTag, "Write failed at %s: %s", wr.step, esp_err_to_name(e));
         return e;
     }
     ESP_LOGI(kTag, "Set to %04d-%02d-%02d %02d:%02d:%02d (weekday %d)", f.year,
-             f.month, f.day, f.hour, f.minute, f.second, payload[5]);
+             f.month, f.day, f.hour, f.minute, f.second,
+             pcf85063::weekday(f.year, f.month, f.day));
     return ESP_OK;
 }
 

@@ -194,6 +194,7 @@ namespace pcf85063 {
 constexpr uint8_t kRegCtrl1 = 0x00;   // bit5 STOP, bit1 12-hour mode
 constexpr uint8_t kRegSeconds = 0x04; // 0x04..0x0A: sec(bit7 OS), min, hour,
                                       // day, weekday, month, year (2000-based)
+constexpr uint8_t kCtrl1ExtTest = 1U << 7;
 constexpr uint8_t kCtrl1Stop = 1U << 5;
 constexpr uint8_t kCtrl1Mode12h = 1U << 1;
 constexpr uint8_t kOscStop = 0x80;
@@ -270,6 +271,36 @@ inline void encode(const Fields &f, uint8_t out[7])
     out[4] = static_cast<uint8_t>(weekday(f.year, f.month, f.day));
     out[5] = to_bcd(f.month);
     out[6] = to_bcd(f.year - 2000);
+}
+
+// Set time without a mixed-field rollover: stop divider, write one seven-byte
+// burst, then start. Bus supplies read_ctrl(), write_ctrl(), write_time(). A
+// failed data/start write deliberately leaves STOP set; a later SNTP retry can
+// repair it, while a running half-written clock would look valid but be false.
+struct WriteResult {
+    int err = 0;
+    const char *step = nullptr;
+};
+
+template <typename Bus>
+WriteResult run_write(Bus &bus, const Fields &f)
+{
+    uint8_t ctrl = 0;
+    int e = bus.read_ctrl(ctrl);
+    if (e) return {e, "read control"};
+    const uint8_t stopped = static_cast<uint8_t>(
+        (ctrl | kCtrl1Stop) & ~(kCtrl1ExtTest | kCtrl1Mode12h));
+    if (stopped != ctrl) {
+        e = bus.write_ctrl(stopped);
+        if (e) return {e, "stop divider"};
+    }
+    uint8_t raw[7] = {};
+    encode(f, raw);
+    e = bus.write_time(raw);
+    if (e) return {e, "write time"};
+    e = bus.write_ctrl(static_cast<uint8_t>(stopped & ~kCtrl1Stop));
+    if (e) return {e, "start divider"};
+    return {};
 }
 
 }  // namespace pcf85063

@@ -250,13 +250,9 @@ void act_task(void *) {
     ActMsg m = {};
     while (true) {
         if (xQueueReceive(s_act_q, &m, portMAX_DELAY) != pdTRUE) continue;
-        // Work/sleep admission (tiny_admit.h): routes fetch over HTTPS and
-        // paint; none may run once a sleep is claimed. Held for the route.
-        tiny_admit::Work work;
-        if (!work) {
-            ESP_LOGW(kTag, "action %d dropped: going to sleep", (int)m.act);
-            continue;
-        }
+        // queue_action reserved this item before publish; adopt the same work
+        // count so sleep cannot claim between tap acceptance and execution.
+        tiny_admit::Work work(tiny_admit::AdoptReserved::Yes);
         // Wedge watchdog stamp: the node task watches
         // this. A route that wedges the act task must never silence the whole
         // device — better one honest reboot than a brick nobody can reach.
@@ -370,6 +366,13 @@ void act_task(void *) {
     }
 }
 
+bool send_action(ActMsg &m) {
+    if (!s_act_q || !tiny_admit::work_enter()) return false;
+    if (xQueueSend(s_act_q, &m, 0) == pdTRUE) return true;
+    tiny_admit::work_exit();  // queue full: cancel unpublished work
+    return false;
+}
+
 void queue_action(Act act, int index, const char *label, const char *id) {
     // kNone rides the queue too (2026-08-26 probe nit): an inert region —
     // noop id, or an id this build doesn't recognise — is still a HIT, and
@@ -385,10 +388,8 @@ void queue_action(Act act, int index, const char *label, const char *id) {
     m.index = index;
     strlcpy(m.label, label ? label : "", sizeof m.label);
     strlcpy(m.id, id ? id : "", sizeof m.id);
-    // No wait: if an action is already running, dropping the second tap is the
-    // honest behaviour (double-press != two questions).
-    if (xQueueSend(s_act_q, &m, 0) != pdTRUE)
-        ESP_LOGW(kTag, "action queue full — tap %d dropped", index);
+    if (!send_action(m))
+        ESP_LOGW(kTag, "action refused or queue full — tap %d dropped", index);
 }
 
 #if TINY_TOUCH_GT911
@@ -428,8 +429,8 @@ void on_tap_up() {
         m.act = Act::kScroll;
         m.x0 = s_start_x; m.y0 = s_start_y;
         m.x1 = (int)s_last_x; m.y1 = (int)s_last_y;
-        if (s_act_q && xQueueSend(s_act_q, &m, 0) != pdTRUE)
-            ESP_LOGW(kTag, "action queue full - swipe dropped");
+        if (!send_action(m))
+            ESP_LOGW(kTag, "action refused or queue full - swipe dropped");
         return;  // swipe/drag: not a tap
     }
 

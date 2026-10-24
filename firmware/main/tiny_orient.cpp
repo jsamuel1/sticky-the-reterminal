@@ -33,6 +33,7 @@
 
 #include "sticky_imu.h"
 #include "tiny/board_caps.h"
+#include "tiny/tiny_admit.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_lock.h"
 #include "tiny/tiny_orient_map.h"
@@ -140,6 +141,11 @@ static void orient_task(void *) {
         s_last_deg = deg;
         s_last_name = name;
         if (deg == tiny_display_rotation()) continue;   // already there
+        // A rotation commit repaints the card: work, never under a claimed
+        // sleep (tiny_admit.h). Refused = not committed; the next agreeing
+        // sample after wake tries again.
+        tiny_admit::Work work;
+        if (!work) continue;
         ++s_commits;
         ESP_LOGI(TAG, "gravity (%.2f, %.2f) g held for %d samples -> %s (%d deg)",
                  st.acceleration_x_g, st.acceleration_y_g, agree, name, deg);

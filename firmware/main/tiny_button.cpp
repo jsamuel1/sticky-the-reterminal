@@ -36,6 +36,9 @@ static void voice_ask_task(void *) {
     AskReq req;
     for (;;) {
         if (xQueueReceive(s_ask_q, &req, portMAX_DELAY) != pdTRUE) continue;
+        // Producer reserved before publishing req; adopt that count so sleep
+        // cannot claim in the queue handoff gap.
+        tiny_admit::Work queued(tiny_admit::AdoptReserved::Yes);
         const bool typed = req.text[0] != 0;
         ESP_LOGI(TAG, "%s ask starting", typed ? "typed" : "AI button: voice");
         static char out[512];
@@ -60,10 +63,11 @@ extern "C" esp_err_t tiny_button_request_voice_ask(void) {
     }
     AskReq req = {};
     if (!s_ask_q) return ESP_ERR_INVALID_STATE;
-    // A claimed sleep refuses at the door, so the press is felt as refused
-    // (callers beep) instead of queueing an ask tiny_node_do_ask will refuse.
-    if (tiny_admit::sleep_claimed()) return ESP_ERR_INVALID_STATE;
+    // Reserve before publishing: a check followed by enqueue has a TOCTOU
+    // gap where sleep can claim and make an accepted ask disappear.
+    if (!tiny_admit::work_enter()) return ESP_ERR_INVALID_STATE;
     if (xQueueSend(s_ask_q, &req, 0) != pdTRUE) {
+        tiny_admit::work_exit();
         ESP_LOGW(TAG, "ask already in flight - request dropped");
         return ESP_ERR_INVALID_STATE;
     }
@@ -76,14 +80,15 @@ extern "C" esp_err_t tiny_button_request_voice_ask(void) {
 extern "C" esp_err_t tiny_button_request_text_ask(const char *text) {
     if (!s_ask_q) return ESP_ERR_INVALID_STATE;
     if (!text || !*text) return ESP_ERR_INVALID_ARG;
-    if (tiny_admit::sleep_claimed()) return ESP_ERR_INVALID_STATE;
     AskReq req = {};
     if (strlcpy(req.text, text, sizeof req.text) >= sizeof req.text) {
         ESP_LOGE(TAG, "typed ask %d B exceeds %u — refusing to clip a question",
                  (int)strlen(text), (unsigned)sizeof req.text);
         return ESP_ERR_INVALID_SIZE;
     }
+    if (!tiny_admit::work_enter()) return ESP_ERR_INVALID_STATE;
     if (xQueueSend(s_ask_q, &req, 0) != pdTRUE) {
+        tiny_admit::work_exit();
         ESP_LOGW(TAG, "ask already in flight - typed request dropped");
         return ESP_ERR_INVALID_STATE;
     }
@@ -114,10 +119,8 @@ static void nav_task(void *) {
     Nav n;
     for (;;) {
         if (xQueueReceive(s_nav_q, &n, portMAX_DELAY) != pdTRUE) continue;
-        // Work/sleep admission (tiny_admit.h): once a sleep is claimed, a
-        // page flip must not paint over the goodbye card the wake diffs.
-        tiny_admit::Work work;
-        if (!work) continue;
+        // queue_nav reserved before publish; adopt same count until render ends.
+        tiny_admit::Work work(tiny_admit::AdoptReserved::Yes);
         switch (n) {
             case Nav::kHome: tiny_shell_home(); break;
             // Phone rule (M12): when the card on the glass overflows, UP/DOWN
@@ -153,7 +156,9 @@ static void nav_task(void *) {
 }
 
 static void queue_nav(Nav n) {
-    if (s_nav_q) xQueueSend(s_nav_q, &n, 0);  // full queue = drop, never block
+    if (!s_nav_q || !tiny_admit::work_enter()) return;
+    if (xQueueSend(s_nav_q, &n, 0) != pdTRUE)
+        tiny_admit::work_exit();  // queue full: cancel unpublished work
 }
 
 static void on_ai_long(void *, void *) {

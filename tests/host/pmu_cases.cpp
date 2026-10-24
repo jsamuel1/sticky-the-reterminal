@@ -143,6 +143,64 @@ static void axp_setup() {
     }
 }
 
+struct FakeRtcBus {
+    uint8_t ctrl = 0x87;  // EXT_TEST + CIE + 12h + capacitance select
+    uint8_t raw[7] = {};
+    char trace[8] = {};
+    int calls = 0, fail_at = 0;
+    int next(char op) {
+        trace[calls++] = op;
+        return calls == fail_at ? 0x107 : 0;
+    }
+    int read_ctrl(uint8_t &v) {
+        const int e = next('R');
+        if (!e) v = ctrl;
+        return e;
+    }
+    int write_ctrl(uint8_t v) {
+        const int e = next(v & pcf85063::kCtrl1Stop ? 'S' : 'U');
+        if (!e) ctrl = v;
+        return e;
+    }
+    int write_time(const uint8_t in[7]) {
+        const int e = next('T');
+        if (!e) for (int i = 0; i < 7; ++i) raw[i] = in[i];
+        return e;
+    }
+};
+
+static void rtc_write_cases(const pcf85063::Fields &f) {
+    using namespace pcf85063;
+    {
+        FakeRtcBus b;
+        const auto r = run_write(b, f);
+        CHECK("rtc write: stop, one burst, start", r.err == 0 &&
+              b.trace[0] == 'R' && b.trace[1] == 'S' &&
+              b.trace[2] == 'T' && b.trace[3] == 'U');
+        CHECK("rtc write: preserves unrelated ctrl bits", b.ctrl == 0x05);
+        CHECK("rtc write: clears OS via encoded seconds", b.raw[0] == 0x45);
+    }
+    const char *steps[] = {"read control", "stop divider", "write time",
+                           "start divider"};
+    bool failures = true;
+    for (int i = 1; i <= 4; ++i) {
+        FakeRtcBus b;
+        b.fail_at = i;
+        const auto r = run_write(b, f);
+        failures &= r.err != 0 && r.step == steps[i - 1] && b.calls == i;
+        if (i >= 3) failures &= (b.ctrl & kCtrl1Stop) != 0;
+    }
+    CHECK("rtc write: every phase fails closed", failures);
+    {
+        FakeRtcBus b;
+        b.ctrl = 0x25;  // already stopped, 24h: skip redundant STOP write
+        const auto r = run_write(b, f);
+        CHECK("rtc write: already stopped writes time then starts",
+              r.err == 0 && b.trace[0] == 'R' && b.trace[1] == 'T' &&
+              b.trace[2] == 'U' && b.ctrl == 0x05);
+    }
+}
+
 static void rtc_cases() {
     // 2026-10-24 21:07:45, Saturday (6).
     pcf85063::Fields f;
@@ -180,6 +238,7 @@ static void rtc_cases() {
     CHECK("valid: 1999 refused (no century bit)", !pcf85063::valid(old));
     CHECK("weekday: 2000-01-01 saturday", pcf85063::weekday(2000, 1, 1) == 6);
     CHECK("weekday: 2024-02-29 thursday", pcf85063::weekday(2024, 2, 29) == 4);
+    rtc_write_cases(f);
 }
 
 int main() {

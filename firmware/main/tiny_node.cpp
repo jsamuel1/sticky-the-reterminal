@@ -2855,6 +2855,14 @@ static void node_task(void *) {
         }
         if (!tiny_wifi_is_up()) { vTaskDelay(pdMS_TO_TICKS(2000)); continue; }
         if (hb_countdown <= 0) {
+          // Work (tiny_admit.h): the heartbeat, the askq drain and its glance
+          // repaint are one admitted section, so a PWR-key sleep on another
+          // task neither cuts it mid-TLS nor gets its goodbye card painted
+          // over. Refused = a sleep is claimed: skip; the countdown stays
+          // due. poll_relay below is NOT wrapped: dispatch enters on its
+          // own, and the `sleep` verb must be the only work to claim.
+          tiny_admit::Work hb_work;
+          if (hb_work) {
             int st = heartbeat();
             ESP_LOGI(TAG, "heartbeat -> %d", st);
             if (st == 401)      auth_401("heartbeat");
@@ -2926,6 +2934,7 @@ static void node_task(void *) {
             }
             // 6 x 5s = 30s normally; once auth is halted, 5 minutes.
             hb_countdown = s_auth_halted ? 60 : 6;
+          }
         }
         if (s_auth_halted) {
             // Auth has been refused for >5 minutes. Stop hammering the relay,
@@ -2938,8 +2947,12 @@ static void node_task(void *) {
         }
         poll_relay(resp, sizeof resp);
         // Drain queued device events (ui_tap etc.) — best-effort, never fatal.
+        // Admitted work (tiny_admit.h) per event, so a claimed sleep leaves
+        // the rest queued instead of being cut mid-POST.
         tiny_event_t ev;
-        while (s_events && xQueueReceive(s_events, &ev, 0) == pdTRUE) {
+        while (s_events) {
+            tiny_admit::Work ev_work;
+            if (!ev_work || xQueueReceive(s_events, &ev, 0) != pdTRUE) break;
             note_activity();  // a human touched the glass: snap to 5s cadence
             wire_fold_bank(ev.detail);  // BUG-2: glass encoding stays on glass
             cJSON *b = base_body();

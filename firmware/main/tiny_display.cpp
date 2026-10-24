@@ -14,6 +14,7 @@
 // bottleneck; policy hooks for partial land with the stream type).
 #include "tiny/tiny_display.h"
 #include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
+#include "tiny/tiny_admit.h"
 #include "tiny/tiny_askq.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -838,21 +839,27 @@ extern "C" esp_err_t tiny_display_flash_button(int index) {
 // The e-ink busy-wait can stall a caller for seconds. The touch task must never
 // pay that (it would stop sampling fingers), so taps only post an index here and
 // this task owns the visible ack (audit TOUCH P0-2: "not on the touch task").
+struct AckReq { int index; };
 static QueueHandle_t s_ack_q = NULL;
 
 static void ack_task(void *) {
-    int index = 0;
+    AckReq req = {};
     for (;;) {
-        if (xQueueReceive(s_ack_q, &index, portMAX_DELAY) != pdTRUE) continue;
-        tiny_display_flash_button(index);
+        if (xQueueReceive(s_ack_q, &req, portMAX_DELAY) != pdTRUE) continue;
+        tiny_admit::Work work(tiny_admit::AdoptReserved::Yes);
+        tiny_display_flash_button(req.index);
     }
 }
 
 extern "C" esp_err_t tiny_display_ack_button(int index) {
     if (!s_ack_q) return ESP_ERR_INVALID_STATE;
+    if (!tiny_admit::work_enter()) return ESP_ERR_INVALID_STATE;
+    const AckReq req = {index};
     // Depth-2 queue, no wait: a human cannot outrun the panel, and dropping a
     // redundant ack is better than blocking the sampler.
-    return xQueueSend(s_ack_q, &index, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+    if (xQueueSend(s_ack_q, &req, 0) == pdTRUE) return ESP_OK;
+    tiny_admit::work_exit();
+    return ESP_ERR_NO_MEM;
 }
 
 // ---- scroll state -------------------------------------------------------
@@ -1842,7 +1849,7 @@ extern "C" esp_err_t tiny_display_init(void) {
     if (!s_display_mux) s_display_mux = xSemaphoreCreateMutex();
     if (!s_region_mux) s_region_mux = xSemaphoreCreateMutex();
     if (!s_ack_q) {
-        s_ack_q = xQueueCreate(2, sizeof(int));
+        s_ack_q = xQueueCreate(2, sizeof(AckReq));
         // prio 4: below touch (5) so sampling always wins, above idle work.
         if (s_ack_q) xTaskCreate(ack_task, "disp_ack", 3072, NULL, 4, NULL);
     }
