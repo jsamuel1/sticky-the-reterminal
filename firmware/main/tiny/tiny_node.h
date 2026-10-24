@@ -35,8 +35,9 @@ esp_err_t tiny_node_do_ask(const char *text, int voice_secs, char *out, size_t o
 // rather than truncates; at a 1024 B cap the v17/v18 object (1026-1303 B
 // measured on tiny-eba6) made `status` an error and stopped bench OTA at its
 // mandatory pre-status. tests/host/status_cap_host_test.sh fails on any caller
-// whose buffer is not declared with this constant.
-#define TINY_STATUS_JSON_CAP 2048
+// whose buffer is not declared with this constant. 3072 since v22: the
+// internal_boot breakdown adds ~350 B on a full boot.
+#define TINY_STATUS_JSON_CAP 3072
 esp_err_t tiny_node_status_json(char *out, size_t cap);
 bool tiny_node_poll_idle(void);    // live cadence truth (idle-60s vs active-5s)
 // Render the status kv-card on the panel with NO network call — the "Status"

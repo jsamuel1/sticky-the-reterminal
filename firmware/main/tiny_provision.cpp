@@ -122,7 +122,7 @@ static esp_err_t root_get(httpd_req_t *req) {
     httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
     // Scan is best-effort and bounded by the driver; an empty list leaves a
     // plain text field, which still works.
-    static tiny_scan_ap_t aps[12];
+    EXT_RAM_BSS_ATTR static tiny_scan_ap_t aps[12];
     int n = 0, total = 0;
     if (tiny_wifi_scan(aps, 12, &n, &total) == ESP_OK) {
         for (int i = 0; i < n; ++i) {

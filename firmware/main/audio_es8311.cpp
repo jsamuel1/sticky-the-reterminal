@@ -1,4 +1,5 @@
 #include "audio_es8311.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 
 #include <string.h>
 
@@ -65,7 +66,7 @@ esp_err_t pa_init()
 
 void write_silence(uint32_t ms)
 {
-    static int16_t zeros[2 * kChunk];
+    EXT_RAM_BSS_ATTR static int16_t zeros[2 * kChunk];  // i2s_channel_write copies
     uint32_t frames = AUDIO_ES8311_RATE * ms / 1000;
     while (frames) {
         const size_t n = frames < kChunk ? frames : kChunk;
@@ -77,7 +78,7 @@ void write_silence(uint32_t ms)
 
 void play_item(const PlayItem &it)
 {
-    static int16_t buf[2 * kChunk];
+    EXT_RAM_BSS_ATTR static int16_t buf[2 * kChunk];  // into the internal DMA ring
     for (size_t i = 0; i < it.n; ++i) {
         TinyTone t;
         tiny_tone_start(&t, AUDIO_ES8311_RATE, it.notes[i], it.amp);

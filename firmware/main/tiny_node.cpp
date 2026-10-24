@@ -5,6 +5,7 @@
 #include "tiny/tiny_node.h"
 #include "tiny/board_caps.h"
 #include "tiny/tiny_beacon.h"
+#include "tiny/tiny_heapmark.h"
 #include "tiny/tiny_askq.h"
 #include "tiny/tiny_agent.h"
 #include "tiny/tiny_lock.h"
@@ -594,7 +595,7 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
     } led{!s_askq_draining};
     if (led.on) tiny_led_ask(text ? TINY_LED_ASK_THINKING : TINY_LED_ASK_PENDING);
     s_ask_backend_spoke = false;  // §16 drain context — set true when st > 0
-    static char audio_url[256];
+    EXT_RAM_BSS_ATTR static char audio_url[256];  // PSRAM .bss
     audio_url[0] = 0;
     if (!text) {
         uint8_t *wav = NULL; size_t wlen = 0;
@@ -1024,6 +1025,22 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
         (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     cJSON_AddNumberToObject(s, "internal_min_free",
         (double)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    // v24: the largest single internal block. TLS needs contiguous chunks, so
+    // free bytes split into crumbs fail the same way as missing bytes.
+    cJSON_AddNumberToObject(s, "internal_largest",
+        (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    // v24: the boot breakdown (tiny_heapmark): {stage: [free, largest]} in
+    // boot order. A stage's cost is the drop from the stage before it.
+    {
+        cJSON *ib = cJSON_AddObjectToObject(s, "internal_boot");
+        tiny_heapmark_t hm;
+        for (int i = 0; tiny_heapmark_get(i, &hm); ++i) {
+            cJSON *pair = cJSON_CreateArray();
+            cJSON_AddItemToArray(pair, cJSON_CreateNumber(hm.free_b));
+            cJSON_AddItemToArray(pair, cJSON_CreateNumber(hm.largest_b));
+            cJSON_AddItemToObject(ib, hm.name, pair);
+        }
+    }
     // P0 lesson (stack overflow convicted by serial 2026-08-26): the node
     // task's own stack headroom, lowest-ever. The overflow gave no heap
     // symptom at all — heap watermarks can't see a stack death. This can.
@@ -2396,7 +2413,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                   "retry after 'play status' says done, or 'play stop')");
             return;
         }
-        static char shot_url[256];
+        EXT_RAM_BSS_ATTR static char shot_url[256];  // PSRAM .bss
         esp_err_t r = tiny_screenshot_upload(shot_url, sizeof shot_url);
         if (r == ESP_OK) {
             char out[300];

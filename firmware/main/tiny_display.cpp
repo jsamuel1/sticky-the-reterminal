@@ -895,7 +895,7 @@ static size_t  s_stream_cap = 0;
 static bool    s_stream_overflow = false;  // bytes dropped past the cap
 static char    s_stream_title[64];
 static char    s_stream_cid[24];
-static char    s_stream_q[256];            // user bubble; "" = text card
+EXT_RAM_BSS_ATTR static char s_stream_q[256];            // user bubble; "" = text card
 static int64_t s_stream_last_commit_us = 0;
 
 // Design rule: the ask lives ON the home surface.
@@ -1928,7 +1928,7 @@ static void blit_raw_locked(Canvas *c, const uint8_t *buf, size_t len) {
 // sent to the glass outlive the relay's hosted URLs. Guards: re-renders
 // (rotation/glance replaying the cached spec) and a same-URL resend do
 // not duplicate; no card = no archive, the paint is untouched.
-static char s_photo_last_url[256];
+EXT_RAM_BSS_ATTR static char s_photo_last_url[256];
 
 #define PHOTOS_SD_DIR STICKY_SD_MOUNT_POINT "/photos"
 

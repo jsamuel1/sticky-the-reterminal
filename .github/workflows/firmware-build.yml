@@ -40,6 +40,9 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . $IDF_PATH/export.sh
           tools/build_board.sh ${{ matrix.board }}
+      - name: assert the generated sdkconfig (internal-RAM settings)
+        shell: bash
+        run: python3 tools/check_sdkconfig.py ${{ matrix.board }}
       - name: refuse a dirty or unstamped build
         shell: bash
         run: |

@@ -1,5 +1,5 @@
 #pragma once
-#define TINY_FW_VERSION "0.31.0"
+#define TINY_FW_VERSION "0.31.1"
 
 // The verb grammar is a 3-consumer contract (dashboard, iOS StickyPanel,
 // relay agents) held together by string prefixes. Bump this on ANY change to
@@ -199,4 +199,10 @@
 //      + not a reply-shape change, recorded so nobody hunts: the boot clock
 //        now really comes from the RTC on every board (it was read before
 //        the RTC was attached, so clock_source stayed "unset" until SNTP).
-#define TINY_GRAMMAR_VERSION 23  // v23: amoled18 AXP2101 battery/USB + PCF85063A RTC
+// v24 = internal-RAM receipts in `status` (every board):
+//      + internal_largest: largest free INTERNAL|8BIT block, bytes.
+//      + internal_boot: {stage: [free, largest]} in boot order, from
+//        tiny_heapmark (start display touch audio inputs shell sdcard ble
+//        wifi node console; a stage the boot did not reach is absent).
+//        A stage's cost is the drop from the one before it.
+#define TINY_GRAMMAR_VERSION 24  // v24: status internal_largest + internal_boot

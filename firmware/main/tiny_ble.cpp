@@ -1,5 +1,6 @@
 // tiny_ble — NimBLE observer, scan-only. See tiny_ble.h.
 #include "tiny/tiny_ble.h"
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_beacon.h"
 
 #include <stdio.h>
@@ -22,7 +23,7 @@ static SemaphoreHandle_t s_done = NULL;
 
 // Results table filled by the GAP event callback (NimBLE host task context),
 // read by the caller after the scan-complete semaphore fires.
-static tiny_ble_dev_t s_devs[16];
+EXT_RAM_BSS_ATTR static tiny_ble_dev_t s_devs[16];  // host task, not an ISR
 static int s_dev_count = 0;
 
 static void on_sync(void) { s_synced = true; tiny_beacon_on_sync(); }

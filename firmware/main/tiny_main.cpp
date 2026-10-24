@@ -59,6 +59,7 @@ static const char *TAG = "tiny";
 #include "tiny/tiny_version.h"
 
 #include "tiny/tiny_bootmark.h"
+#include "tiny/tiny_heapmark.h"
 
 // The M2 demo card — title + kv rows + buttons, exactly the shape the
 // backend's ```card fenced block emits (docs/API_CONTRACT.md).
@@ -66,6 +67,7 @@ extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "tiny-sticky fw %s booting on %s", TINY_FW_VERSION,
              tiny_board_caps()->name);
+    tiny_heapmark("start");  // what the IDF startup left: static .bss/.data/IRAM
     sticky_power_log_wakeup_reason();
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER)
         ESP_LOGI(TAG, "woke from deep sleep by timer");
@@ -78,9 +80,11 @@ extern "C" void app_main(void)
         esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
 
     ESP_ERROR_CHECK(board_init());               // power latch lives here
+    tiny_heapmark("board");
     tiny_bootmark_stage(1);
     const int64_t t_board = esp_timer_get_time();
     ESP_ERROR_CHECK(tiny_display_init());
+    tiny_heapmark("display");
     tiny_bootmark_stage(2);
     const int64_t t_disp = esp_timer_get_time();
     ESP_ERROR_CHECK(sticky_buzzer_init());
@@ -143,8 +147,10 @@ extern "C" void app_main(void)
     const auto init_inputs = [&]() {
         // M2b: GT911 touch -> button hit-regions -> UI_TAP events + beep.
         ESP_LOGI(TAG, "touch init: %s", esp_err_to_name(tiny_touch_init()));
+        tiny_heapmark("touch");
         // M5: mic power rail + buzzer.
         ESP_LOGI(TAG, "audio init: %s", esp_err_to_name(tiny_audio_init()));
+        tiny_heapmark("audio");
         // FNK0104S status light (no-op elsewhere); logs its internal cost.
         tiny_led_init();
         // M9: SHT40 + IMU on I2C1 — the `sensors` verb. Logged, never
@@ -154,6 +160,7 @@ extern "C" void app_main(void)
         // §11 pocket lockout: armed after buttons exist (the chord reads
         // their GPIOs raw) — boots UNLOCKED; auto-entry is IMU-driven.
         ESP_LOGI(TAG, "lockout init: %s", esp_err_to_name(tiny_lock_init()));
+        tiny_heapmark("inputs");
     };
     // P0-BOUNCE bisect arm (0.25.36): the splash_progress partials are
     // SUSPECT #1 for the 0.25.35 trial crash (partial-after-monochrome-full,
@@ -173,6 +180,7 @@ extern "C" void app_main(void)
                  esp_err_to_name(tiny_display_arm_wake_baseline()));
     // M10: home screen up before any network — navigation must work offline.
     ESP_LOGI(TAG, "shell init: %s", esp_err_to_name(tiny_shell_init()));
+    tiny_heapmark("shell");
     tiny_bootmark_stage(7);
     // §12 measurement: reset-to-home-on-glass, in ms, exposed via `status`.
     // On a glance wake this is the number the acceptance names (<2000).
@@ -218,6 +226,7 @@ extern "C" void app_main(void)
         ESP_LOGI(TAG, "sdcard init: %s, mounted=%d (internal %d B, %u B free)",
                  esp_err_to_name(sderr), (int)sticky_sdcard_mounted(),
                  (int)sd_after - (int)sd_before, (unsigned)sd_after);
+        tiny_heapmark("sdcard");
     }
 
     // M3: load config; join wifi when provisioned with at least one network.
@@ -251,10 +260,12 @@ extern "C" void app_main(void)
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         ESP_LOGI(TAG, "ble beacon: %s (internal %d B, %u B free)", esp_err_to_name(berr),
                  (int)ble_after - (int)ble_before, (unsigned)ble_after);
+        tiny_heapmark("ble");
     }
     if (cfg_ok && cfg.network_count > 0) {
         esp_err_t werr = tiny_wifi_connect(&cfg);
         ESP_LOGI(TAG, "wifi: %s", esp_err_to_name(werr));
+        tiny_heapmark("wifi");
         tiny_bootmark_stage(8);
         // The wrong-password journey used to end in a silent lie —
         // "saved ✓", reboot, join fails, and the walk lands on some OTHER
@@ -347,6 +358,7 @@ extern "C" void app_main(void)
         if (werr == ESP_OK && tiny_config_is_provisioned(&cfg)) {
             esp_err_t nerr = tiny_node_start();
             ESP_LOGI(TAG, "node loop: %s", esp_err_to_name(nerr));
+            tiny_heapmark("node");
         } else if (werr == ESP_OK) {
             ESP_LOGI(TAG, "node loop: waiting for device_id+token (config incomplete)");
         }
@@ -374,6 +386,7 @@ extern "C" void app_main(void)
     uart_vfs_dev_use_driver(UART_NUM_0);
 #endif
     ESP_LOGI(TAG, "card console ready: send {json} line over serial");
+    tiny_heapmark("console");
     EXT_RAM_BSS_ATTR static char line[2048];
     size_t pos = 0;
     for (;;) {

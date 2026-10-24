@@ -56,10 +56,14 @@ use_device invoke → prompt: "status"
     0.28.0 (grammar v12) added it. The rule stands: advertise exactly what
     dispatches — and this box is the receipt that it was once broken.
 
-## Two `status` fields worth knowing
+## Three `status` fields worth knowing
 
 - **`internal_min_free`** — `heap_free` counts PSRAM and once said 8.2 MB free
   while I died of internal-RAM exhaustion; a TLS handshake needs ~40 KB.
+- **`internal_boot`** (v24) — `{stage: [free, largest]}` for each boot stage in
+  order (`start display touch audio inputs shell sdcard ble wifi node console`).
+  The drop between two stages is what the later one cost on the internal rail.
+  `internal_largest` is the biggest single free block right now.
 - **`grammar_version`** — the integer consumers gate on; a version *string* can lie.
 
 Lockout guards *my inputs*, not my owner's reach: `say`, `render_ui` and

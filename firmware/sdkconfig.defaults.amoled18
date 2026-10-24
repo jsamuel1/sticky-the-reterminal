@@ -60,3 +60,17 @@ CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=10
 CONFIG_BT_NIMBLE_TRANSPORT_EVT_DISCARD_COUNT=4
 # CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT is not set
 # CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT is not set
+
+# Internal RAM, round 3. Kernel and ring-buffer code out of IRAM: DIRAM .text
+# 103523 -> 90371 B (-13.2 KB) on the fnk0104s image (esp_idf_size, IDF 5.4).
+# IDF's RAM-usage guide calls both safe in every configuration: ...FromISR()
+# kernel calls (lcd_panel_*'s on_color_done) and ISR ring-buffer calls stay
+# in IRAM.
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+# NOT SPIRAM_MALLOC_RESERVE_INTERNAL > 32768: the reserve pool is carved out
+# of internal RAM and re-added with DMA|INTERNAL + 8BIT caps
+# (esp_psram_extram_reserve_dma_pool), so heap_caps_get_free_size(INTERNAL)
+# counts it either way. A bigger reserve only hides bytes from plain malloc;
+# it cannot raise internal_free, and TLS's own internal mallocs could no
+# longer reach it.

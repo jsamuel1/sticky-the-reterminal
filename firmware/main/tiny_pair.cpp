@@ -201,7 +201,7 @@ static bool start_code(void) {
     cJSON_Delete(b);
     if (!body) return false;
 
-    static char resp[512];
+    EXT_RAM_BSS_ATTR static char resp[512];
     const int st = post("/api/devices/pair/start", body, resp, sizeof resp);
     free(body);
     s_last_http.store(st);
@@ -239,7 +239,7 @@ static pu::Poll poll_once(const char *code) {
     char *body = cJSON_PrintUnformatted(b);
     cJSON_Delete(b);
     if (!body) return pu::Poll::kRetry;
-    static char resp[768];
+    EXT_RAM_BSS_ATTR static char resp[768];
     const int st = post("/api/devices/pair/poll", body, resp, sizeof resp);
     memset(body, 0, strlen(body));  // it held the secret
     free(body);
@@ -253,7 +253,7 @@ static pu::Poll poll_once(const char *code) {
                          cJSON_IsString(id) && id->valuestring[0];
     const pu::Poll v = pu::classify(st, cJSON_IsString(sv) ? sv->valuestring : NULL, has_tok);
     if (v == pu::Poll::kApproved) {
-        static char merge[320];
+        EXT_RAM_BSS_ATTR static char merge[320];
         const bool built = pu::merge_json(id->valuestring, tok->valuestring,
                                           cJSON_IsString(nm) ? nm->valuestring : "",
                                           merge, sizeof merge);

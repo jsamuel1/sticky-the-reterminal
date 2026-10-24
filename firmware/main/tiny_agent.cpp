@@ -12,6 +12,7 @@
 // instead of shipping garbage and rendering the backend's 404.
 
 #include <string.h>
+#include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include <ctype.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -25,7 +26,7 @@ static const char *NS = "tinyagent";
 static SemaphoreHandle_t s_mux;
 static bool s_loaded = false;
 static char s_slug[TINY_AGENT_SLUG_MAX + 1];
-static char s_roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
+EXT_RAM_BSS_ATTR static char s_roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
 static int s_rcount = 0;
 
 static void lock(void) {

@@ -25,7 +25,7 @@ static volatile uint8_t s_last_reason = 0;
 // "was <just-added ssid> tried, and why did it fail?" — the difference between
 // "saved ✓" (a lie) and "couldn't join X - wrong password?" (the truth).
 typedef struct { char ssid[33]; uint8_t reason; } tiny_fail_rec_t;
-static tiny_fail_rec_t s_fails[8];
+EXT_RAM_BSS_ATTR static tiny_fail_rec_t s_fails[8];
 static int s_fail_count = 0;
 
 static void handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
