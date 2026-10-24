@@ -7,6 +7,7 @@
 #include "es8311_codec.h"
 #include "esp_check.h"
 #include "esp_codec_dev_defaults.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -22,8 +23,8 @@ constexpr char kTag[] = "audio_es8311";
 // codec + analog MEMS mic pairing; miccheck reports what it actually yields.
 constexpr float kMicGainDb = 30.0f;
 // The amp switches only around silence. Lead: the SC8002B leaves shutdown
-// in well under this; tail: longer than the TX DMA ring (6 x 240 frames =
-// 90 ms) so the last note is fully out before the amp turns off.
+// in well under this; tail: longer than the TX DMA ring (4 x 240 frames =
+// 60 ms) so the last note is fully out before the amp turns off.
 constexpr uint32_t kPaLeadMs = 30;
 constexpr uint32_t kTailMs = 120;
 constexpr size_t kMaxNotes = 32;
@@ -113,6 +114,11 @@ void player_task(void *)
 esp_err_t i2s_up()
 {
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    // DMA rings live in INTERNAL RAM (the colour boards' scarcest rail; the
+    // TLS upload pre-flight needs 60 KB of it). 4 x 240 frames = 60 ms per
+    // direction, 3.75 KB each: ample for 16 kHz tones and a polled capture.
+    cc.dma_desc_num = 4;
+    cc.dma_frame_num = 240;
     // An empty TX queue must play ZEROS, not loop the last note: the DAC
     // idles at mid-rail and the amp toggles against silence.
     cc.auto_clear_after_cb = true;
@@ -182,21 +188,28 @@ esp_err_t audio_es8311_init(void)
 {
     if (s_tried) return s_init_err;
     s_tried = true;
+    const size_t internal_before =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     esp_err_t err = pa_init();
     if (err == ESP_OK) err = i2s_up();
     if (err == ESP_OK) err = codec_up();
     if (err == ESP_OK) {
-        s_play_q = xQueueCreate(4, sizeof(PlayItem));
+        // Queue storage and the player stack go to PSRAM: internal RAM is
+        // what TLS needs, and nothing here runs during a flash write.
+        s_play_q = xQueueCreateWithCaps(4, sizeof(PlayItem), MALLOC_CAP_SPIRAM);
         if (!s_play_q ||
-            xTaskCreate(player_task, "audio_play", 4096, nullptr, 5, nullptr) != pdPASS)
+            xTaskCreateWithCaps(player_task, "audio_play", 4096, nullptr, 5, nullptr,
+                                MALLOC_CAP_SPIRAM) != pdPASS)
             err = ESP_ERR_NO_MEM;
     }
     s_init_err = err;
+    const size_t internal_after =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     ESP_LOGI(kTag, "ES8311 @0x%02X I2S0 MCLK=%d BCLK=%d WS=%d DIN=%d DOUT=%d, "
-             "PA GPIO%d active-%s: %s",
+             "PA GPIO%d active-%s: %s (internal %u -> %u B)",
              ES8311_I2C_ADDR, PIN_I2S_MCLK, PIN_I2S_BCLK, PIN_I2S_WS, PIN_I2S_DIN,
              PIN_I2S_DOUT, PIN_AUDIO_EN, AUDIO_EN_ON_LEVEL ? "HIGH" : "LOW",
-             esp_err_to_name(err));
+             esp_err_to_name(err), (unsigned)internal_before, (unsigned)internal_after);
     return err;
 }
 
