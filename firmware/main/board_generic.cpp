@@ -133,6 +133,42 @@ esp_err_t amoled_expander_up()
     ESP_LOGI(kTag, "tca9554: DSI_PWR_EN + LCD_RST + TOUCH_RST released");
     return ESP_OK;
 }
+
+// Touch-only reset for tiny_touch: bit 2 low 20 ms, then high, by
+// read-modify-write of the output latch so LCD_RST (bit 0) and DSI_PWR_EN
+// (bit 1) never move. The direction register is left as amoled_expander_up()
+// set it (bits 0..2 outputs). 200 ms settle: what esp_lcd_touch_cst816s waits
+// after its own reset pulse.
+esp_err_t amoled_touch_reset()
+{
+    if (s_bus == nullptr) return ESP_ERR_INVALID_STATE;
+    i2c_device_config_t dc = {};
+    dc.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dc.device_address = TCA9554_I2C_ADDR;
+    dc.scl_speed_hz = 400000;
+    i2c_master_dev_handle_t dev = nullptr;
+    ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_bus, &dc, &dev), kTag,
+                        "tca9554 add");
+    constexpr uint8_t kTouchBit = 1U << TCA_BIT_TOUCH_RST;
+    uint8_t out = 0xFF;
+    esp_err_t err = i2c_master_transmit_receive(dev, &kTcaOutput, 1, &out, 1,
+                                                kProbeTimeoutMs);
+    if (err == ESP_OK)
+        err = tca_write(dev, kTcaOutput, static_cast<uint8_t>(out & ~kTouchBit));
+    if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(20));
+    // Release whatever happened: a touch controller held in reset is worse
+    // than one that was never reset.
+    const esp_err_t rel = tca_write(dev, kTcaOutput,
+                                    static_cast<uint8_t>(out | kTouchBit));
+    i2c_master_bus_rm_device(dev);
+    if (err == ESP_OK) err = rel;
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "tca9554: touch reset failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+    return ESP_OK;
+}
 #endif
 
 #if defined(CONFIG_TINY_BOARD_FNK0104S)
@@ -203,4 +239,13 @@ esp_err_t board_init()
 i2c_master_bus_handle_t board_sensor_i2c_bus()
 {
     return s_bus;
+}
+
+esp_err_t board_touch_reset()
+{
+#if defined(CONFIG_TINY_BOARD_AMOLED18)
+    return amoled_touch_reset();
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
