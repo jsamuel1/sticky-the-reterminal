@@ -2,6 +2,7 @@
 #include "tiny/tiny_batt_curve.h"
 
 #include <cstdio>
+#include <climits>
 
 static int fails = 0;
 #define CHECK(name, cond) do { \
@@ -22,6 +23,18 @@ int main()
         int big[] = {2147483640, 2147483646};
         CHECK("median even: no overflow near INT_MAX",
               tiny_batt_median_mv(big, 2) == 2147483643);
+        // Full int range: b - a is 2^32 - 1, which no int holds. The host
+        // script builds with UBSan (-fno-sanitize-recover), so the old
+        // signed form aborts here instead of passing by luck.
+        int span[] = {INT_MAX, INT_MIN};
+        CHECK("median even: INT_MIN..INT_MAX, no overflow",
+              tiny_batt_median_mv(span, 2) == 0);
+        int lows[] = {INT_MIN, INT_MIN + 1};
+        CHECK("median even: near INT_MIN rounds half up",
+              tiny_batt_median_mv(lows, 2) == INT_MIN + 1);
+        int highs[] = {INT_MAX, INT_MAX};
+        CHECK("median even: INT_MAX pair",
+              tiny_batt_median_mv(highs, 2) == INT_MAX);
         int d[] = {1900, 1901, 1899, 2600, 1900};
         CHECK("median ignores one spike", tiny_batt_median_mv(d, 5) == 1900);
         CHECK("median n=0 is -1", tiny_batt_median_mv(a, 0) == -1);
@@ -108,6 +121,18 @@ int main()
         int s[] = {1};
         CHECK("n=0 -> unknown", tiny_batt_estimate(s, 0, 2).pack_mv == -1);
         CHECK("divider 0 -> unknown", tiny_batt_estimate(s, 1, 0).percent == -1);
+    }
+    {
+        // Garbage in (not ADC-shaped): x divider and the spread must not
+        // overflow either. Clamped, and never a percent.
+        int s[] = {INT_MAX, INT_MAX, INT_MAX};
+        tiny_batt_estimate_t e = tiny_batt_estimate(s, 3, 2);
+        CHECK("INT_MAX x2 clamps, implausible",
+              e.pack_mv == INT_MAX && !e.plausible && e.percent == -1);
+        int w[] = {INT_MIN, INT_MAX};
+        tiny_batt_estimate_t f = tiny_batt_estimate(w, 2, 2);
+        CHECK("INT_MIN..INT_MAX spread clamps, implausible",
+              f.spread_mv == INT_MAX && !f.plausible && f.percent == -1);
     }
 
     printf(fails ? "batt_curve: %d FAILED\n" : "batt_curve: all passed\n", fails);

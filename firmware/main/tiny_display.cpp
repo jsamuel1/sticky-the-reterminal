@@ -391,7 +391,8 @@ static int draw_glance_cluster(Canvas &c, int y) {
             o += snprintf(cluster + o, sizeof cluster - o, "%.5sZ ", ts + 11);
     }
     BatteryReading batt;
-    if (sticky_battery_read(batt) == ESP_OK && batt.percent > 0)
+    // 0% is a reading (an empty cell), not "no reading": gate on the read.
+    if (sticky_battery_read(batt) == ESP_OK)
         o += snprintf(cluster + o, sizeof cluster - o, "%d%% ", batt.percent);
     o += snprintf(cluster + o, sizeof cluster - o, tiny_wifi_is_up() ? "w+" : "w-");
     // §12 completes the cluster: unread only when there ARE any (a zero is

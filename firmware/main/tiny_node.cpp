@@ -918,7 +918,7 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     if (have_batt) cJSON_AddNumberToObject(s, "battery_pct", br.percent);
     else           cJSON_AddNullToObject(s, "battery_pct");
     // v18: pack voltage wherever it is measurable — the gauge on the
-    // reTerminal, the GPIO 9 divider on the FNK0104S. v19: on the FNK,
+    // reTerminal, the GPIO 9 divider on the FNK0104S. v20: on the FNK,
     // battery_pct above is the divider's resting-voltage estimate (null when
     // the reading is not a plausible cell); battery_mv stays the measurement.
     {
@@ -2782,36 +2782,43 @@ static void node_task(void *) {
         if (autosleep_due() && !s_crumb_inflight && !tiny_stream_playing()) {
             BatteryDetail bd = {};
             // No evidence of running on battery = wall power: stay on the
-            // relay. That is: no gauge at all; a divider that sees no
-            // plausible cell (INVALID_RESPONSE: USB only); or a divider that
-            // sees a cell but cannot tell charging (charging_known false).
+            // relay. That is: no gauge at all; a divider that answers
+            // anything but a plausible cell (USB only, or the ADC/calibration
+            // failing - either way the power state is unknown); or a divider
+            // that sees a cell but cannot tell charging (charging_known
+            // false). A BQ27220 that fails one read keeps the old behaviour
+            // (sleep: the pack is real), but bd is then unset, so the card
+            // and log say n/a instead of a fabricated 0%.
             const esp_err_t be = sticky_battery_read_detail(bd);
+            const bool divider = strcmp(bd.source, "adc") == 0;
             const bool charging =
                 !tiny_board_caps()->battery_gauge ||
-                be == ESP_ERR_INVALID_RESPONSE ||
+                (divider && be != ESP_OK) ||
                 (be == ESP_OK && (!bd.charging_known || bd.charging));
+            char pct_s[12] = "n/a";
+            if (be == ESP_OK) snprintf(pct_s, sizeof pct_s, "%d%%", bd.percent);
             tiny_config_t cfg = {};
             const bool enrolled = tiny_config_load(&cfg) == ESP_OK &&
                                   tiny_config_is_provisioned(&cfg);
             if (!charging && enrolled) {
-                ESP_LOGI(TAG, "auto-sleep: idle %s, battery %d%%, wake in %d min",
+                ESP_LOGI(TAG, "auto-sleep: idle %s, battery %s, wake in %d min",
                          tiny_lock_is_locked() ? "(locked 45s window over)"
                          : s_timer_wake        ? "(timer check-in over)"
                                                : "30 min",
-                         bd.percent, AUTOSLEEP_WAKE_SECS / 60);
+                         pct_s, AUTOSLEEP_WAKE_SECS / 60);
                 char bye[112];
                 // The locked glass holds this card for HOURS — it must
                 // teach the exit (§11: the lockout card teaches the chord),
                 // not promise "any button" to a pocket that can't use one.
                 if (tiny_lock_is_locked())
                     snprintf(bye, sizeof bye,
-                             "locked - sleeping to save battery (%d%%). "
+                             "locked - sleeping to save battery (%s). "
                              "any button wakes me; hold up+down 1s to unlock.",
-                             bd.percent);
+                             pct_s);
                 else
                     snprintf(bye, sizeof bye,
-                             "idle - sleeping to save battery (%d%%). any button wakes me.",
-                             bd.percent);
+                             "idle - sleeping to save battery (%s). any button wakes me.",
+                             pct_s);
                 char card[320];
                 snprintf(card, sizeof card,
                          "{\"type\":\"text\",\"title\":\"zzz\",\"card_id\":\"sleep\","

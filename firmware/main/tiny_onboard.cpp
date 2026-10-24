@@ -166,7 +166,7 @@ static esp_err_t render_welcome(void) {
     char body[200];
     int pct = -1;
     BatteryReading batt = {};
-    if (sticky_battery_read(batt) == ESP_OK && batt.percent > 0) pct = batt.percent;
+    if (sticky_battery_read(batt) == ESP_OK) pct = batt.percent;  // 0% is real
     snprintf(body, sizeof body,
              "I'm the e-ink body of your tiny. Three short steps and I'm yours: "
              "Wi-Fi, pairing, a 20-second tour.%s%d%%%s",
