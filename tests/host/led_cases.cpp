@@ -1,10 +1,12 @@
-// led host test — walks tiny_led_state.h, the SHIPPED decision table for the
-// FNK0104S status light: precedence, lock/sleep darkness, error expiry, and
-// brightness scaling.
+// led host test — walks tiny_led_state.h, the SHIPPED decision table and
+// state transitions for the FNK0104S status light: precedence, lock/sleep
+// darkness, error expiry, brightness scaling, and the frame sequence each
+// real flow (voice ask, text ask, failed capture, miccheck) latches.
 #include "tiny/tiny_led_state.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 static int fails = 0;
 #define CHECK(cond)                                                       \
@@ -20,10 +22,23 @@ static bool eq(tiny_led_rgb_t a, tiny_led_rgb_t b) {
     return a.r == b.r && a.g == b.g && a.b == b.b;
 }
 
+// Models tiny_led.cpp's apply_locked: one resolve per transition, and a write
+// only when the colour changes. `frames` is what the WS2812 latches.
+struct Light {
+    tiny_led_inputs_t in = {};
+    std::vector<tiny_led_rgb_t> frames;
+    int64_t now = 10'000'000;
+    void apply() {
+        const tiny_led_rgb_t c = tiny_led_resolve(&in, now, 255);
+        if (frames.empty() || !eq(frames.back(), c)) frames.push_back(c);
+    }
+};
+
 int main() {
     const tiny_led_rgb_t blue = TINY_LED_RGB_LISTENING;
     const tiny_led_rgb_t amber = TINY_LED_RGB_THINKING;
     const tiny_led_rgb_t red = TINY_LED_RGB_ERROR;
+    const tiny_led_rgb_t off = {0, 0, 0};
     const int64_t now = 10'000'000;
 
     // Idle: off.
@@ -31,14 +46,21 @@ int main() {
     CHECK(dark(tiny_led_resolve(&in, now, 255)));
     CHECK(dark(tiny_led_resolve(nullptr, now, 255)));
 
-    // Each activity at full scale shows its colour exactly.
-    in.activity = TINY_LED_LISTENING;
+    // Each owner at full scale shows its colour exactly.
+    in.capturing = true;
     CHECK(eq(tiny_led_resolve(&in, now, 255), blue));
-    in.activity = TINY_LED_THINKING;
+    in.capturing = false;
+    in.ask = TINY_LED_ASK_THINKING;
     CHECK(eq(tiny_led_resolve(&in, now, 255), amber));
+    in.ask = TINY_LED_ASK_PENDING;  // armed, capture not started: dark
+    CHECK(dark(tiny_led_resolve(&in, now, 255)));
+    in.capturing = true;            // capture outranks any ask state
+    CHECK(eq(tiny_led_resolve(&in, now, 255), blue));
+    in.ask = TINY_LED_ASK_THINKING;
+    CHECK(eq(tiny_led_resolve(&in, now, 255), blue));
 
     // Error: red until error_until_us, then off.
-    in.activity = TINY_LED_IDLE;
+    in = {};
     in.error_until_us = now + 1;
     CHECK(eq(tiny_led_resolve(&in, now, 255), red));
     CHECK(dark(tiny_led_resolve(&in, now + 1, 255)));  // expiry is exclusive
@@ -46,39 +68,127 @@ int main() {
 
     // Live activity outranks a stale error.
     in.error_until_us = now + 1'000'000;
-    in.activity = TINY_LED_LISTENING;
+    in.capturing = true;
     CHECK(eq(tiny_led_resolve(&in, now, 255), blue));
-    in.activity = TINY_LED_THINKING;
+    in.capturing = false;
+    in.ask = TINY_LED_ASK_THINKING;
     CHECK(eq(tiny_led_resolve(&in, now, 255), amber));
 
     // §11: locked or asleep is dark whatever else is true.
-    const tiny_led_activity_t acts[] = {TINY_LED_IDLE, TINY_LED_LISTENING,
-                                        TINY_LED_THINKING};
-    for (tiny_led_activity_t a : acts) {
-        for (int lock = 0; lock < 2; ++lock)
-            for (int sleep = 0; sleep < 2; ++sleep) {
-                if (!lock && !sleep) continue;
-                tiny_led_inputs_t x = {};
-                x.activity = a;
-                x.error_until_us = now + 1'000'000;
-                x.locked = lock;
-                x.asleep = sleep;
-                CHECK(dark(tiny_led_resolve(&x, now, 255)));
-                CHECK(dark(tiny_led_resolve(&x, now, 12)));
-            }
+    const tiny_led_ask_t asks[] = {TINY_LED_ASK_IDLE, TINY_LED_ASK_PENDING,
+                                   TINY_LED_ASK_THINKING};
+    for (tiny_led_ask_t a : asks)
+        for (int cap = 0; cap < 2; ++cap)
+            for (int lock = 0; lock < 2; ++lock)
+                for (int sleep = 0; sleep < 2; ++sleep) {
+                    if (!lock && !sleep) continue;
+                    tiny_led_inputs_t x = {};
+                    x.capturing = cap;
+                    x.ask = a;
+                    x.error_until_us = now + 1'000'000;
+                    x.locked = lock;
+                    x.asleep = sleep;
+                    CHECK(dark(tiny_led_resolve(&x, now, 255)));
+                    CHECK(dark(tiny_led_resolve(&x, now, 12)));
+                }
+
+    // --- transitions -------------------------------------------------------
+
+    // Voice ask, capture OK: off -> blue -> amber -> off. No black frame
+    // between blue and amber (the capture's end hands over in one step).
+    {
+        Light l;
+        l.apply();                                         // boot: black
+        tiny_led_on_ask(&l.in, TINY_LED_ASK_PENDING); l.apply();
+        tiny_led_on_capture_begin(&l.in);             l.apply();
+        tiny_led_on_capture_end(&l.in, true);         l.apply();
+        tiny_led_on_ask(&l.in, TINY_LED_ASK_IDLE);    l.apply();
+        CHECK(l.frames.size() == 4);
+        if (l.frames.size() == 4) {
+            CHECK(eq(l.frames[0], off));
+            CHECK(eq(l.frames[1], blue));
+            CHECK(eq(l.frames[2], amber));
+            CHECK(eq(l.frames[3], off));
+        }
     }
 
-    // Brightness: zero is dark; low settings stay lit on every lit channel,
-    // keep unlit channels at zero, and never exceed the setting.
+    // Voice ask, upload refused: blue -> amber -> red -> off on expiry.
+    {
+        Light l;
+        l.apply();
+        tiny_led_on_ask(&l.in, TINY_LED_ASK_PENDING); l.apply();
+        tiny_led_on_capture_begin(&l.in);             l.apply();
+        tiny_led_on_capture_end(&l.in, true);         l.apply();
+        tiny_led_on_error(&l.in, l.now + 5'000'000);  l.apply();
+        CHECK(l.in.ask == TINY_LED_ASK_IDLE);
+        tiny_led_on_ask(&l.in, TINY_LED_ASK_IDLE);    l.apply();  // LedGuard
+        CHECK(eq(l.frames.back(), red));  // guard's IDLE leaves the red alone
+        CHECK(l.in.error_until_us != 0);
+        l.now += 5'000'000;                           l.apply();  // timer
+        CHECK(l.frames.size() == 5);
+        if (l.frames.size() == 5) {
+            CHECK(eq(l.frames[1], blue));
+            CHECK(eq(l.frames[2], amber));
+            CHECK(eq(l.frames[3], red));
+            CHECK(eq(l.frames[4], off));
+        }
+    }
+
+    // Capture fails: blue -> off (pending stays dark) -> red. Never amber.
+    {
+        Light l;
+        l.apply();
+        tiny_led_on_ask(&l.in, TINY_LED_ASK_PENDING); l.apply();
+        tiny_led_on_capture_begin(&l.in);             l.apply();
+        tiny_led_on_capture_end(&l.in, false);        l.apply();
+        CHECK(l.in.ask == TINY_LED_ASK_PENDING);
+        tiny_led_on_error(&l.in, l.now + 5'000'000);  l.apply();
+        for (const tiny_led_rgb_t &f : l.frames) CHECK(!eq(f, amber));
+        CHECK(eq(l.frames.back(), red));
+    }
+
+    // Text ask: amber -> off, and it clears a showing error (returns true so
+    // the caller stops the expiry timer). IDLE never clears one.
+    {
+        tiny_led_inputs_t x = {};
+        x.error_until_us = now + 1'000'000;
+        CHECK(!tiny_led_on_ask(&x, TINY_LED_ASK_IDLE));
+        CHECK(x.error_until_us != 0);
+        CHECK(tiny_led_on_ask(&x, TINY_LED_ASK_THINKING));
+        CHECK(x.error_until_us == 0);
+        CHECK(eq(tiny_led_resolve(&x, now, 255), amber));
+        CHECK(!tiny_led_on_ask(&x, TINY_LED_ASK_THINKING));  // nothing to clear
+    }
+
+    // miccheck (capture, no ask): blue -> off, and an OK end does not invent
+    // amber. A new capture clears a showing error.
+    {
+        Light l;
+        l.in.error_until_us = l.now + 1'000'000;
+        l.apply();
+        CHECK(eq(l.frames.back(), red));
+        tiny_led_on_capture_begin(&l.in);             l.apply();
+        CHECK(l.in.error_until_us == 0);
+        tiny_led_on_capture_end(&l.in, true);         l.apply();
+        CHECK(l.in.ask == TINY_LED_ASK_IDLE);
+        CHECK(l.frames.size() == 3);
+        if (l.frames.size() == 3) {
+            CHECK(eq(l.frames[1], blue));
+            CHECK(eq(l.frames[2], off));
+        }
+    }
+
+    // --- brightness --------------------------------------------------------
+    // Zero is dark; low settings stay lit on every lit channel, keep unlit
+    // channels at zero, and never exceed the setting.
     in = {};
-    in.activity = TINY_LED_THINKING;
+    in.ask = TINY_LED_ASK_THINKING;
     CHECK(dark(tiny_led_resolve(&in, now, 0)));
     for (unsigned b = 1; b <= 64; ++b) {
-        const tiny_led_inputs_t ins[] = {
-            {TINY_LED_LISTENING, 0, false, false},
-            {TINY_LED_THINKING, 0, false, false},
-            {TINY_LED_IDLE, now + 1, false, false},
-        };
+        tiny_led_inputs_t ins[3] = {};
+        ins[0].capturing = true;
+        ins[1].ask = TINY_LED_ASK_THINKING;
+        ins[2].error_until_us = now + 1;
         const tiny_led_rgb_t full[] = {blue, amber, red};
         for (int i = 0; i < 3; ++i) {
             const tiny_led_rgb_t c = tiny_led_resolve(&ins[i], now, (uint8_t)b);
