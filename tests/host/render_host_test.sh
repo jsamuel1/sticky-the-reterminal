@@ -15,7 +15,7 @@ for f in qrcodegen esp_qrcode_main esp_qrcode_wrapper; do
     cc -std=c11 -O1 -w -I render_shim -I third_party/qrcodegen \
         -include stdlib.h -c third_party/qrcodegen/$f.c -o /tmp/render_$f.o
 done
-c++ -std=c++17 -O1 -Wall -Werror -Wno-unused-function -Wno-nonnull \
+c++ -std=c++17 -O1 -Wall -Werror -Wno-unused-function -Wno-nonnull -pthread \
     -include render_shim/render_shim.h \
     -I render_shim -I third_party/cjson -I third_party/qrcodegen \
     -I ../../firmware/main \

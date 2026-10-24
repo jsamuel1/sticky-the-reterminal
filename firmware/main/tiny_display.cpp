@@ -57,11 +57,8 @@
 
 static const char *TAG = "tiny_display";
 
-// ---- display ownership ------------------------------------------------------
-// THREE tasks call render_card: tiny_node (relay verbs), voice_ask (button ask),
-// and the main task's serial card console. The Canvas and the SPI panel are a
-// single resource; concurrent renders corrupt the framebuffer. Every path that
-// draws or refreshes takes this mutex (audit DISPLAY P0-1).
+// Panel ownership: canvas drawing, display IO and brightness share one physical
+// resource. Network fetches deliberately happen outside this mutex.
 static SemaphoreHandle_t s_display_mux = NULL;
 
 static void display_lock(void) {
@@ -72,6 +69,28 @@ static void display_lock(void) {
 static void display_unlock(void) {
     if (s_display_mux) xSemaphoreGive(s_display_mux);
 }
+
+// Render-state ownership: card cache and rotation form one transaction across
+// parse/fetch/draw/panel commit. Calls nest by design (rotate -> rerender ->
+// render; gallery/universe -> render), so this lock is recursive. Keeping it
+// separate lets slow HTTPS fetches release the panel mutex.
+static SemaphoreHandle_t s_render_mux = NULL;
+
+static void render_lock(void) {
+    if (!s_render_mux) s_render_mux = xSemaphoreCreateRecursiveMutex();
+    if (s_render_mux) xSemaphoreTakeRecursive(s_render_mux, portMAX_DELAY);
+}
+
+static void render_unlock(void) {
+    if (s_render_mux) xSemaphoreGiveRecursive(s_render_mux);
+}
+
+struct RenderGuard {
+    RenderGuard() { render_lock(); }
+    ~RenderGuard() { render_unlock(); }
+    RenderGuard(const RenderGuard &) = delete;
+    RenderGuard &operator=(const RenderGuard &) = delete;
+};
 
 // ---- colour accents (grammar v16) ---------------------------------------
 // A colour board's canvas carries an accent plane (canvas.h): every pixel
@@ -483,7 +502,11 @@ static int s_staged_count = 0;
 // exactly the "it does not follow my body" feeling we are removing.
 static CanvasRotation s_rot = CanvasRotation::Landscape;
 static char *s_card_cache = nullptr;      // heap (PSRAM if available)
+static bool s_card_cache_panel_native = false;  // image/gallery: no layout turn
 static bool s_rerendering = false;        // guards rotate -> render -> rotate
+// Bumped by each new card/page request under s_render_mux. Network-backed
+// renders release that mutex while fetching and commit only if still newest.
+static uint32_t s_render_epoch = 0;
 static bool s_glance_partial = false;     // §12 glance strip -> partial refresh
 static bool s_draw_only = false;          // §12 wake: render without refresh
 static bool s_wake_partial_pending = false;  // next commit = diff-partial
@@ -714,6 +737,7 @@ extern "C" int tiny_display_brightness(void) { return sticky_display_brightness(
 // ---- orientation ------------------------------------------------------------
 // Degrees are the human unit (0/90/180/270) and clockwise as the device turns.
 extern "C" int tiny_display_rotation(void) {
+    RenderGuard guard;
     return static_cast<int>(s_rot) * 90;
 }
 
@@ -739,10 +763,12 @@ static uint8_t *s_wake_baseline = nullptr;  // gray4 canvas-format, PSRAM
 RTC_DATA_ATTR static char s_rtc_goodbye[160];
 RTC_DATA_ATTR static int  s_rtc_sleep_rot = -1;
 extern "C" void tiny_display_note_sleep_card(const char *body) {
+    RenderGuard guard;
     strlcpy(s_rtc_goodbye, body ? body : "", sizeof s_rtc_goodbye);
     s_rtc_sleep_rot = static_cast<int>(s_rot);
 }
 extern "C" esp_err_t tiny_display_arm_wake_baseline(void) {
+    RenderGuard guard;
     // No note (cold boot / power loss / pre-0.18.4 sleep) = no baseline =
     // the caller falls back to the honest full flash.
     if (!s_rtc_goodbye[0] || s_rtc_sleep_rot < 0) return ESP_ERR_INVALID_STATE;
@@ -779,6 +805,7 @@ extern "C" esp_err_t tiny_display_arm_wake_baseline(void) {
 }
 
 extern "C" esp_err_t tiny_display_glance(void) {
+    RenderGuard guard;
     if (!s_card_cache) return ESP_ERR_INVALID_STATE;
     s_glance_partial = true;
     const esp_err_t err = tiny_display_rerender();
@@ -787,7 +814,12 @@ extern "C" esp_err_t tiny_display_glance(void) {
 }
 
 extern "C" esp_err_t tiny_display_rerender(void) {
+    RenderGuard guard;
     if (!s_card_cache) return ESP_ERR_INVALID_STATE;
+    // Hosted images/gallery frames are panel-native bytes, not card-layout
+    // coordinates. Re-fetching cannot rotate them and would add network to an
+    // IMU commit; retain those pixels and apply s_rot to the next drawn card.
+    if (s_card_cache_panel_native) return ESP_OK;
     s_rerendering = true;   // render_card must not free the string it is reading
     const esp_err_t err = tiny_display_render_card(s_card_cache);
     s_rerendering = false;
@@ -795,6 +827,7 @@ extern "C" esp_err_t tiny_display_rerender(void) {
 }
 
 extern "C" esp_err_t tiny_display_set_rotation(int degrees) {
+    RenderGuard guard;
     const int d = ((degrees % 360) + 360) % 360;
     if (d % 90) return ESP_ERR_INVALID_ARG;
     const CanvasRotation r = static_cast<CanvasRotation>(d / 90);
@@ -802,6 +835,7 @@ extern "C" esp_err_t tiny_display_set_rotation(int degrees) {
                                      // it to redraw an identical picture
     const CanvasRotation previous = s_rot;
     s_rot = r;
+    ++s_render_epoch;  // invalidate any older network-backed render
     esp_err_t err = tiny_display_rerender();
     if (err == ESP_ERR_INVALID_STATE) {
         // Nothing cached yet (fresh boot, splash, raw blit). Leaving the old
@@ -1853,6 +1887,7 @@ extern "C" esp_err_t tiny_display_init(void) {
     }
     apply_layout_profile(s_pw, s_ph);
     if (!s_display_mux) s_display_mux = xSemaphoreCreateMutex();
+    if (!s_render_mux) s_render_mux = xSemaphoreCreateRecursiveMutex();
     if (!s_region_mux) s_region_mux = xSemaphoreCreateMutex();
     if (!s_ack_q) {
         s_ack_q = xQueueCreate(2, sizeof(AckReq));
@@ -1969,13 +2004,22 @@ static void photos_sd_save(const char *url, const uint8_t *buf, size_t len) {
     ESP_LOGI(TAG, "photos sd: archived %05d.raw (%u B)", seq, (unsigned)len);
 }
 
-static esp_err_t render_image_card(cJSON *root) {
+static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch) {
     Canvas *c = sticky_display_canvas();
     const cJSON *ju = cJSON_GetObjectItem(root, "url");
     if (!c || !cJSON_IsString(ju)) return ESP_ERR_INVALID_ARG;
     uint8_t *buf = nullptr; size_t len = 0;
-    esp_err_t err = tiny_display_fetch_raw(ju->valuestring, &buf, &len);  // network: NO lock held
+    // The caller owns one render-lock level. Release it around HTTPS so a new
+    // card can overtake a stalled media request; epoch check prevents stale IO
+    // from painting afterward. Panel lock remains separate and shorter-lived.
+    render_unlock();
+    esp_err_t err = tiny_display_fetch_raw(ju->valuestring, &buf, &len);
+    render_lock();
     if (err != ESP_OK) return err;
+    if (render_epoch != s_render_epoch) {
+        heap_caps_free(buf);
+        return ESP_ERR_INVALID_STATE;
+    }
     photos_sd_save(ju->valuestring, buf, len);  // archive before the canvas eats it
     display_lock();
     blit_raw_locked(c, buf, len);
@@ -1983,7 +2027,10 @@ static esp_err_t render_image_card(cJSON *root) {
     err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
     s_staged_count = 0;                  // an image has no buttons
-    if (err == ESP_OK) publish_regions("image");
+    if (err == ESP_OK) {
+        strlcpy(s_card_type, "image", sizeof s_card_type);
+        publish_regions("image");
+    }
     display_unlock();
     return err;
 }
@@ -2163,6 +2210,7 @@ static void gal_lazy_load(void) {
 }
 
 extern "C" int tiny_display_gallery_count(void) {
+    RenderGuard guard;
     gal_lazy_load();
     return s_gal_count;
 }
@@ -2170,7 +2218,7 @@ extern "C" int tiny_display_gallery_count(void) {
 // dir: -1/+1 page (wraps), 0 = reopen current. Fetches OUTSIDE the display
 // lock like every other network path. Empty set → INVALID_STATE (callers
 // show the friendly card; this layer never invents one).
-extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
+static esp_err_t gallery_nav_locked(int dir, uint32_t render_epoch) {
     gal_lazy_load();
     if (s_gal_count <= 0) return ESP_ERR_INVALID_STATE;
     int idx = (s_gal_index + dir) % s_gal_count;
@@ -2188,8 +2236,16 @@ extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
     } else if ((buf = gal_sd_read(idx, &len)) != nullptr) {
         gal_cache_put(idx, buf, len);  // cache takes ownership
     } else {
-        err = tiny_display_fetch_raw(s_gal_urls[idx], &buf, &len);
+        char url[sizeof s_gal_urls[0]];
+        strlcpy(url, s_gal_urls[idx], sizeof url);
+        render_unlock();
+        err = tiny_display_fetch_raw(url, &buf, &len);
+        render_lock();
         if (err != ESP_OK) return err;  // no RAM, no disk, no net: honest miss
+        if (render_epoch != s_render_epoch) {
+            heap_caps_free(buf);
+            return ESP_ERR_INVALID_STATE;
+        }
         gal_sd_write(idx, buf, len);   // download-once (before cache owns it)
         gal_cache_put(idx, buf, len);  // cache takes ownership
     }
@@ -2218,13 +2274,20 @@ extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
     stage_region(0, 0, 88, 88, "home", "home");
     stage_region(0, 100, 120, s_ph - 100, "prev", "g:prev");
     stage_region(s_pw - 120, 100, 120, s_ph - 100, "next", "g:next");
-    strlcpy(s_card_id, "gallery", sizeof s_card_id);
-    strlcpy(s_card_type, "gallery", sizeof s_card_type);
     err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
-    if (err == ESP_OK) publish_regions("gallery");
+    if (err == ESP_OK) {
+        strlcpy(s_card_type, "gallery", sizeof s_card_type);
+        publish_regions("gallery");
+    }
     display_unlock();
     return err;
+}
+
+extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
+    RenderGuard guard;
+    const uint32_t render_epoch = ++s_render_epoch;
+    return gallery_nav_locked(dir, render_epoch);
 }
 
 static esp_err_t render_gallery_card(cJSON *root) {
@@ -2247,7 +2310,7 @@ static esp_err_t render_gallery_card(cJSON *root) {
     // lost the owner's page and poisoned the saved one (0.25.9 field bug).
     if (s_rerendering && n == s_gal_count) {
         s_gal_index = (s_gal_index < n) ? s_gal_index : 0;
-        return tiny_display_gallery_nav(0);
+        return gallery_nav_locked(0, s_render_epoch);
     }
     gal_cache_clear();  // new set = new index space, stale frames lie
     gal_sd_reset(s_gal_urls, n);  // card mirrors the rule: stale NNN.raw lie too
@@ -2264,13 +2327,31 @@ static esp_err_t render_gallery_card(cJSON *root) {
     if (perr != ESP_OK)
         ESP_LOGW(TAG, "gallery manifest NVS save failed: %s (set is RAM-only "
                       "this boot)", esp_err_to_name(perr));
-    return tiny_display_gallery_nav(0);
+    return gallery_nav_locked(0, s_render_epoch);
 }
+
+struct PendingCardCache {
+    char *copy = nullptr;
+    bool replace = false;
+    bool panel_native = false;
+
+    ~PendingCardCache() { free(copy); }
+
+    void publish() {
+        if (!replace || !copy) return;  // preserve prior cache if allocation failed
+        char *old = s_card_cache;
+        s_card_cache = copy;
+        copy = nullptr;
+        s_card_cache_panel_native = panel_native;
+        free(old);
+    }
+};
 
 extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     if (!card_json) return ESP_ERR_INVALID_ARG;
     Canvas *c = sticky_display_canvas();
     if (!c) return ESP_ERR_INVALID_STATE;
+    RenderGuard guard;
 
     // A relay envelope (or any other card) outranks the typer: an active
     // stream ends silently rather than fighting the new card for the glass.
@@ -2285,19 +2366,26 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
                  cJSON_GetErrorPtr() ? cJSON_GetErrorPtr() : "?");
         return ESP_ERR_INVALID_ARG;
     }
+    const uint32_t render_epoch = s_rerendering
+                                      ? s_render_epoch
+                                      : ++s_render_epoch;
 
-    // Keep the spec that produced what is on the glass, so a rotation (or any
-    // other re-layout) can redraw it without asking the network again. Skipped
-    // when we ARE the re-render, or we would free the string we are reading.
+    // Stage the cache replacement until the panel commit succeeds. A failed or
+    // overtaken image fetch must not replace the replay source for glass that
+    // still shows the previous card.
+    PendingCardCache pending;
     if (!s_rerendering) {
+        pending.replace = true;
         const size_t n = strlen(card_json) + 1;
-        char *copy = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
-        if (!copy) copy = (char *)malloc(n);
-        if (copy) {
-            memcpy(copy, card_json, n);
-            char *old_copy = s_card_cache;
-            s_card_cache = copy;
-            free(old_copy);
+        pending.copy = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+        if (!pending.copy) pending.copy = (char *)malloc(n);
+        if (pending.copy) {
+            memcpy(pending.copy, card_json, n);
+            const cJSON *cache_type = cJSON_GetObjectItem(root, "type");
+            pending.panel_native =
+                cJSON_IsString(cache_type) &&
+                (strcmp(cache_type->valuestring, "image") == 0 ||
+                 strcmp(cache_type->valuestring, "gallery") == 0);
         } else {
             ESP_LOGW(TAG, "could not cache %u B card - rotation will not redraw"
                           " this one", (unsigned)n);
@@ -2319,15 +2407,13 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
         }
         if (cJSON_IsString(jt) && strcmp(jt->valuestring, "gallery") == 0) {
             esp_err_t gerr = render_gallery_card(root);
+            if (gerr == ESP_OK) pending.publish();
             cJSON_Delete(root);
             return gerr;
         }
         if (cJSON_IsString(jt) && strcmp(jt->valuestring, "image") == 0) {
-            const cJSON *jc = cJSON_GetObjectItem(root, "card_id");
-            strlcpy(s_card_id, cJSON_IsString(jc) ? jc->valuestring : "image",
-                    sizeof s_card_id);
-            strlcpy(s_card_type, "image", sizeof s_card_type);
-            esp_err_t ierr = render_image_card(root);
+            esp_err_t ierr = render_image_card(root, render_epoch);
+            if (ierr == ESP_OK) pending.publish();
             cJSON_Delete(root);
             return ierr;
         }
@@ -2368,8 +2454,9 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
         title_s = titled;
     }
 
-    // One writer at a time: the relay task, the voice_ask task and the serial
-    // card console all land here, and canvas+panel are a single resource.
+    // One writer at a time: relay, voice/button, orientation and serial tasks
+    // share render state under RenderGuard. The shorter panel lock below owns
+    // only canvas drawing and physical commit.
     display_lock();
 
     // Rotation is applied here, once per render: the layout helpers below all
@@ -2470,7 +2557,6 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     // full 1-2s mono wipe. First render of the keyboard is still full. A
     // scroll step takes the same fast path — paging a body is typing-
     // cadence, not new-card cadence.
-    strlcpy(s_card_type, type_s, sizeof s_card_type);
     const bool kb_rerender = strcmp(type_s, "keyboard") == 0 &&
                              strcmp(s_card_id, cid_s) == 0 && cid_s[0];
     // FINDING 3 (check 23): partial refresh is a COMPARISON against the last
@@ -2509,6 +2595,8 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     // draw time made taps in the ~2s refresh window resolve against a layout
     // that was not on the glass yet.
     if (err == ESP_OK) {
+        pending.publish();
+        strlcpy(s_card_type, type_s, sizeof s_card_type);
         publish_regions(cid_s);
     } else {
         ESP_LOGW(TAG, "refresh failed (%s) — keeping previous tap regions",
@@ -2632,17 +2720,20 @@ extern "C" esp_err_t tiny_display_snapshot_index8(uint8_t **out, size_t *out_len
 // republish and the honesty rules without any new drawing code.
 
 extern "C" bool tiny_display_can_scroll(void) {
+    RenderGuard guard;
     return s_card_cache && s_content_h > (s_body_bot - s_body_top);
 }
 
 extern "C" void tiny_display_scroll_state(int *offset, int *content_h,
                                           int *view_h) {
+    RenderGuard guard;
     if (offset) *offset = s_scroll;
     if (content_h) *content_h = s_content_h;
     if (view_h) *view_h = s_body_bot - s_body_top;
 }
 
 extern "C" esp_err_t tiny_display_scroll(int delta_px) {
+    RenderGuard guard;
     if (!s_card_cache) return ESP_ERR_INVALID_STATE;
     const int view_h = s_body_bot - s_body_top;
     const int max_scroll = s_content_h - view_h;
@@ -2661,6 +2752,7 @@ extern "C" esp_err_t tiny_display_scroll(int delta_px) {
 }
 
 extern "C" esp_err_t tiny_display_scroll_page(int dir) {
+    RenderGuard guard;
     if (!tiny_display_can_scroll()) return ESP_ERR_INVALID_STATE;
     // 2/3 of the view per step keeps a reading anchor across the flip.
     const int step = std::max(48, (s_body_bot - s_body_top) * 2 / 3);
@@ -2683,8 +2775,24 @@ extern "C" const char *tiny_display_last_gesture(void) { return s_gesture; }
 
 extern "C" esp_err_t tiny_display_scroll_gesture(int px0, int py0,
                                                  int px1, int py1) {
+    // Snapshot geometry/mode under render ownership, then release before
+    // routing. Shell callbacks can fetch gallery media or render another card;
+    // holding this lock across them would defeat network overtaking.
+    render_lock();
     Canvas *c = sticky_display_canvas();
-    if (!c) { set_gesture("refused: no canvas"); return ESP_ERR_INVALID_STATE; }
+    if (!c) {
+        render_unlock();
+        set_gesture("refused: no canvas");
+        return ESP_ERR_INVALID_STATE;
+    }
+    const bool stream_on = s_stream_on;
+    int lx0, ly0, lx1, ly1;
+    c->to_logical(px0, py0, lx0, ly0);
+    c->to_logical(px1, py1, lx1, ly1);
+    const int logical_h = c->height();
+    const bool kb = strcmp(s_card_type, "keyboard") == 0;
+    render_unlock();
+
     // D-UX1: this function is the GESTURE ROUTER (UX_SPEC §2) and it owns ALL
     // gesture feedback — the caller must not beep, or every accept would sound
     // twice. Vocabulary (§0): single blip = accepted, double = recognized but
@@ -2694,25 +2802,21 @@ extern "C" esp_err_t tiny_display_scroll_gesture(int px0, int py0,
     // Every gesture is acknowledged with one blip and DISCARDED — deferring is
     // predictable because a stream is bounded; the one exit is the physical
     // long-press-AI abort, which must work through fabric.
-    if (s_stream_on) {
+    if (stream_on) {
         set_gesture("discarded: stream owns the display");
         sticky_buzzer_beep();
         return ESP_OK;
     }
-    // Touch reports PANEL coordinates; the picture may be rotated. Map both
-    // endpoints to logical space so "finger moved toward the title" means
-    // "scroll up" whichever way the body is turned.
-    int lx0, ly0, lx1, ly1;
-    c->to_logical(px0, py0, lx0, ly0);
-    c->to_logical(px1, py1, lx1, ly1);
+    // Touch reports PANEL coordinates; the picture may be rotated. The
+    // snapshot above maps both endpoints while rotation is stable, so "finger
+    // moved toward the title" keeps its meaning whichever way the body turns.
     const int dx = lx1 - lx0, dy = ly1 - ly0;
-    const bool kb = strcmp(s_card_type, "keyboard") == 0;
     // Edge bands (§1: travel >=120 dominant axis, >=2x dominance; bands are
     // LAYOUT-space: last 56 rows / first 48 columns of the current rotation).
     // Edge-origin marks NAV intent — one spatial rule, no modes. The accept
     // blip fires BEFORE the render: on e-ink the ack must be FELT before it
     // can be seen (§0), and home/back block seconds on the panel.
-    if (ly0 >= (int)c->height() - 56 && -dy >= 120 && -dy >= 2 * std::abs(dx)) {
+    if (ly0 >= logical_h - 56 && -dy >= 120 && -dy >= 2 * std::abs(dx)) {
         sticky_buzzer_beep();
         // Keyboard: bottom-band-up = CANCEL, don't save (§2) — routed through
         // the key handler so each composer purpose keeps its own exit path
