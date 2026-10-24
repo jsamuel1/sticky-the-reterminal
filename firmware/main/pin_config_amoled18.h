@@ -6,9 +6,17 @@
 // waveshare/esp32_s3_touch_amoled_1_8 2.0.3 + the Arduino pin_config.h) and
 // must be confirmed on hardware. Driven so far: BOOT button, the shared I2C
 // bus, the TCA9554 expander, the CO5300 panel (lcd_panel_co5300.cpp), the
-// ES8311 codec and the CST820 touch (tiny_touch.cpp).
+// ES8311 codec, the CST820 touch (tiny_touch.cpp), the AXP2101 (battery,
+// USB, PWR key) and the PCF85063A RTC.
 
-// Buttons: BOOT is OK/AI. The PWR key is an AXP2101 event (not wired yet).
+// Real drivers this board builds in place of hal_absent.cpp's stubs.
+#define HAL_PMU_AXP2101     1   // sticky_pmu_axp2101.cpp
+#define HAL_RTC_PCF85063    1   // sticky_rtc_pcf85063.cpp
+
+// Buttons: BOOT is OK/AI. The PWR key is not a GPIO: it is an AXP2101
+// interrupt whose IRQ line goes to TCA9554 P5 (vendor Arduino example 12
+// reads expander pin 5; example 90's sdkconfig sets the PMU IRQ GPIO to -1).
+// tiny_button polls the PMU's latched key status instead (sticky_pmu.h).
 #define PIN_BTN_OK          0
 #define PIN_BTN_UP          (-1)
 #define PIN_BTN_DOWN        (-1)
@@ -28,6 +36,7 @@
 #define TCA_BIT_LCD_RST     0
 #define TCA_BIT_DSI_PWR_EN  1
 #define TCA_BIT_TOUCH_RST   2
+#define TCA_BIT_PMU_IRQ     5   // input: AXP2101 IRQ (unused, polled instead)
 #define TCA_BIT_SD_CS       7
 
 // CO5300 QSPI panel. No reset/backlight GPIO (reset is TCA bit 0; brightness

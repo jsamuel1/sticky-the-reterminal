@@ -75,6 +75,13 @@ tests/run.sh                                 # host tests: askq, bootmark, sleep
   USB-Serial-JTAG, and accept `ota` only for images stamped with their own
   board id (see §10b). Shared
   `tiny_*` code takes no board `#if` beyond touch/audio/buttons/console.
+  A colour board that drives a part hal_absent.cpp stubs defines `HAL_*` in
+  its pin_config (AMOLED: `HAL_PMU_AXP2101`, `HAL_RTC_PCF85063`).
+
+- AMOLED-1.8 power: the AXP2101 powers the SoC and the panel and there is no
+  schematic, so `sticky_pmu_axp2101.cpp` never writes a DCDC/LDO register —
+  it logs them at boot. The PWR key is an AXP2101 IRQ wired to TCA9554 P5,
+  not a GPIO; `tiny_button` polls INTSTS2 (short = next page, long = sleep).
 
 - Colour: every board draws into the same 2-bit gray `Canvas`. Colour panels
   (`lcd_canvas.cpp`) attach a 4-bit accent plane beside it; the renderer sets
@@ -143,8 +150,8 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 | `tiny_orient` | IMU classify → auto-rotate (1 Hz e-ink; 300 ms AMOLED; 3 agreeing samples) · per-board axis tables in `tiny/tiny_orient_map.h` (host-tested) · feeds lock's walk detector at 1 Hz |
 | `tiny_audio` | PDM 16 kHz WAV into PSRAM (cap 15 s) · re-claims GPIO19/20 from USB-JTAG before every capture (deep-sleep wake mutes the mic otherwise) · buzzer LEDC GPIO48, silent/soft tiers |
 | `tiny_upload` / `tiny_screenshot` | `POST /api/media` (PSRAM buffer) · framebuffer → 2-bit PNG → URL |
-| `tiny_sensors` | live on-demand reads: SHT40, LSM6DS3TR-C, PCF8563, plus battery from BQ27220 or FNK GPIO 9 ADC · ADC burst cached 1 s so status/glass agree · nulls never fabricated |
-| `tiny_time` | RTC→system at boot, SNTP→system→RTC on Wi-Fi; `clock_source` names itself |
+| `tiny_sensors` | live on-demand reads: SHT40, LSM6DS3TR-C, PCF8563, plus battery from BQ27220 or FNK GPIO 9 ADC (AMOLED: QMI8658, PCF85063A, AXP2101) · ADC burst cached 1 s so status/glass agree · nulls never fabricated |
+| `tiny_time` | RTC→system at boot (`tiny_main` attaches the RTC first), SNTP→system→RTC on Wi-Fi; `clock_source` names itself |
 | `tiny_wifi` | STA join + roaming `networks[]` walk · 30 s re-roam task · per-walk failure log (boot "confession" card on wrong password) |
 | `tiny_config` | NVS namespace `tiny`, key `cfg`: ONE JSON blob {device_id, token, api, name, networks[]} · `merge_json` is the single owner of merge semantics (portal, serial, `config` verb all funnel here) |
 | `tiny_provision` | softAP `tiny-XXXX` / `tinysetup` / 192.168.4.1 · `GET /` form · `GET /info` · `POST /setup` (JSON from the iOS app, or urlencoded from a human) → merge → reboot · also the **rescue portal** (APSTA) after auth-halt |

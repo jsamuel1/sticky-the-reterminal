@@ -15,6 +15,10 @@ void      tiny_node_stop(void);
 // Reset the idle/cadence activity clock from outside the node (the unlock
 // chord restores the full auto-sleep budget starting at unlock).
 void      tiny_node_note_activity(void);
+// Local deep sleep now (a hardware key, not a verb): paints the sleep card
+// and does not return. ESP_ERR_INVALID_STATE (and no sleep) while a verb or
+// a stream is in flight.
+esp_err_t tiny_node_sleep_now(const char *why);
 // Post a device event upstream (ui_tap etc) — used by tiny_touch.
 esp_err_t tiny_node_post_event(const char *kind, const char *json_fields);
 // The ask engine (relay verb AND the AI button): text!=NULL → text ask,

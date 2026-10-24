@@ -184,4 +184,16 @@
 //        caps.brightness is true (fnk0104s, amoled18).
 //      + settings: "brightness: N%" row cycles 25 -> 50 -> 80 -> 100 (id
 //        "bright"), colour boards only.
-#define TINY_GRAMMAR_VERSION 22  // v22: brightness verb (colour boards)
+// v23 = AMOLED-1.8 V2 power and clock (P7):
+//      + status gains usb_power (bool; null when the board cannot see its
+//        input) and vbus_mv (null unless usb_power). Only the AXP2101 board
+//        answers; the reTerminal's BQ27220 and the FNK0104S divider say null.
+//      + amoled18: battery_pct / battery_mv / charging are real (AXP2101
+//        fuel gauge + ADC + charger state); caps battery_gauge,
+//        battery_voltage and rtc flip true, `absent` drops "battery", "rtc".
+//      + `sensors` battery.source gains "axp2101": that object carries ONLY
+//        source, percent, voltage_mv, charging, full and present.
+//      + not a reply-shape change, recorded so nobody hunts: the boot clock
+//        now really comes from the RTC on every board (it was read before
+//        the RTC was attached, so clock_source stayed "unset" until SNTP).
+#define TINY_GRAMMAR_VERSION 23  // v23: amoled18 AXP2101 battery/USB + PCF85063A RTC
