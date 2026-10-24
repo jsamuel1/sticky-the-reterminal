@@ -12,15 +12,21 @@
 //     dark AMOLED), land in $RENDER_OUT for the PR / card evidence.
 //
 // Usage: render_test <golden-file> [--update]
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <vector>
 #include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 #include <zlib.h>
 
+#include "esp_http_client.h"
 #include "canvas.h"
 #include "lcd_palette.h"
 #include "tiny/tiny_display.h"
@@ -32,6 +38,78 @@ static std::vector<uint8_t> g_acc;   // accent plane (colour boards only)
 
 static bool g_fail_next_full = false;
 static int g_full_refreshes = 0;
+static std::mutex g_panel_mutex;
+static std::condition_variable g_panel_ready;
+static bool g_block_next_full = false;
+static bool g_panel_blocked = false;
+static bool g_release_panel = false;
+static bool g_probe_rotation = false;
+static bool g_rotation_probed = false;
+static int g_rotation_during_block = -1;
+static std::mutex g_attempt_mutex;
+static std::condition_variable g_attempt_ready;
+static int g_render_attempts = 0;
+static std::mutex g_http_mutex;
+static std::condition_variable g_http_ready;
+static bool g_hold_http = false;
+static bool g_http_blocked = false;
+static bool g_release_http = false;
+static std::vector<uint8_t> g_http_body;
+static size_t g_http_offset = 0;
+static constexpr uintptr_t kHttpHandle = 1;
+
+void render_test_render_mutex_attempt() {
+    std::lock_guard<std::mutex> lock(g_attempt_mutex);
+    ++g_render_attempts;
+    g_attempt_ready.notify_all();
+}
+
+static bool wait_for_attempts(int count) {
+    std::unique_lock<std::mutex> lock(g_attempt_mutex);
+    return g_attempt_ready.wait_for(lock, std::chrono::seconds(2),
+                                    [&] { return g_render_attempts >= count; });
+}
+
+esp_http_client_handle_t render_test_http_init(const esp_http_client_config_t *) {
+    std::lock_guard<std::mutex> lock(g_http_mutex);
+    g_http_offset = 0;
+    return g_hold_http ? reinterpret_cast<void *>(kHttpHandle) : nullptr;
+}
+
+esp_err_t render_test_http_open(esp_http_client_handle_t handle, int) {
+    if (handle != reinterpret_cast<void *>(kHttpHandle)) return ESP_FAIL;
+    std::unique_lock<std::mutex> lock(g_http_mutex);
+    g_http_blocked = true;
+    g_http_ready.notify_all();
+    g_http_ready.wait(lock, [] { return g_release_http; });
+    g_http_blocked = false;
+    return ESP_OK;
+}
+
+int64_t render_test_http_fetch_headers(esp_http_client_handle_t handle) {
+    return handle == reinterpret_cast<void *>(kHttpHandle)
+               ? static_cast<int64_t>(g_http_body.size())
+               : -1;
+}
+
+int render_test_http_status(esp_http_client_handle_t handle) {
+    return handle == reinterpret_cast<void *>(kHttpHandle) ? 200 : 0;
+}
+
+int render_test_http_read(esp_http_client_handle_t handle, char *out,
+                          size_t length) {
+    if (handle != reinterpret_cast<void *>(kHttpHandle)) return -1;
+    std::lock_guard<std::mutex> lock(g_http_mutex);
+    const size_t left = g_http_body.size() - g_http_offset;
+    const size_t n = std::min(left, length);
+    if (!n) return 0;
+    memcpy(out, g_http_body.data() + g_http_offset, n);
+    g_http_offset += n;
+    return static_cast<int>(n);
+}
+
+esp_err_t render_test_http_cleanup(esp_http_client_handle_t) { return ESP_OK; }
+
 Canvas *sticky_display_canvas() { return g_canvas; }
 esp_err_t sticky_display_init() { return 0; }
 esp_err_t sticky_display_refresh() { return 0; }
@@ -42,6 +120,28 @@ esp_err_t sticky_display_refresh_monochrome() {
     if (g_fail_next_full) {
         g_fail_next_full = false;
         return ESP_FAIL;
+    }
+    std::unique_lock<std::mutex> lock(g_panel_mutex);
+    if (g_block_next_full) {
+        g_block_next_full = false;
+        g_panel_blocked = true;
+        g_panel_ready.notify_all();
+        while (!g_release_panel) {
+            g_panel_ready.wait(lock, [] {
+                return g_release_panel || g_probe_rotation;
+            });
+            if (g_probe_rotation) {
+                g_probe_rotation = false;
+                lock.unlock();
+                const int rotation = tiny_display_rotation();
+                lock.lock();
+                g_rotation_during_block = rotation;
+                g_rotation_probed = true;
+                g_panel_ready.notify_all();
+            }
+        }
+        g_panel_blocked = false;
+        g_release_panel = false;
     }
     return ESP_OK;
 }
@@ -289,6 +389,133 @@ int main(int argc, char **argv) {
                   "rotation: successful retry commits target angle");
             CHECK(g_full_refreshes == refreshes + 2,
                   "rotation: retry reaches panel again");
+
+            // Hold one card at the panel boundary, then queue auto-rotation,
+            // a newer card, and a state reader in that order. The complete
+            // cache -> canvas -> panel transaction must stay serialized. The
+            // old partial lock let rotation set s_rerendering before waiting;
+            // the newer card then skipped its cache update, so a later
+            // rerender resurrected the stale card (and the reader observed a
+            // not-yet-committed angle).
+            CHECK(tiny_display_set_rotation(0) == ESP_OK,
+                  "serialization: start at rotation 0");
+            {
+                std::lock_guard<std::mutex> lock(g_panel_mutex);
+                g_block_next_full = true;
+            }
+            std::atomic<int> held_result{ESP_FAIL};
+            std::thread held([&] {
+                held_result = tiny_display_render_card(
+                    R"J({"type":"text","card_id":"race-held","title":"held","body":"first"})J");
+            });
+            {
+                std::unique_lock<std::mutex> lock(g_panel_mutex);
+                CHECK(g_panel_ready.wait_for(lock, std::chrono::seconds(2),
+                                             [] { return g_panel_blocked; }),
+                      "serialization: first render reached blocked panel");
+            }
+            int attempts;
+            {
+                std::lock_guard<std::mutex> lock(g_attempt_mutex);
+                attempts = g_render_attempts;
+            }
+            std::atomic<int> rotate_result{ESP_FAIL};
+            std::thread rotate([&] { rotate_result = tiny_display_set_rotation(90); });
+            CHECK(wait_for_attempts(++attempts),
+                  "serialization: rotation waits before state mutation");
+            {
+                std::unique_lock<std::mutex> lock(g_panel_mutex);
+                g_probe_rotation = true;
+                g_panel_ready.notify_all();
+                CHECK(g_panel_ready.wait_for(lock, std::chrono::seconds(2),
+                                             [] { return g_rotation_probed; }),
+                      "serialization: blocked render samples logical angle");
+                CHECK(g_rotation_during_block == 0,
+                      "serialization: angle stays old until panel commit");
+            }
+            std::atomic<int> newer_result{ESP_FAIL};
+            std::thread newer([&] {
+                newer_result = tiny_display_render_card(
+                    R"J({"type":"text","card_id":"race-new","title":"new","body":"second"})J");
+            });
+            CHECK(wait_for_attempts(++attempts),
+                  "serialization: newer card waits before cache mutation");
+            std::atomic<bool> read_done{false};
+            std::atomic<int> observed{-1};
+            std::thread reader([&] {
+                observed = tiny_display_rotation();
+                read_done = true;
+            });
+            CHECK(wait_for_attempts(++attempts),
+                  "serialization: rotation read joins transaction lock");
+            CHECK(!read_done.load(),
+                  "serialization: reader cannot expose uncommitted rotation");
+            {
+                std::lock_guard<std::mutex> lock(g_panel_mutex);
+                g_release_panel = true;
+                g_panel_ready.notify_all();
+            }
+            held.join();
+            rotate.join();
+            newer.join();
+            reader.join();
+            CHECK(held_result == ESP_OK && rotate_result == ESP_OK &&
+                      newer_result == ESP_OK,
+                  "serialization: overlapped render/rotate/render all commit");
+            CHECK(observed == 90 && tiny_display_rotation() == 90,
+                  "serialization: reader sees committed 90-degree angle");
+            CHECK(!strcmp(tiny_display_current_card_id(), "race-new"),
+                  "serialization: newer card is on glass");
+            CHECK(tiny_display_rerender() == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "race-new"),
+                  "serialization: rerender keeps newer cached card");
+
+            // Network bytes are fetched with no render/panel lock held. A newer
+            // card must commit while the image request is blocked, then the
+            // stale image response must be discarded without replacing glass
+            // identity or replay cache.
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_http_body.assign(static_cast<size_t>(sz.w) * sz.h / 4, 0x55);
+                g_hold_http = true;
+                g_http_blocked = false;
+                g_release_http = false;
+            }
+            std::atomic<int> image_result{ESP_OK};
+            std::thread image([&] {
+                image_result = tiny_display_render_card(
+                    R"J({"type":"image","card_id":"race-image","url":"https://example.invalid/frame.raw"})J");
+            });
+            {
+                std::unique_lock<std::mutex> lock(g_http_mutex);
+                CHECK(g_http_ready.wait_for(lock, std::chrono::seconds(2),
+                                            [] { return g_http_blocked; }),
+                      "serialization: image fetch reaches held HTTPS");
+            }
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"race-overtake","title":"newest","body":"wins"})J") == ESP_OK,
+                  "serialization: newer card overtakes held image fetch");
+            CHECK(!strcmp(tiny_display_current_card_id(), "race-overtake"),
+                  "serialization: overtaking card commits to glass");
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_release_http = true;
+                g_http_ready.notify_all();
+            }
+            image.join();
+            CHECK(image_result == ESP_ERR_INVALID_STATE,
+                  "serialization: stale image response is refused");
+            CHECK(!strcmp(tiny_display_current_card_id(), "race-overtake"),
+                  "serialization: stale image cannot overwrite glass");
+            CHECK(tiny_display_rerender() == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "race-overtake"),
+                  "serialization: stale image cannot replace replay cache");
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_hold_http = false;
+                g_release_http = false;
+                g_http_body.clear();
+            }
         }
     }
 
