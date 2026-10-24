@@ -32,7 +32,7 @@ use_device invoke → prompt: "status"
 | `swipe` | `x0 y0 x1 y1` | synthetic swipe through the real release classifier | `accepted` / `routed` / `route`; travel inside the 24 px slop is refused, not downgraded to a tap |
 | `scroll` | <code>up&vert;<wbr>down&vert;<wbr>top&vert;<wbr>±px</code> | steps ⅔ of a view; bare form reports | `offset`, `content_h`, `view_h`, `scrollable` |
 | `glance` | — | redraws the current card via *partial* refresh, no network | `refresh:"partial"`, battery, wifi, unread, locked |
-| `status` | — | machine JSON with a human `summary` inside | `fw`, `fw_commit`, `grammar_version`, `battery_pct`, `rssi_dbm`, `card_id`, `locked`, `last_boot` |
+| `status` | — | machine JSON with a human `summary` inside | `fw`, `fw_commit`, `fw_date`, `grammar_version`, `battery_pct`, `rssi_dbm`, `card_id`, `locked`, `last_boot` |
 | `sensors` | `[card]` | live I²C read: SHT40, IMU, RTC, BQ27220; `card` also paints the page | JSON. **Read `mah_trusted` first** — the gauge claims 7500 mAh on a 750 mAh pack |
 | `miccheck` | `[seconds]` | records PDM audio, replies levels instead of uploading | <code>verdict:"live&vert;<wbr>SILENT"</code>, `rms`, `peak` |
 | `ask` | text | a full owner-scoped agent turn — tools, memory, other devices — streamed onto home | the answer. One at a time; a second is refused |

@@ -9,6 +9,15 @@
 #include "tiny/tiny_node.h"
 #include "tiny/tiny_sensors.h"
 #include "tiny/tiny_version.h"
+#if __has_include("tiny_commit.h")
+#include "tiny_commit.h"  // build-generated: TINY_FW_COMMIT + TINY_FW_COMMIT_DATE
+#endif
+#ifndef TINY_FW_COMMIT
+#define TINY_FW_COMMIT "nogit"
+#endif
+#ifndef TINY_FW_COMMIT_DATE
+#define TINY_FW_COMMIT_DATE "?"
+#endif
 #include "tiny/tiny_wifi.h"
 #include "tiny/tiny_provision.h"
 #include "tiny/tiny_ble.h"
@@ -192,9 +201,14 @@ static esp_err_t render_settings(void) {
     char dev_short[16] = "-";
     if (have_cfg && cfg.device_id[0])
         snprintf(dev_short, sizeof dev_short, "%.8s...", cfg.device_id);
+    char fw_line[48];
+    snprintf(fw_line, sizeof fw_line, "%s (%s)", TINY_FW_VERSION, TINY_FW_COMMIT);
     const char *pairs[][2] = {
         { "name",    have_cfg && cfg.name[0] ? cfg.name : tiny_provision_ssid() },
-        { "fw",      TINY_FW_VERSION },
+        // Version alone does not say WHICH build is on the glass (every
+        // 0.31.0 bench set reads the same): commit + its date do.
+        { "fw",      fw_line },
+        { "date",    TINY_FW_COMMIT_DATE },  // commit date of that sha
         { "channel", "sticky-dev" },
         { "wifi",    rssis },
         { "mac",     macs },

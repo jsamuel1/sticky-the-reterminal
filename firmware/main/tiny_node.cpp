@@ -40,6 +40,9 @@
 #else
 #define TINY_FW_COMMIT "nogit"
 #endif
+#ifndef TINY_FW_COMMIT_DATE
+#define TINY_FW_COMMIT_DATE "?"
+#endif
 #include "tiny/tiny_display.h"
 #include "sticky_buzzer.h"
 #include "tiny/tiny_stream.h"
@@ -824,6 +827,7 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     cJSON *s = cJSON_CreateObject();
     cJSON_AddStringToObject(s, "fw", TINY_FW_VERSION);
     cJSON_AddStringToObject(s, "fw_commit", TINY_FW_COMMIT);
+    cJSON_AddStringToObject(s, "fw_date", TINY_FW_COMMIT_DATE);  // v17
     cJSON_AddNumberToObject(s, "grammar_version", TINY_GRAMMAR_VERSION);
     // v13: which body this is. Consumers gate hardware verbs on `board` and
     // read `absent` for the parts this build does not drive (an absent part

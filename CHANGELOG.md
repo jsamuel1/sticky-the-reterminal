@@ -92,6 +92,14 @@ release, newest first.
   (`SPIRAM_MALLOC_ALWAYSINTERNAL=512`, `SPIRAM_TRY_ALLOCATE_WIFI_LWIP`), the
   I²S DMA rings shrink to 4 × 240 frames, and the tone player's queue and
   stack live in PSRAM. The audio init line logs its internal-RAM cost.
+- **firmware** — about 39 KB of large non-DMA statics move to PSRAM `.bss`:
+  button-region tables, the `tiny_config_t` copies, the scan, portal and
+  console buffers, and the upload sink. Internal `.data+.bss` on the FNK0104S
+  image drops from 73.8 KB to 34.9 KB.
+- **grammar v17** — `status` gains `fw_date`, the UTC commit date of
+  `fw_commit`. The settings page `fw` row reads `<version> (<commit>)`, and a
+  new `date` row shows that same commit date, so the glass says which build
+  it runs.
 
 ## 0.31.0 — grammar v14 — on-device pairing code (onboarding Phase B)
 

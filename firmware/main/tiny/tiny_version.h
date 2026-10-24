@@ -125,4 +125,8 @@
 //      + status gains color:bool and theme:"light"|"dark".
 //      + page palette: preview card of every accent.
 //      + raw image/gallery/stream frames are unchanged: gray, drawn literal.
-#define TINY_GRAMMAR_VERSION 16  // v16: card accent + colour screenshot
+// v17 = which build is on the glass:
+//      + status reply gains fw_date: committer date (UTC, "YYYY-MM-DD HH:MM
+//        UTC") of fw_commit, build-injected beside it; "?" if git was absent.
+//      + settings page fw row reads "<version> (<commit>)" plus a date row.
+#define TINY_GRAMMAR_VERSION 17  // v17: status fw_date
