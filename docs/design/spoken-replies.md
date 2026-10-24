@@ -3,7 +3,7 @@ readtime: 18
 description: "Design for spoken agent replies on the codec boards: speech streamed on the ask connection, 16 kHz PCM, no length cap, played as it arrives."
 ---
 
-# Spoken replies — design (grammar v20, proposed)
+# Spoken replies — design (grammar v21, proposed)
 
 Status: **proposal, no code**. Third person. It covers the agent's reply audio
 (TTS) on the boards that have a real speaker: today the FNK0104S, and the
@@ -153,20 +153,65 @@ at `[DONE]` as it does today.
 Today any `tiny_display_render_card` call while the text stream is on resets
 the stream ("render during active stream — stream ended by new card"), and the
 ask task keeps calling `stream_append` / `commit` / `end` against a stream
-that no longer exists. Every glass-claiming path goes through that one choke
+that no longer exists. Every card-claiming path goes through that one choke
 point: relay `render_ui`, `say`, `page`, the `messages` and `sensors` cards,
-the home and page buttons, the auth cards and the sleep card. With speech the
-ask lives longer, so the rule becomes explicit:
+the home and page buttons, the auth cards and the sleep card. Two glass
+writers bypass it today (a gallery flip and a `play` frame), and the lock
+order below brings them under the same rule. With speech the ask lives
+longer, so the rule becomes explicit:
 
 - `tiny_display_stream_begin` returns a **stream token** (a nonzero `uint32_t`
   epoch). `stream_append`, `stream_commit`, `stream_note` and `stream_end`
-  take that token. Stream state and the token compare sit under the existing
-  `s_display_mux`, so a reset by another task and an append by the ask worker
-  cannot interleave. The home re-begin used by voice (listening frame, then
+  take that token. The home re-begin used by voice (listening frame, then
   the SSE begin) keeps the same token.
-- A takeover is any `render_card` that resets an active stream. It retires
-  the token. Later calls with that token return `ESP_ERR_INVALID_STATE` and
-  touch nothing on the glass.
+- A takeover is any public glass write that replaces the card while a stream
+  is on: `tiny_display_render_card` (every card type, image included),
+  `tiny_display_gallery_nav` and `tiny_display_blit_1bit`. It retires the
+  token. Later calls with that token return `ESP_ERR_INVALID_STATE` and touch
+  nothing on the glass. Today only `render_card` ends the stream; a gallery
+  flip or a `play` frame paints over it and the next commit paints the
+  stream back, so these two join the rule. `tiny_display_flash_button` and
+  `tiny_display_snapshot_index8` do not replace the card and are not
+  takeovers. A rotation or scroll while a valid stream is on redraws the
+  stream frame through the stream path and keeps the token, instead of
+  today's reset.
+
+**Lock order.** A new non-recursive `s_stream_mux`, created statically in
+`tiny_display_init` beside the other two (the lazy create in
+`display_lock` goes), guards the stream state and the token. The order is
+fixed and has one direction: **`s_stream_mux` → `s_display_mux` →
+`s_region_mux`**. No path takes `s_stream_mux` while it holds either of the
+others, and no path takes any of them across a network fetch.
+
+To keep that order, today's re-entry goes. `stream_render` calls the public
+`tiny_display_render_card` and `tiny_display_scroll` and tells them apart
+with the `s_stream_rendering` flag. Each public entry point is split into a
+thin public wrapper and an internal `*_impl` that assumes the caller already
+holds `s_stream_mux` and owns the stream decision: `render_card_impl(json,
+from_stream)`, `scroll_impl`, `rerender_impl`. The `*_impl` functions take
+`s_display_mux` themselves as today and never touch `s_stream_mux`.
+`stream_render` calls only `*_impl`; `s_stream_rendering` is deleted.
+
+- **Stream ops** (`append` / `commit` / `note` / `end`) take
+  `s_stream_mux`, compare the token, and if it is valid build the frame and
+  paint it through `render_card_impl` (and `scroll_impl` for the tail)
+  **before** releasing `s_stream_mux`. The token check and the paint are
+  one critical section, so no takeover can land between them. A stream
+  paint costs about 300–500 ms (a partial refresh), and that is the longest
+  a takeover waits.
+- **A takeover** takes `s_stream_mux`, retires the token and resets the
+  stream, then releases `s_stream_mux` **before** its own fetch and paint.
+  The image card's network fetch therefore never holds `s_stream_mux`, and
+  the stream cannot repaint during that fetch, because its token is already
+  dead. A takeover with no stream on takes and drops `s_stream_mux` and
+  continues as today.
+- **Rotation and scroll** take `s_stream_mux`. With a valid stream they
+  redraw through the stream path while holding it; otherwise they call
+  `rerender_impl` / `scroll_impl` as today.
+
+The token, the takeover decision and the lock calls go into a pure
+`tiny_stream_owner` with injected lock and paint callbacks, so the host can
+test them; on the device the callbacks are the real mutexes and `*_impl`.
 - On the first stale return the ask marks its glass sink **detached**. The
   agent turn is not cancelled and speech is not cancelled; the question still
   gets its answer. Remaining `t` deltas still go into the relay-reply summary
@@ -251,6 +296,57 @@ and applying the volume tier as a gain.
   produced it. No producer holds a ring lock while blocking on I/O or waiting
   for free space.
 
+### Status light (FNK0104S WS2812)
+
+The status light (`tiny_led`, `CONFIG_TINY_STATUS_LED`) today shows blue
+while capturing, amber while an ask is in flight, and red for 5 s after an
+askfail card. Its ask field is lowered to `IDLE` by `LedGuard` when the ask
+returns. With speech, the ask worker stays alive through the audio tail, so
+without a change the light would sit amber for the whole spoken answer and
+say "thinking" while the device is talking. Speech gets its own input with
+one owner:
+
+- `tiny_led_inputs_t` gains `bool speaking`, and `tiny_led.h` gains
+  `tiny_led_speech(bool)`. **The player is the only writer.** It sets
+  `speaking` when it turns the amp on for a speech generation, and clears it
+  in the same step as its idle acknowledgement, after amp-off. Chimes and
+  `play` frames never set it. `speak test` does, because it goes through
+  the same player path.
+- The ask lowers its own field from `THINKING` to `IDLE` at the first
+  accepted `text_done`: the text is finished, so it is no longer thinking.
+  An ask that never sees `text_done` (old backend, or a cut before it)
+  keeps today's `LedGuard` rule. `LedGuard` still runs at the epilogue and
+  is idempotent.
+- Colour: `TINY_LED_RGB_SPEAKING` `{0, 200, 60}` (green), new in
+  `tiny_led_state.h`. Precedence, strongest first: locked or asleep → off;
+  capturing → blue; ask `THINKING` → amber; speaking → green; error → red;
+  otherwise off. So audio that arrives before `text_done` shows amber (the
+  model is still writing), and the audio tail after it shows green.
+- Barge-in: `speaking` clears at the idle acknowledgement, and capture's
+  `tiny_led_capture_begin` comes after that ack, so the light goes green →
+  blue with no amber between and never shows blue while the amp is on. A
+  hold-to-talk released before the ack (stop only) goes green → off.
+- `audio_error`, `cut` and `refused` are speech verdicts, not ask failures:
+  they do not call `tiny_led_error()`, which stays reserved for the askfail
+  card as today.
+- Pocket lock: speech continues, but the light is dark, the same
+  precedence as today (§11: a pocket shows nothing). Deep sleep and OTA
+  cross the speech barrier first, so `speaking` is already clear before
+  `tiny_led_prepare_sleep()`. Shutdown's forced amp-off path also clears
+  it.
+- Other boards: `tiny_led_speech` is an inline no-op like the rest of the
+  API, so callers need no `#if`.
+
+Host coverage extends `tests/host/led_host_test.sh`: the resolve table with
+`speaking` crossed against every existing input; `THINKING` + `speaking` is
+amber and `speaking` alone is green; a sequence model of a spoken voice ask
+(PENDING → blue → amber → amber with audio before `text_done` → green after
+it → off at idle ack); a barge-in sequence with no black or amber frame
+between green and blue; `audio_error` never giving red; and locked dark
+while `speaking`. A mutation that makes the ask worker, not the player,
+clear `speaking` must fail the barge-in sequence (it would turn green off
+before amp-off).
+
 ## Cancellation and task ownership
 
 Barge-in is a request to owners, never cross-task resource destruction.
@@ -258,11 +354,43 @@ Barge-in is a request to owners, never cross-task resource destruction.
 **Signal lifetime.** No control path ever holds a pointer, task handle or
 callback that belongs to a producer. The speech controller owns one static
 event group, created at boot and never deleted, plus three generation words
-(`active_gen`, `cancel_gen`, `ack_gen`) guarded by a `portMUX_TYPE`:
+(`active_gen`, `cancel_gen`, `ack_gen`) guarded by a `portMUX_TYPE`.
 
-- A producer registers by setting `active_gen` under the lock and clearing
-  `CANCEL_BIT`. It unregisters by setting `active_gen = 0` under the lock.
-  Registration never stores a task handle or a sink.
+**Creation order.** The group is built with `xEventGroupCreateStatic` from
+a file-scope `StaticEventGroup_t`, in `tiny_speech_init()`. `init_inputs`
+calls it after `tiny_audio_init()` (which creates the player task, so the
+player can find the group before it first blocks) and before
+`tiny_button_init()`, so no button callback can reach a control path
+first. `tiny_node_start()` and the ask worker come later still. On a
+glance wake, `init_inputs` runs after the shell paint; until it runs
+nothing can produce or cancel speech, since the player, the buttons and the
+node do not exist yet. Every control and producer entry point also checks
+that the group handle is non-null and returns `speech not ready` if it is
+not, so a future reordering fails closed rather than dereferencing a null
+handle. There is no lazy create: the display's lazy
+`xSemaphoreCreateMutex` pattern would race two first callers, and this
+group must have exactly one instance. The bits are fixed at compile time
+(`CANCEL_BIT` 0, `SPACE_BIT` 1, `IDLE_BIT` 2); nothing allocates them at
+runtime, and no other module shares the group.
+
+**Clear before check.** Each waiter clears the bit it is about to wait for,
+then re-reads the generation words under the lock, and only then calls
+`xEventGroupWaitBits(..., xClearOnExit = pdFALSE, ...)`. A `SetBits` that
+lands between the clear and the wait is therefore never lost: either the
+re-read already sees the new generation, or the bit is still set when the
+wait begins. Setting a bit nobody is waiting for is harmless, because
+every wake is confirmed against the generation words.
+
+- A producer registers in this order: clear `CANCEL_BIT` and `SPACE_BIT`
+  (outside any lock), then set `active_gen` under the lock. A control that
+  runs before the publish sees the old `active_gen` (zero, or a finished
+  generation) and cannot target the new producer. A control that runs
+  after it sets `cancel_gen` and then the bit, and the clear has already
+  happened, so registration can never erase a real cancel. It unregisters by
+  setting `active_gen = 0` under the lock. Registration never stores a task
+  handle or a sink. **No FreeRTOS call is made inside the `portMUX`**:
+  ESP-IDF forbids blocking or event-group calls in a spinlock critical
+  section, so the lock covers only reads and writes of the three words.
 - A control reads `active_gen` under the lock. If it is zero the control
   answers `not speaking`. Otherwise it sets `cancel_gen = active_gen`, leaves
   the lock, and calls `xEventGroupSetBits(CANCEL_BIT)` on the static group.
@@ -271,10 +399,11 @@ event group, created at boot and never deleted, plus three generation words
 - The producer's full-ring wait is `xEventGroupWaitBits(SPACE_BIT |
   CANCEL_BIT)`. On wake it compares `cancel_gen` with its own generation
   under the lock. A match means cancel; anything else clears the stale bit
-  and continues.
+  outside the lock, re-reads the words, and only then waits again (the
+  clear-before-check rule above).
 - The player acknowledges idle the same way: it writes `ack_gen` under the
-  lock and sets `IDLE_BIT`. Waiters compare `ack_gen` with the generation they
-  stopped.
+  lock, leaves it, then sets `IDLE_BIT`. Waiters compare `ack_gen` with the
+  generation they stopped.
 
 If a producer finishes and unregisters between a control's lookup and its
 `SetBits`, the bit lands on an object that outlives every producer. The next
@@ -392,7 +521,7 @@ Rules:
 | `speak test [seconds]` | honour silent mode; refuse while an ask is in flight but has not begun speaking; while speech is active, cancel it, await amp-off, then register the test generation |
 | any new card or `render_ui` **before** `text_done` | the card takes the glass and retires the stream token; the ask detaches its glass sink, so text goes on into the relay summary only and no final card is painted. Speech continues |
 | any new card or `render_ui` **after** `text_done` | an ordinary card; speech continues. The ask holds no glass token |
-| pocket lock | speech continues. Lock guards inputs, not output (same as `say`) |
+| pocket lock | speech continues. Lock guards inputs, not output (same as `say`); the status light is dark |
 | deep sleep, auto-sleep, OTA reboot or node shutdown | signal cancellation, wait for the bounded player-idle/amp-off barrier, then cross the power boundary; on timeout refuse a requested sleep/OTA, while shutdown's last resort forces the amp GPIO off before teardown |
 | connection cut or 30 s stall mid-speech | terminal state `cut`; the buffered residual drains even below the prebuffer; verdict `cut after N s` |
 | a malformed audio block | dropped whole, the ring unchanged, counted in `bad_lines`; the stream carries on |
@@ -414,10 +543,13 @@ source) all consume it. A runtime filter would make the heartbeat disagree
 with the claim the provisioning tools make from that source. This design adds
 no TinyBeacon capability bit.
 
-## Grammar v20 (proposed)
+## Grammar v21 (proposed)
 
-The main branch is already at grammar 19, which is strict direct-artifact OTA
-arguments. Spoken replies are the next grammar change, v20.
+The main branch is already at grammar 20: v19 is strict direct-artifact OTA
+arguments, and v20 is the `sensors` `battery.source` field and the FNK0104S
+`battery_pct`. Spoken replies are the next grammar change, v21. If another
+grammar change lands first, this proposal takes the next free number; the
+number is assigned when the S1+S2 release is cut, not by this document.
 
 **Ask opt-in.** Each queued request carries an explicit origin:
 `physical_voice`, `relay_voice`, `typed`, or `offline_typed`; mode decisions do
@@ -465,10 +597,10 @@ count moves from 23 to 24.
 **Settings.** One row on the settings page, persisted in NVS
 (`tinycfg/speakmode`): `off | voice asks | all asks`, default `voice asks`.
 
-CHANGELOG and `TINY_GRAMMAR_VERSION` move to 20 only in the firmware release
+CHANGELOG and `TINY_GRAMMAR_VERSION` move to 21 only in the firmware release
 that contains **both S1 and S2**. The slices are implementation order, not
 separately shippable grammar states: S1 may be bench-tested from a development
-build, but no released v20 may advertise `speak`, `caps.speech`, status fields
+build, but no released v21 may advertise `speak`, `caps.speech`, status fields
 or the request/events without the complete S2 parser, cancellation and
 settings contract. S1 may still add `speak` to `s_caps[]` together with its
 dispatch branch, because the roster rule is about dispatch, not grammar. A
@@ -518,6 +650,7 @@ first, then TTS on the model's text.
 | Concurrency | a second ask is refused while one is in flight | the same before the first audio sample; after it, barge-in cancels and replaces |
 | Cancellation | none today; the turn runs to `[DONE]` | the device closes the connection; the backend must stop TTS (contract item 6). Tool side effects already done are not rolled back |
 | Glass | typed live, then the final card | unchanged up to `text_done`; audio never touches the glass |
+| Status light (FNK0104S) | amber while the ask runs | amber until `text_done`, green while the speaker plays |
 | Off switch | none | `speakmode`, silent mode, `speech_ready` and heap admission. Any one of them omits `speak:"1"` and leaves the request byte-identical to today |
 
 What stays the same: one turn, one text, one card, one transcript
@@ -538,8 +671,9 @@ speech-to-text.
    and a fake amp pin so they run on the host. `audio_es8311` gets the ring
    player with prebuffer, underrun, residual drain, flush and the amp-off
    acknowledgement. Also: `speak stop|status|test`, `caps.speech`, status
-   fields and barge-in at the capture entry point, behind a development-build
-   flag (grammar stays 19 until S2; see above). S1 host tests, each pinning
+   fields and barge-in at the capture entry point, plus the status light's
+   `speaking` input and its `led_host_test.sh` cases, behind a development-build
+   flag (grammar stays 20 until S2; see above). S1 host tests, each pinning
    one contract:
     - Ring: whole commits straddling the buffer end at every offset of a small
       ring read back byte for byte; a commit without room for the whole chunk
@@ -558,6 +692,18 @@ speech-to-text.
       speech; a capture request is admitted only after the idle ack.
     - Controller: a stale-generation stop, a double stop, and a stop racing
       natural EOF each complete the generation exactly once.
+    - Event bits: a fake scheduler injects a `SetBits(CANCEL_BIT)` at every
+      point between a waiter's clear, its generation re-read and its
+      `WaitBits`; each one wakes or is seen by the re-read, and none is
+      lost. Registration rendezvous: a control lands (a) between the
+      producer's bit clear and its `active_gen` publish, where it answers
+      `not speaking` or targets the old generation, and the new producer
+      plays on; and (b) immediately after the publish, where the new
+      producer's first wait or re-read sees the cancel. A fake `portMUX`
+      asserts that no FreeRTOS fake is called while it is held. A control or producer entry before `tiny_speech_init()`
+      returns `speech not ready` and touches no handle. Mutations that clear
+      the bits after the publish, or after the waiter's generation re-read,
+      must fail (b) and the injection sweep respectively.
     - Signal lifetime, rendezvous: a fake scheduler pauses a control between
       its `active_gen` lookup and its `SetBits`. The producer then completes
       and unregisters, and a second producer registers. On resume, the
@@ -592,6 +738,8 @@ speech-to-text.
       the log's amp-off acknowledgement.
     - Relay `speak stop` sent twice gives the verdict, then `not speaking`.
     - A chiming `render_ui` mid-test is dropped and counted.
+    - The status light shows green for the whole test and goes dark at the
+      amp-off acknowledgement; an AI-button barge-in goes green → blue.
 2. **S2, firmware, against the backend contract.** The dedicated ask worker,
    deferred relay replies and offline-drain completion, ask opt-in, SSE block
    parser, audio and `text_done` handling, back-pressure, cancellation barrier,
@@ -619,9 +767,24 @@ speech-to-text.
    freed unrendered, the summary gains ` [glass taken by <card_id>]` once,
    speech keeps playing, and the taking card is still current at `[DONE]`;
    the same three injected after `text_done` leave the stream untouched,
-   since it has already ended; a cancel before `text_done` ends the ask's own
+   since it has already ended; a gallery flip and a `play` frame before
+   `text_done` retire the token like a card; a rotation and a scroll with a
+   valid stream keep it and redraw the stream; a cancel before `text_done` ends the ask's own
    stream with ` [stopped]` exactly once, and a cancel after takeover
    paints nothing; a mutation that drops the token check must fail;
+   `tiny_stream_owner` lock order, with fake recursive-detecting mutexes
+   and a fake paint that can pause: (i) a commit validates its token and
+   pauses inside its paint, a takeover arrives, the commit's paint
+   completes, then the takeover retires the token and paints, and the
+   takeover's card is the last frame; no later stream paint follows;
+   (ii) a takeover retires the token and pauses inside its (fake image)
+   fetch, and a commit arriving then returns stale without painting;
+   (iii) a stream paint that would re-enter a public display entry point
+   trips the fake mutex's non-recursive assert; (iv) a lock-order checker
+   records every acquisition and fails on any `display` → `stream` or
+   `region` → `display` edge. Mutations that release `s_stream_mux` between
+   the token check and the paint, or hold it across the takeover's fetch,
+   must fail (i) and (ii) respectively;
    button and relay replacement asks; no double reply; and no capture before
    amp-off. Auto-sleep tests pin that ask-worker or speech activity blocks the
    due path; explicit sleep/OTA tests pin cancellation-before-power transition
