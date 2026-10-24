@@ -68,8 +68,11 @@ jobs:
 
   # Which boards have a bench device, and is the token still good? Board names
   # only leave this job; the token and device ids stay in secrets.
+  # main only, never a PR. workflow_dispatch on main counts: pushes to this
+  # fork have not been starting runs (measured 2026-10-24, every main commit
+  # so far ran by dispatch), and a dispatch on main builds main's tip.
   ota-plan:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       boards: ${{ steps.plan.outputs.boards }}
