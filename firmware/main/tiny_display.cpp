@@ -800,6 +800,7 @@ extern "C" esp_err_t tiny_display_set_rotation(int degrees) {
     const CanvasRotation r = static_cast<CanvasRotation>(d / 90);
     if (r == s_rot) return ESP_OK;   // an e-ink flash costs ~600ms; don't spend
                                      // it to redraw an identical picture
+    const CanvasRotation previous = s_rot;
     s_rot = r;
     esp_err_t err = tiny_display_rerender();
     if (err == ESP_ERR_INVALID_STATE) {
@@ -811,6 +812,11 @@ extern "C" esp_err_t tiny_display_set_rotation(int degrees) {
                  "\"body\":\"rotated to %d deg\",\"card_id\":\"rot%d\"}", d, d);
         err = tiny_display_render_card(card);
     }
+    // s_rot describes what successfully committed to glass. If refresh fails,
+    // keep the prior value so the next stable IMU sample retries this angle
+    // instead of taking tiny_orient's "already there" early-out forever.
+    // Do not overwrite a newer concurrent request that changed it meanwhile.
+    if (err != ESP_OK && s_rot == r) s_rot = previous;
     ESP_LOGI(TAG, "rotation -> %d deg (%s)", d, esp_err_to_name(err));
     return err;
 }
