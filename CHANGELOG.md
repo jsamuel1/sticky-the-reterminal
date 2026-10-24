@@ -100,6 +100,11 @@ release, newest first.
   contract is unchanged: 16 kHz/16-bit mono WAV, 15 s cap. Chime names and
   RTTTL play as PCM tones. The `sticky_buzzer_*` beeps keep the reTerminal
   timings, and the amp is on only while a tone plays.
+- **firmware** — FNK0104S caps `mic`, `buzzer` and `speaker` are now true,
+  proven on hardware (chimes audible, voice ask round-trips). `status`
+  `absent[]` drops them and the beacon sets its speaker bit. The answer
+  arrives as text; spoken replies are not part of this change. The AMOLED-1.8
+  stays false until it is tested.
 - **firmware** — colour boards remap BOOT: click = home, hold = push-to-talk
   (records until release; 15 s cap). The reTerminal keeps click = ask and
   hold = home.

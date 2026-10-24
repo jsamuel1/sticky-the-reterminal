@@ -33,7 +33,9 @@ constexpr tiny_board_caps_t kCaps = {
 #elif defined(CONFIG_TINY_BOARD_FNK0104S)
 // ST7796S LCD (lcd_canvas), FT6336U touch and the battery-voltage ADC are
 // driven. ES8311 caps flip after hardware proof; SDMMC lands later.
-// The board has no RTC, IMU, env sensor, fuel gauge, buzzer or power latch.
+// The board has no RTC, IMU, env sensor, fuel gauge or power latch. Mic,
+// buzzer tones and speaker are the ES8311 (P4), proven on the owner's unit:
+// chimes audible, voice ask round-trips through the agent.
 constexpr tiny_board_caps_t kCaps = {
     .id = "fnk0104s",
     .name = "Freenove FNK0104S",
@@ -44,9 +46,9 @@ constexpr tiny_board_caps_t kCaps = {
     .color = true,  // lcd_canvas accent plane + lcd_palette (light theme)
     .dark_theme = false,
     .touch = true,  // FT6336U, tiny_touch.cpp (P3)
-    .mic = false,
-    .buzzer = false,
-    .speaker = false,
+    .mic = true,      // ES8311 ADC, audio_es8311.cpp (P4)
+    .buzzer = true,   // sticky_buzzer_* as ES8311 tones (P4)
+    .speaker = true,  // ES8311 DAC + SC8002B amp: chimes/RTTTL (P4)
     .battery_gauge = false,
     .battery_voltage = true,  // ADC GPIO 9, 2:1 divider (sticky_battery_adc.cpp)
     .rtc = false,
