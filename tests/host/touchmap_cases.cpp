@@ -1,8 +1,7 @@
-// touchmap host test: compiles the SHIPPED firmware/main/tiny/tiny_touch_map.h
-// next to the SHIPPED canvas.cpp. It pins the FT6336 frame parser and checks
-// that the sensor -> physical map composes with Canvas::to_logical: a finger on
-// the sensor pixel under a logical button must resolve inside that button in
-// every rotation, on a portrait panel-sized canvas and on the 800x480 one.
+// touchmap host test: compiles shipped colour-board touch parsers/maps next to
+// shipped canvas.cpp. It checks sensor -> physical mapping composes with
+// Canvas::to_logical: a finger on the sensor pixel under a logical button must
+// resolve inside that button across supported canvas sizes and rotations.
 #include "canvas.h"
 #include "tiny/tiny_touch_map.h"
 
@@ -149,9 +148,47 @@ static void cst816_parse_cases() {
     }
 }
 
+// panel_touch_task's recovery policy: log once per failure run, reset once at
+// the threshold, never again while the bus stays dead, rearm on a good frame.
+static void fail_run_cases() {
+    constexpr int kAfter = 100;
+    TouchFailRun r;
+    int logs = 0, recovers = 0, first_recover_at = -1;
+    for (int i = 1; i <= 1000; i++) {
+        touch_fail_run_step(r, true, kAfter);
+        logs += r.log;
+        if (r.recover && first_recover_at < 0) first_recover_at = i;
+        recovers += r.recover;
+    }
+    CHECK("fail run: one log per run", logs == 1);
+    CHECK("fail run: one recovery across 1000 dead polls", recovers == 1);
+    CHECK("fail run: recovery at the threshold", first_recover_at == kAfter);
+    CHECK("fail run: count saturates", r.bad == kAfter);
+    touch_fail_run_step(r, false, kAfter);
+    CHECK("fail run: good frame ends the run", r.bad == 0 && !r.log && !r.recover);
+    touch_fail_run_step(r, true, kAfter);
+    CHECK("fail run: next run logs again", r.log && r.bad == 1);
+    for (int i = 2; i < kAfter; i++) touch_fail_run_step(r, true, kAfter);
+    CHECK("fail run: not yet at threshold-1", !r.recover);
+    touch_fail_run_step(r, true, kAfter);
+    CHECK("fail run: next run recovers again", r.recover);
+    // A blip shorter than the threshold never resets.
+    TouchFailRun b;
+    bool any = false;
+    for (int k = 0; k < 50; k++) {
+        for (int i = 0; i < kAfter - 1; i++) {
+            touch_fail_run_step(b, true, kAfter);
+            any |= b.recover;
+        }
+        touch_fail_run_step(b, false, kAfter);
+    }
+    CHECK("fail run: sub-threshold runs never recover", !any);
+}
+
 int main() {
     parse_cases();
     cst816_parse_cases();
+    fail_run_cases();
     // Pin today's (pre-glass) calibration: recalibrating is a deliberate edit
     // here AND in fnk0104s_touch_axis_map, never a silent drift.
     {

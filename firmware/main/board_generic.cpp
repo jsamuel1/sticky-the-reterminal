@@ -123,13 +123,15 @@ esp_err_t amoled_expander_up()
         err = rel;
     }
     i2c_master_bus_rm_device(dev);
+    // CST820 needs time after reset release before it answers on the bus. The
+    // release write above always ran, so settle even when bring-up failed:
+    // board_init carries on to log_bus() and touch init either way.
+    vTaskDelay(pdMS_TO_TICKS(100));
     if (err != ESP_OK) {
         ESP_LOGE(kTag, "tca9554: bring-up failed at %s: %s (release write: %s)",
                  step, esp_err_to_name(err), esp_err_to_name(rel));
         return err;
     }
-    // CST820 needs time after reset release before it answers on the bus.
-    vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGI(kTag, "tca9554: DSI_PWR_EN + LCD_RST + TOUCH_RST released");
     return ESP_OK;
 }
@@ -150,23 +152,36 @@ esp_err_t amoled_touch_reset()
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_bus, &dc, &dev), kTag,
                         "tca9554 add");
     constexpr uint8_t kTouchBit = 1U << TCA_BIT_TOUCH_RST;
-    uint8_t out = 0xFF;
+    uint8_t out = 0;
+    static const char kStepRead[] = "read output";
+    const char *step = kStepRead;
     esp_err_t err = i2c_master_transmit_receive(dev, &kTcaOutput, 1, &out, 1,
                                                 kProbeTimeoutMs);
-    if (err == ESP_OK)
+    esp_err_t rel = ESP_OK;
+    if (err == ESP_OK) {
+        step = "assert reset";
         err = tca_write(dev, kTcaOutput, static_cast<uint8_t>(out & ~kTouchBit));
-    if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(20));
-    // Release whatever happened: a touch controller held in reset is worse
-    // than one that was never reset.
-    const esp_err_t rel = tca_write(dev, kTcaOutput,
-                                    static_cast<uint8_t>(out | kTouchBit));
+        if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(20));
+        // A failed assertion write may still have reached the expander. Release
+        // using the latch byte read above; never invent 0xFF when that read
+        // failed, because doing so could change LCD_RST or DSI_PWR_EN.
+        rel = tca_write(dev, kTcaOutput, static_cast<uint8_t>(out | kTouchBit));
+        if (err == ESP_OK && rel != ESP_OK) {
+            step = "release reset";
+            err = rel;
+        }
+    }
     i2c_master_bus_rm_device(dev);
-    if (err == ESP_OK) err = rel;
+    // Settle whenever the latch was touched: a failed assert or release write
+    // may still have reached the expander and pulsed the line, and the caller
+    // probes the CST820 next whatever this returns. A failed latch read wrote
+    // nothing, so the chip saw no edge and there is nothing to wait for.
+    if (step != kStepRead) vTaskDelay(pdMS_TO_TICKS(200));
     if (err != ESP_OK) {
-        ESP_LOGE(kTag, "tca9554: touch reset failed: %s", esp_err_to_name(err));
+        ESP_LOGE(kTag, "tca9554: touch reset failed at %s: %s (release: %s)",
+                 step, esp_err_to_name(err), esp_err_to_name(rel));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(200));
     return ESP_OK;
 }
 #endif

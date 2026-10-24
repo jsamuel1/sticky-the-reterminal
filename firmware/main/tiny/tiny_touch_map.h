@@ -159,3 +159,26 @@ inline TouchAxisMap amoled18_touch_axis_map(uint16_t canvas_w, uint16_t canvas_h
     return TouchAxisMap{368, 448, /*mirror_x=*/true, /*mirror_y=*/false,
                         /*swap_xy=*/true};
 }
+
+// A run of consecutive failed polls. The first failure of a run is logged and
+// the recover_after-th asks for one recovery reset; the count then saturates
+// so a bus that stays dead never logs or resets again (nor overflows) until a
+// good frame ends the run.
+struct TouchFailRun {
+    int bad = 0;   // consecutive failed polls, saturated at recover_after
+    bool log = false;      // this failure starts a run
+    bool recover = false;  // this failure reached the threshold
+};
+
+inline void touch_fail_run_step(TouchFailRun &r, bool failed, int recover_after) {
+    r.log = false;
+    r.recover = false;
+    if (!failed) {
+        r.bad = 0;
+        return;
+    }
+    if (r.bad >= recover_after) return;
+    r.bad++;
+    r.log = r.bad == 1;
+    r.recover = r.bad == recover_after;
+}
