@@ -251,8 +251,11 @@ extern "C" esp_err_t tiny_sensors_json(char *out, size_t cap) {
     else if (have_bat)
         append(" %d%% %dmV %s", bat.percent, bat.voltage_mv,
                bat.charging ? "charging" : "on battery");
+    // errors[] holds faults (a missing part, a failed read, an implausible ADC
+    // cell, an untrusted gauge) — not just sensors that went unread, so the
+    // count says what it counts. tests/host/sensors_summary_host_test.sh.
     if (cJSON_GetArraySize(errors) > 0)
-        append(" (%d unread)", cJSON_GetArraySize(errors));
+        append(" (%d errors)", cJSON_GetArraySize(errors));
     cJSON_AddStringToObject(s, "summary", summary);
 
     char *js = cJSON_PrintUnformatted(s);
@@ -350,9 +353,11 @@ extern "C" esp_err_t tiny_sensors_render_card(void) {
     }
     cJSON_AddItemToObject(c, "rows", kv);
     char foot[96];
-    if (have_bat && strcmp(bat.source, "adc") == 0)
-        snprintf(foot, sizeof foot,
-                 "battery from GPIO 9 voltage - percent is an estimate");
+    // bat.source is set even when the read fails, so a divider board with no
+    // plausible cell still names its real source instead of an I2C gauge.
+    if (strcmp(bat.source, "adc") == 0)
+        snprintf(foot, sizeof foot, "battery from GPIO 9 voltage - %s",
+                 have_bat ? "percent is an estimate" : "no plausible cell");
     else if (have_bat)
         snprintf(foot, sizeof foot,
                  "read live over I2C1 - pack health %d%%, %d cycles, gauge %.0fC",
