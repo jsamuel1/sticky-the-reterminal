@@ -171,4 +171,17 @@
 //        portrait | portrait-flipped | landscape-left | landscape-right.
 //      + boards without an UP+DOWN unlock chord (amoled18) never auto-lock
 //        from the IMU; `lock` / `unlock` over the relay are unchanged.
-#define TINY_GRAMMAR_VERSION 21  // v21: amoled18 imu (QMI8658 auto-rotate)
+// v22 = panel brightness on the colour boards:
+//      + verb `brightness [0-100]`. Bare: {brightness, boot, summary}. A level
+//        applies now and persists (NVS tiny/cfg "bright"): {brightness,
+//        persisted, boot, result, summary}. Not 0..100 (words, %, signs,
+//        101+): error "bad level", ESP_ERR_INVALID_ARG, level unchanged.
+//        reTerminal: error "not supported", brightness null,
+//        ESP_ERR_NOT_SUPPORTED. Boot lights at the saved level, never below
+//        10 (`boot` says what the next boot will use).
+//      + status: `brightness` (0..100, null on the e-ink) and caps.brightness.
+//      + heartbeat / BLE catalog / pair claim gain "brightness" only where
+//        caps.brightness is true (fnk0104s, amoled18).
+//      + settings: "brightness: N%" row cycles 25 -> 50 -> 80 -> 100 (id
+//        "bright"), colour boards only.
+#define TINY_GRAMMAR_VERSION 22  // v22: brightness verb (colour boards)

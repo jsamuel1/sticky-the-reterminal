@@ -5,6 +5,7 @@
 #include "tiny/tiny_onboard.h"
 #include "sticky_buzzer.h"
 #include "tiny/tiny_config.h"
+#include "tiny/tiny_brightness.h"
 #include "tiny/tiny_orient.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_node.h"
@@ -182,6 +183,20 @@ static esp_err_t render_settings(void) {
         cJSON_AddStringToObject(sl, "note", snote);
         cJSON_AddStringToObject(sl, "id", "sleepidle");
         cJSON_AddItemToArray(items, sl);
+        // v22: panel brightness, colour boards only (the e-ink has nothing
+        // to dim). Same cycling-row law: the note names the next stop.
+        if (tiny_board_caps()->brightness) {
+            cJSON *br = cJSON_CreateObject();
+            const int lvl = tiny_display_brightness();
+            char blab[36], bnote[36];
+            snprintf(blab, sizeof blab, "brightness: %d%%", lvl);
+            snprintf(bnote, sizeof bnote, "tap for %u%%",
+                     tiny_brightness_next_step(lvl < 0 ? 0 : (uint8_t)lvl));
+            cJSON_AddStringToObject(br, "label", blab);
+            cJSON_AddStringToObject(br, "note", bnote);
+            cJSON_AddStringToObject(br, "id", "bright");
+            cJSON_AddItemToArray(items, br);
+        }
         // v11: the universe — who answers the asks. State visible in the
         // label (same law as the toggles above); tap opens the roster page.
         cJSON *uv = cJSON_CreateObject();
@@ -887,6 +902,19 @@ esp_err_t tiny_shell_menu(const char *id) {
         tiny_node_sleep_idle_set(nxt);
         if (perr != ESP_OK)
             ESP_LOGW(TAG, "sleepidle persisted=NO (%s) - %u min holds until "
+                          "reboot only", esp_err_to_name(perr), nxt);
+        return render_settings();
+    }
+    // v22 brightness cycle 25→50→80→100→25. Apply, persist, repaint: the
+    // glass changing IS the ack, the row's new number confirms it.
+    if (!strcmp(id, "bright")) {
+        if (!tiny_board_caps()->brightness) return ESP_ERR_NOT_SUPPORTED;
+        const int cur = tiny_display_brightness();
+        const uint8_t nxt = tiny_brightness_next_step(cur < 0 ? 0 : (uint8_t)cur);
+        tiny_display_set_brightness(nxt);
+        const esp_err_t perr = tiny_config_brightness_set(nxt);
+        if (perr != ESP_OK)
+            ESP_LOGW(TAG, "bright persisted=NO (%s) - %u%% holds until "
                           "reboot only", esp_err_to_name(perr), nxt);
         return render_settings();
     }

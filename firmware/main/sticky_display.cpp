@@ -277,3 +277,7 @@ esp_err_t sticky_display_sleep()
         "sticky_display", "put panel to sleep");
     return gpio_set_level(static_cast<gpio_num_t>(PIN_EPD_EN), 0);
 }
+
+// Reflective e-paper: no backlight, nothing to dim (grammar v22 refuses).
+esp_err_t sticky_display_set_brightness(uint8_t) { return ESP_ERR_NOT_SUPPORTED; }
+int sticky_display_brightness() { return -1; }

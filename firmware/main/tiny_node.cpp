@@ -35,6 +35,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "tiny/tiny_config.h"
+#include "tiny/tiny_brightness.h"
 #include "tiny/tiny_version.h"
 #if __has_include("tiny_commit.h")
 #include "tiny_commit.h"  // build-generated: TINY_FW_COMMIT = git describe
@@ -265,9 +266,21 @@ static const char *const s_caps[] = { "render_ui", "status", "sensors", "say", "
                                       "voice", "screenshot", "miccheck", "page", "rotate", "glance",
                                       "tap", "swipe", "scroll", "lock", "unlock",
                                       "sleep", "ota", "messages", "config", "agent", "sd" };
+// v22: verbs only some bodies dispatch, appended from the board table so the
+// heartbeat, the BLE catalog and the pair claim offer them only where they
+// work. s_caps[] above stays the roster every board shares (tools/
+// provision_lib.py and provision.js read it verbatim).
+static const char *s_caps_board[sizeof s_caps / sizeof *s_caps + 1];
+static int build_board_caps(void) {
+    int n = 0;
+    for (const char *c : s_caps) s_caps_board[n++] = c;
+    if (tiny_board_caps()->brightness) s_caps_board[n++] = "brightness";
+    return n;
+}
 extern "C" const char *const *tiny_node_caps(int *count) {
-    if (count) *count = (int)(sizeof s_caps / sizeof *s_caps);
-    return s_caps;
+    static const int n = build_board_caps();  // C++11 guarded: once, any task
+    if (count) *count = n;
+    return s_caps_board;
 }
 
 static int heartbeat(void) {
@@ -879,9 +892,15 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
             {"imu", bc->imu}, {"env", bc->env}, {"sd", bc->sd},
             {"page_buttons", bc->page_buttons}, {"ota", bc->ota},
             {"color", bc->color}, {"dark_theme", bc->dark_theme},
+            {"brightness", bc->brightness},  // v22
         };
         for (const auto &k : caps) cJSON_AddBoolToObject(cp, k.k, k.v);
         cJSON_AddNumberToObject(cp, "flash_mb", bc->flash_mb);
+        // v22: the panel level now (0..100), null where nothing dims.
+        if (bc->brightness)
+            cJSON_AddNumberToObject(s, "brightness", tiny_display_brightness());
+        else
+            cJSON_AddNullToObject(s, "brightness");
     }
     // v11: who answers the asks. "" = the owner's own tiny (default). The
     // dashboard/reviewer verify agent switching without eyes on the glass.
@@ -1971,6 +1990,78 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                  esp_err_to_name(r), dbg, tiny_display_rotation(),
                  tiny_orient_auto() ? "auto" : "manual", tiny_orient_last_name());
         reply(envelope_id, out);
+    } else if (strncmp(prompt, "brightness", 10) == 0 &&
+               (prompt[10] == 0 || prompt[10] == ' ')) {
+        // brightness [0-100] (v22) — colour boards' panel level. Bare form
+        // reports. A level applies now AND persists (boot restores it, never
+        // below TINY_BRIGHTNESS_BOOT_FLOOR). Anything that is not 0..100 is
+        // refused and changes nothing (the `rotate report` lesson: a read
+        // must never write). The e-ink has nothing to dim: refused by caps.
+        char out[320];
+        if (!tiny_board_caps()->brightness) {
+            snprintf(out, sizeof out,
+                     "{\"error\":\"not supported\",\"brightness\":null,"
+                     "\"result\":\"ESP_ERR_NOT_SUPPORTED\","
+                     "\"summary\":\"brightness refused: %s has no backlight "
+                     "to dim (caps.brightness is false)\"}",
+                     tiny_board_caps()->id);
+            reply(envelope_id, out);
+            return;
+        }
+        const char *arg = prompt + 10;
+        uint8_t want = 0;
+        const tiny_brightness_arg_t kind = tiny_brightness_parse(arg, &want);
+        uint8_t saved = 0;
+        if (kind == TINY_BRIGHTNESS_BAD) {
+            while (*arg == ' ') ++arg;
+            // Echo the refused argument JSON-safe: printable, no quote or
+            // backslash (the relay payload is parsed as JSON).
+            char shown[25];
+            size_t k = 0;
+            for (const char *c = arg; *c && k + 1 < sizeof shown; ++c)
+                if (*c >= 0x20 && *c < 0x7f && *c != '"' && *c != '\\')
+                    shown[k++] = *c;
+            shown[k] = 0;
+            snprintf(out, sizeof out,
+                     "{\"error\":\"bad level\",\"brightness\":%d,"
+                     "\"result\":\"ESP_ERR_INVALID_ARG\","
+                     "\"summary\":\"brightness: '%s' is not 0-100 - level "
+                     "unchanged at %d%%\"}",
+                     tiny_display_brightness(), shown, tiny_display_brightness());
+            ESP_LOGW(TAG, "brightness: '%s' is not 0-100, unchanged", shown);
+        } else if (kind == TINY_BRIGHTNESS_REPORT) {
+            const bool have = tiny_config_brightness_get(&saved);
+            const int boot = tiny_brightness_boot_level(have, saved);
+            snprintf(out, sizeof out,
+                     "{\"brightness\":%d,\"boot\":%d,\"summary\":\"brightness "
+                     "%d%%, boot restores %d%%%s\"}",
+                     tiny_display_brightness(), boot, tiny_display_brightness(),
+                     boot, have ? "" : " (default, never set)");
+        } else {
+            const esp_err_t r = tiny_display_set_brightness(want);
+            const esp_err_t p = r == ESP_OK ? tiny_config_brightness_set(want)
+                                            : ESP_ERR_INVALID_STATE;
+            // What the NEXT boot lights at: re-read NVS, so a failed save
+            // reports the level that really survives, not the one asked for.
+            const bool have = tiny_config_brightness_get(&saved);
+            const int boot = tiny_brightness_boot_level(have, saved);
+            char tail[64] = "";
+            if (r != ESP_OK)
+                snprintf(tail, sizeof tail, " - panel refused, unchanged");
+            else if (p != ESP_OK)
+                snprintf(tail, sizeof tail, " - NOT saved (%s), lost on reboot",
+                         esp_err_to_name(p));
+            else if (boot != want)
+                snprintf(tail, sizeof tail, "; boot lights at %d%% (floor)", boot);
+            snprintf(out, sizeof out,
+                     "{\"brightness\":%d,\"persisted\":%s,\"boot\":%d,"
+                     "\"result\":\"%s\",\"summary\":\"brightness %d%%%s\"}",
+                     tiny_display_brightness(), p == ESP_OK ? "true" : "false",
+                     boot, esp_err_to_name(r), tiny_display_brightness(), tail);
+            ESP_LOGI(TAG, "brightness -> %u%%: %s, persisted %s", want,
+                     esp_err_to_name(r), esp_err_to_name(p));
+        }
+        reply(envelope_id, out);
     } else if (strncmp(prompt, "status", 6) == 0) {
         // Machine-readable: the dashboard parses these fields directly. The
         // `summary` field inside carries the sentence a human wants to read, so
@@ -2505,6 +2596,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
               "page <home|status|sensors|settings|wifi|ble|back|next|prev>, "
               "rotate <0|90|180|270|auto|report>, tap <x> <y>, swipe <x0> <y0> <x1> <y1>, "
               "scroll [up|down|top|<±px>], "
+              "brightness [0-100] (colour boards), "
               "sleep [seconds], ota [channel|<url> <sha256>].");
     }
 }

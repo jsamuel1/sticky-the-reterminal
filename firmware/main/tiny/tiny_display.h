@@ -59,6 +59,14 @@ esp_err_t tiny_display_ack_button(int index);
 // Card the panel is showing right now ("" when none) — for ui_tap events.
 const char *tiny_display_current_card_id(void);
 
+// ---- brightness (grammar v22) -----------------------------------------------
+// Panel level 0..100, serialized with renders. ESP_ERR_NOT_SUPPORTED on the
+// e-ink (tiny_board_caps()->brightness false); brightness() is -1 there.
+// Not persisted here: callers that mean it to survive a reboot also write
+// tiny_config_brightness_set().
+esp_err_t tiny_display_set_brightness(uint8_t percent);
+int tiny_display_brightness(void);
+
 // ---- orientation ------------------------------------------------------------
 // Rotation of the CARD LAYOUT, in degrees clockwise (0/90/180/270). The
 // framebuffer, the screenshot and the touch hit-regions all stay in panel

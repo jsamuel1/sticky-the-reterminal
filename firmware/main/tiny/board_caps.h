@@ -24,6 +24,8 @@ typedef struct {
     bool panel;           // any panel driven (false = headless canvas)
     bool color;           // glass shows the accent palette (lcd_palette.h)
     bool dark_theme;      // light-on-black theme (AMOLED: no static white)
+    bool brightness;      // panel level is settable (LCD backlight / AMOLED
+                          // emission): the `brightness` verb (grammar v22)
     bool touch;           // touch controller driven
     bool mic;             // voice capture available
     bool buzzer;          // feedback tones available

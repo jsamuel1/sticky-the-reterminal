@@ -40,6 +40,10 @@ esp_err_t tiny_config_sleepidle_set(uint8_t minutes);
 // beep volume tier: absent = false (normal/full voice)
 bool      tiny_config_beepsoft_get(void);
 esp_err_t tiny_config_beepsoft_set(bool soft);
+// panel brightness 0..100 (grammar v22, colour boards). get: false when never
+// written or out of range; boot passes it through tiny_brightness_boot_level.
+bool      tiny_config_brightness_get(uint8_t *percent);
+esp_err_t tiny_config_brightness_set(uint8_t percent);
 // gallery manifest: url slots survive reboot
 esp_err_t tiny_config_gallery_save(const void *urls, size_t len,
                                    uint8_t count, uint8_t index);

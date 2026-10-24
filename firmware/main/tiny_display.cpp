@@ -697,6 +697,19 @@ extern "C" uint32_t tiny_display_card_gen(void) {
     return g;
 }
 
+// ---- brightness (grammar v22) ----------------------------------------------
+// Under the display mutex: on the AMOLED a level is a QSPI command on the
+// same bus a render's DMA strips use, and on the FNK the LEDC write must not
+// land between lcd_canvas's sleep/wake bookkeeping.
+extern "C" esp_err_t tiny_display_set_brightness(uint8_t percent) {
+    display_lock();
+    const esp_err_t r = sticky_display_set_brightness(percent);
+    display_unlock();
+    return r;
+}
+
+extern "C" int tiny_display_brightness(void) { return sticky_display_brightness(); }
+
 // ---- orientation ------------------------------------------------------------
 // Degrees are the human unit (0/90/180/270) and clockwise as the device turns.
 extern "C" int tiny_display_rotation(void) {
