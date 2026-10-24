@@ -6,6 +6,24 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware, grammar v22** — colour-board brightness. New verb
+  `brightness [0-100]` on the FNK0104S (ST7796 backlight, LEDC duty on
+  GPIO 45) and the AMOLED-1.8 (CO5300 DCS 0x51). Bare `brightness` reports
+  the level and what the next boot will light at. A level applies at once,
+  under the display mutex so it cannot interleave with a frame push, and is
+  saved to NVS (`tiny/cfg` key `bright`). Boot restores it before the first
+  frame lights the panel, never below 10% so a saved 0 cannot leave a
+  buttonless board looking dead. Anything outside 0..100 is refused with
+  the level unchanged. The reTerminal refuses the verb (`not supported`,
+  `caps.brightness` false). `status` gains `brightness` (null on the e-ink)
+  and `caps.brightness`; the heartbeat, BLE catalog and pair claim list
+  `brightness` only on boards that have it, appended after the shared
+  `s_caps[]` roster the provisioning tools read. Settings gains a
+  "brightness: N%" row (25/50/80/100) on the colour boards.
+  `tests/host/brightness_host_test.sh` covers the argument parse, the boot
+  floor and the row cycle. The spoken-replies design proposes v20, which
+  main has since used; it takes the next free number when it lands.
+
 - **firmware** — FNK0104S drives its microSD slot: SDMMC 4-bit on
   CLK 38 / CMD 40 / D0–D3 39/41/48/47 through the GPIO matrix, 20 MHz,
   the board's own 10K pull-ups (`sticky_sdcard_sdmmc.cpp`, same contract as
@@ -33,6 +51,7 @@ release, newest first.
   widths, wrap-safe backoff). `tests/host/sd_report_host_test.sh`: `status`
   and `sd status` read the reconciled snapshot, and the SDMMC driver's
   `present` is mounted-only.
+
 - **firmware, grammar v21** — AMOLED-1.8 V2 auto-rotate. New
   `sticky_imu_qmi8658.cpp` drives the QMI8658 at 0x6B on the shared I2C bus.
   It checks WHO_AM_I 0x05, soft-resets, and runs the accelerometer only

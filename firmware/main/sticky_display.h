@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "esp_err.h"
 
 class Canvas;
@@ -33,3 +35,10 @@ esp_err_t sticky_display_clear();
 // Puts the panel controller to sleep and removes display power. The last
 // e-paper image remains visible without power.
 esp_err_t sticky_display_sleep();
+
+// Panel level 0..100 (grammar v22 `brightness`). Colour boards: LCD backlight
+// duty or AMOLED emission, applied now if the panel is lit, otherwise at the
+// next light-up (lcd_canvas). The e-ink has nothing to dim:
+// ESP_ERR_NOT_SUPPORTED, and brightness() answers -1.
+esp_err_t sticky_display_set_brightness(uint8_t percent);
+int sticky_display_brightness();

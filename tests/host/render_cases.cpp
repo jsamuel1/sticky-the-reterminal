@@ -38,6 +38,8 @@ esp_err_t sticky_display_refresh_partial_baseline(const uint8_t *) { return 0; }
 esp_err_t sticky_display_refresh_monochrome() { return 0; }
 esp_err_t sticky_display_clear() { return 0; }
 esp_err_t sticky_display_sleep() { return 0; }
+esp_err_t sticky_display_set_brightness(uint8_t) { return ESP_ERR_NOT_SUPPORTED; }
+int sticky_display_brightness() { return -1; }
 
 // ---- everything else the renderer calls: "nothing here" ---------------------
 #include "sticky_battery.h"

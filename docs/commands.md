@@ -1,11 +1,12 @@
 ---
 readtime: 3
-description: "The 23 verbs Sticky answers to — one line each, with what the receipt tells you."
+description: "The 23 verbs Sticky answers to, plus `brightness` on the colour boards — one line each, with what the receipt tells you."
 ---
 
 # Commands — everything I answer to
 
-Twenty-three verbs, each dispatched in `tiny_node.cpp`, and my heartbeat
+Twenty-three verbs on every board, plus `brightness` on the colour boards,
+each dispatched in `tiny_node.cpp`, and my heartbeat
 **advertises what I implement** (one drift, below). Envelopes are
 `{type:"invoke", prompt:"<verb> [args]"}`; I always reply — unknown input gets
 the help string, never silence. From any tiny surface:
@@ -32,7 +33,7 @@ use_device invoke → prompt: "status"
 | `swipe` | `x0 y0 x1 y1` | synthetic swipe through the real release classifier | `accepted` / `routed` / `route`; travel inside the 24 px slop is refused, not downgraded to a tap |
 | `scroll` | <code>up&vert;<wbr>down&vert;<wbr>top&vert;<wbr>±px</code> | steps ⅔ of a view; bare form reports | `offset`, `content_h`, `view_h`, `scrollable` |
 | `glance` | — | redraws the current card via *partial* refresh, no network | `refresh:"partial"`, battery, wifi, unread, locked |
-| `status` | — | machine JSON with a human `summary` inside | `fw`, `fw_commit`, `fw_date`, `grammar_version`, `battery_pct`, `battery_mv`, `rssi_dbm`, `card_id`, `locked`, `last_boot`, `board`, `caps` |
+| `status` | — | machine JSON with a human `summary` inside | `fw`, `fw_commit`, `fw_date`, `grammar_version`, `battery_pct`, `battery_mv`, `rssi_dbm`, `card_id`, `locked`, `last_boot`, `board`, `caps`, `brightness` |
 | `sensors` | `[card]` | live read: SHT40, IMU, RTC, battery (BQ27220, or the FNK0104S GPIO 9 divider); `card` also paints the page | JSON. `battery.source` is `bq27220` or `adc`; an `adc` battery has only `percent` (resting-voltage estimate), `voltage_mv`, `charging:null`, `present`. On `bq27220` **read `mah_trusted` first** — the gauge claims 7500 mAh on a 750 mAh pack |
 | `miccheck` | `[seconds]` | records PDM audio, replies levels instead of uploading | <code>verdict:"live&vert;<wbr>SILENT"</code>, `rms`, `peak` |
 | `ask` | text | a full owner-scoped agent turn — tools, memory, other devices — streamed onto home | the answer. One at a time; a second is refused |
@@ -41,13 +42,16 @@ use_device invoke → prompt: "status"
 | `messages` | <code>[unread &vert; thread &lt;login&gt;]</code> | paints the inbox or a thread; `unread` answers counts and paints **nothing** | counts, or card id |
 | `lock` / `unlock` | — | pocket lockout: touch discarded, AI button refused, every mic path dead at one funnel | `locked` |
 | `sleep` | `[seconds]` | reply first, goodbye card, then deep sleep at 10&ndash;20 µA; AI button wakes | ok, sent while the radio is up |
+| `brightness` | `[0-100]` | colour boards only (grammar v22): sets the backlight (FNK0104S) or emission level (AMOLED-1.8) now and saves it; boot restores it, never below 10. Bare form reports. Settings has the same control as a row | `brightness`, `boot`, `persisted`. A non-number or 101+ is refused with the level unchanged; the reTerminal answers `not supported` |
 | `play` | `<manifest_url> [interval_s] [max_frames]` / `stop` / `status` | frames prefetched to PSRAM *before* the ack; a pure metronome paints them | `status` holds the last run's verdict |
 | `config` | <code>{"networks":[{ssid,password} &vert; {ssid,forget:true}]}</code> | merges a Wi-Fi roaming list into NVS; **identity fields are refused** | counts only — keys never echoed, log prints `<redacted>` |
 | `ota` | `[channel]` or `<url> <sha256>` | sha256-verified stage, reply, *then* reboot into a rollback-armed trial. Either form refuses an image not stamped for my board. The url form takes only `https://plugin.tiny.technology/media/<key>` and skips the version check (the pusher proves ancestry) | ok, a downgrade refusal (`force:"1"` overrides, loudly), or a board-guard / sha256 / url refusal |
 | `sd` | <code>[status &vert; df &vert; ls [path] &vert; probe &vert; format yes]</code> | the microSD's own verb (0.26); same shape as the `sd` object in `status`. On the FNK0104S (SDMMC 4-bit, no detect switch) `present` means mounted; `status` and `sd status` re-check the slot first, and an unmounted slot is re-probed at most every 8 s | JSON, or `no card`; `format` without `yes` is refused |
 
 !!! note "Parity, restored in 0.28.0"
-    **23 dispatched, 23 advertised.** Between 0.26.0 and 0.27.x `sd` dispatched
+    **23 dispatched, 23 advertised** on every board, and `brightness` makes
+    24 on the colour boards: it is advertised only where `caps.brightness`
+    is true. Between 0.26.0 and 0.27.x `sd` dispatched
     but was missing from the heartbeat `caps[]` array, so nothing offered it.
     0.28.0 (grammar v12) added it. The rule stands: advertise exactly what
     dispatches — and this box is the receipt that it was once broken.

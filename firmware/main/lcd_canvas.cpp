@@ -264,3 +264,11 @@ esp_err_t lcd_canvas_set_brightness(uint8_t percent)
 }
 
 uint8_t lcd_canvas_brightness() { return s_brightness; }
+
+// sticky_display.h's board-neutral face of the two above.
+esp_err_t sticky_display_set_brightness(uint8_t percent)
+{
+    return lcd_canvas_set_brightness(percent);
+}
+
+int sticky_display_brightness() { return s_brightness; }

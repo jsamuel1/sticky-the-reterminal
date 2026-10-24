@@ -332,6 +332,31 @@ esp_err_t tiny_config_beepsoft_set(bool soft) {
     return err;
 }
 
+// ---- panel brightness (grammar v22) ----------------------------------------
+// Raw percent. Absent or > 100 answers false: the caller picks the default,
+// a value from some future encoding is never trusted as a level.
+bool tiny_config_brightness_get(uint8_t *percent) {
+    if (nvs_ready() != ESP_OK) return false;
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    const bool ok = nvs_get_u8(h, "bright", &v) == ESP_OK && v <= 100;
+    nvs_close(h);
+    if (ok && percent) *percent = v;
+    return ok;
+}
+
+esp_err_t tiny_config_brightness_set(uint8_t percent) {
+    if (percent > 100) return ESP_ERR_INVALID_ARG;
+    ESP_RETURN_ON_ERROR(nvs_ready(), TAG, "nvs");
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NS, NVS_READWRITE, &h), TAG, "open rw");
+    esp_err_t err = nvs_set_u8(h, "bright", percent);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
 // ---- gallery manifest ("the last-sent photo set survives") -----------------
 // The photos themselves live on the media host; what survives a reboot is
 // the MANIFEST — url slots + count + last-viewed index. Blob layout is the

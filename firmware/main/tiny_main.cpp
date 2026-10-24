@@ -32,6 +32,7 @@
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_touch.h"
 #include "tiny/tiny_config.h"
+#include "tiny/tiny_brightness.h"
 #include "tiny/tiny_ble.h"
 #include "tiny/tiny_beacon.h"
 #include "tiny/tiny_wifi.h"
@@ -88,6 +89,18 @@ extern "C" void app_main(void)
     // Rotation lock survives reboot too — restore before the
     // orient watcher starts, or gravity wins one turn before the lock lands.
     tiny_orient_set_auto(tiny_config_rotauto_get());
+    // v22: panel brightness survives reboot. lcd_canvas lights the panel only
+    // on the first committed frame (the splash below), so the saved level is
+    // the FIRST light, never a flash at the default. Floor-clamped: a saved 0
+    // must not boot a board with no buttons into a glass that looks dead.
+    if (tiny_board_caps()->brightness) {
+        uint8_t saved = 0;
+        const bool have = tiny_config_brightness_get(&saved);
+        const uint8_t lvl = tiny_brightness_boot_level(have, saved);
+        tiny_display_set_brightness(lvl);
+        ESP_LOGI(TAG, "brightness %u%% (%s)", lvl,
+                 have ? (lvl == saved ? "saved" : "saved, floor-clamped") : "default");
+    }
     tiny_bootmark_stage(3);
 
     if (!glance_wake) {
