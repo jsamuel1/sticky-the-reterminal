@@ -159,7 +159,10 @@ notes. A menu shows up to 24 items and unstages rows that scroll out of view
 
 Any card may declare `"priority":"alert"` — today a `!` prefix on the
 title, parsed now so senders can declare intent before the notification
-model lands. On colour glass the title and its rule also turn red.
+model lands. On colour glass the title and its rule also turn red. On the
+FNK0104S my status light also turns magenta while that card is on glass,
+and goes back off (or green for waiting DMs) when the next card replaces it
+— see [Hardware → status light](hardware.md#fnk0104s-status-light).
 
 ### accent *(colour boards, grammar v16)*
 

@@ -97,6 +97,37 @@ Three vendor HAL paths — 4-gray full (slowest, prettiest), monochrome full
 (~600 ms), partial (fastest, ghosts). Which card uses which, and the 1.5 s
 coalescing rule, are in [Cards → refresh policy](cards.md#refresh-policy).
 
+## FNK0104S status light
+
+The Freenove FNK0104S has one more light beside its touchscreen: a single
+addressable RGB LED, not a second panel. What the 4.0" schematic and
+Freenove's own sketches say, and what the firmware does with it:
+
+| | |
+|---|---|
+| part | LED2, XL-5050RGBC-WS2812B — one pixel, GRB order (`Sketch_02.1_LedPixel`, `LEDS_COUNT 1`, `TYPE_GRB`) |
+| data | net `RGB_LED` → ESP32-S3 pin 48, **GPIO42** (MTMS; not a strapping pin). DOUT is not connected, so there is no chain |
+| power | VDD on the **+5** rail: USB VBUS through a B5819W diode, or the cell through the SL2305 switch — it lights on battery too. 3.3 V data drives a 5 V-powered WS2812B with no level shifter, as Freenove's demos do |
+| shares | nothing with touch (FT6336U on I²C SDA 16 / SCL 15, INT 17, RST 18) or the LCD |
+| driver | `espressif/led_strip` 3.0.3, one RMT TX channel, 48 symbols, no DMA (`tiny_led.cpp`) |
+| config | `CONFIG_TINY_STATUS_LED` (FNK0104S only), `CONFIG_TINY_STATUS_LED_BRIGHTNESS` 1–64 of 255, default 8 |
+
+What it shows, strongest first:
+
+| colour | while |
+|---|---|
+| off | pocket-locked, or entering deep sleep (always) |
+| blue | the mic is capturing |
+| amber | the upload / ask is in flight |
+| red | 5 s after an ask failed |
+| magenta | a `"priority":"alert"` card is on glass |
+| green | the platform reports unread DMs (heartbeat `unread` > 0) |
+| off | otherwise |
+
+The last two are steady: magenta clears when the next card commits, green
+when the heartbeat reports zero. The reTerminal and AMOLED-1.8 have no such
+light and carry none of this code.
+
 ## What this body cannot do
 
 - **No speaker.** GPIO48 drives a magnetic buzzer via LEDC PWM: chimes and

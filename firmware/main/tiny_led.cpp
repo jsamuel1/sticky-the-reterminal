@@ -198,6 +198,26 @@ extern "C" void tiny_led_error(void)
     xSemaphoreGive(s_mux);
 }
 
+// Attention layer. Steady inputs with no timer: the light follows them until
+// the cause changes (another card commits / the heartbeat reports 0).
+extern "C" void tiny_led_alert(bool on)
+{
+    if (!s_mux) return;
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_in.alert = on;
+    apply_locked();  // unchanged colour writes nothing (s_shown check)
+    xSemaphoreGive(s_mux);
+}
+
+extern "C" void tiny_led_unread(bool on)
+{
+    if (!s_mux) return;
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_in.unread = on;
+    apply_locked();
+    xSemaphoreGive(s_mux);
+}
+
 extern "C" void tiny_led_sync(void) { apply(); }
 
 extern "C" void tiny_led_prepare_sleep(void)
