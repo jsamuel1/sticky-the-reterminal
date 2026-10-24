@@ -1,7 +1,6 @@
 #!/bin/bash
-# touchmap host test — compiles the SHIPPED firmware/main/tiny/tiny_touch_map.h
-# (FT6336 parser + sensor->physical axis map) with the SHIPPED canvas.cpp and
-# font.cpp, and checks the map composes with Canvas::to_logical.
+# touchmap host test — compiles shipped colour-board touch parsers/maps with
+# shipped Canvas and verifies physical-to-logical composition.
 set -euo pipefail
 cd "$(dirname "$0")"
 c++ -std=c++17 -Wall -Werror -I ../../firmware/main \

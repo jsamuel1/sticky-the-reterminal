@@ -661,7 +661,10 @@ esp_err_t tp_init() {
     if (r != ESP_OK) {
         ESP_LOGI(kTag, "CST820 silent at 0x%02X (%s): pulsing TCA9554 reset",
                  CST820_I2C_ADDR, esp_err_to_name(r));
-        board_touch_reset();
+        const esp_err_t rr = board_touch_reset();
+        if (rr != ESP_OK)
+            ESP_LOGW(kTag, "CST820 reset pulse failed (%s); probing anyway",
+                     esp_err_to_name(rr));
         r = tp_read(kCst816RegChipId, &chip, 1);
     }
     if (r != ESP_OK) {
@@ -672,7 +675,18 @@ esp_err_t tp_init() {
     }
     uint8_t fw = 0;
     tp_read(kCst816RegFwVersion, &fw, 1);
-    const esp_err_t ka = cst_keep_awake();
+    esp_err_t ka = cst_keep_awake();
+    if (ka != ESP_OK) {
+        ESP_LOGW(kTag, "CST820 keep-awake failed (%s): reset and retry",
+                 esp_err_to_name(ka));
+        const esp_err_t rr = board_touch_reset();
+        ka = rr == ESP_OK ? cst_keep_awake() : rr;
+    }
+    if (ka != ESP_OK) {
+        ESP_LOGE(kTag, "CST820 keep-awake failed: %s", esp_err_to_name(ka));
+        tp_detach();
+        return ka;
+    }
     uint16_t cw = 0, ch = 0;
     canvas_physical(cw, ch);
     const TouchAxisMap m = tp_axis_map(cw, ch);
@@ -691,24 +705,21 @@ void tp_to_screen(uint16_t rx, uint16_t ry, uint16_t &sx, uint16_t &sy) {
     touch_map_point(tp_axis_map(cw, ch), rx, ry, cw, ch, sx, sy);
 }
 
-// ~3 s of consecutive failed polls: one recovery attempt per failure run.
+// ~3 s of consecutive failed polls: one recovery attempt per failure run
+// (touch_fail_run_step saturates, so a bus that stays dead is reset once).
 constexpr int kRecoverAfterBadFrames = 100;
 
 void panel_touch_task(void *) {
     TickType_t next = xTaskGetTickCount();
-    int bad_frames = 0;
+    TouchFailRun run;
     uint8_t gesture = 0;  // controller's own gesture code, bench log only
     while (true) {
         TouchPoint p = {};
         if (tp_sample(p) != ESP_OK) p.count = -1;
-        if (p.count < 0) {
-            // Log the first bus error of a run, not 33 per second.
-            if (bad_frames++ == 0)
-                ESP_LOGW(kTag, "%s: read failed / busy frame", kTpName);
-            if (bad_frames == kRecoverAfterBadFrames) tp_recover();
-        } else {
-            bad_frames = 0;
-        }
+        touch_fail_run_step(run, p.count < 0, kRecoverAfterBadFrames);
+        // Log the first bus error of a run, not 33 per second.
+        if (run.log) ESP_LOGW(kTag, "%s: read failed / busy frame", kTpName);
+        if (run.recover) tp_recover();
         const bool in_grace = (xTaskGetTickCount() - s_tp_init_tick) <
                               pdMS_TO_TICKS(kBootGraceMs);
         // §11 pocket lockout: same single gate as the GT911 task.
@@ -756,7 +767,7 @@ void panel_touch_task(void *) {
             }
             s_tp_touching = false;
             gesture = 0;
-        } else if (bad_frames > 3) {
+        } else if (run.bad > 3) {
             // A finger "held" across a dead bus is not a tap: drop it.
             s_tp_touching = false;
         }
