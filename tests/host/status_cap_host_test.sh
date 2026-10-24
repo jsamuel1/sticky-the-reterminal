@@ -22,13 +22,16 @@ FLOOR = 1536
 if cap < FLOOR:
     sys.exit(f"FAIL TINY_STATUS_JSON_CAP={cap} < {FLOOR} (measured {MEASURED} B on glass)")
 call = re.compile(r"tiny_node_status_json\(\s*(\w+)\s*,\s*([^)]*)\)")
-calls = 0
+definition = re.compile(
+    r"tiny_node_status_json\(\s*char\s*\*\s*out\s*,\s*size_t\s+cap\s*\)"
+)
+raw_calls = calls = definitions = 0
 for src in sorted(root.rglob("*.c*")):
     text = src.read_text(errors="replace")
+    raw_calls += len(re.findall(r"\btiny_node_status_json\s*\(", text))
+    definitions += len(definition.findall(text))
     for c in call.finditer(text):
         buf, size = c.group(1), c.group(2).strip()
-        if buf == "out":  # the definition itself: (char *out, size_t cap)
-            continue
         calls += 1
         where = f"{src.relative_to(root)}:{text.count(chr(10), 0, c.start()) + 1}"
         if size not in (f"sizeof {buf}", f"sizeof({buf})"):
@@ -38,6 +41,13 @@ for src in sorted(root.rglob("*.c*")):
             got = decls[-1] if decls else "no char[] declaration"
             sys.exit(f"FAIL {where}: buffer {buf} is [{got}], want [TINY_STATUS_JSON_CAP]")
         print(f"PASS {where}: {buf}[TINY_STATUS_JSON_CAP]")
+if definitions != 1:
+    sys.exit(f"FAIL expected one tiny_node_status_json definition, found {definitions}")
+if raw_calls != definitions + calls:
+    sys.exit(
+        "FAIL unrecognized tiny_node_status_json invocation: "
+        f"found {raw_calls} occurrences, parsed {definitions} definition + {calls} callers"
+    )
 if calls < 2:
     sys.exit(f"FAIL expected the status verb and settings-page callers, found {calls}")
 print(f"status cap host test passed (cap {cap}, {calls} callers)")

@@ -14,11 +14,13 @@ release, newest first.
   fails on any caller not sized by the constant, or a cap under 1536 B. Reply
   shape unchanged, so the grammar is unchanged.
 
-- **bench OTA fixes** — `ota <url> <sha256>` now sends every two-argument
-  form, plus any one-argument value with a scheme (`http://`, `ftp://`, …),
-  to the URL guard. Invalid direct URLs are refused instead of being read as
-  channel names with their second argument silently ignored. This matches the
-  v15 contract, so the grammar is unchanged. `tools/ota_push.py` counts only
+- **firmware, grammar v19** — direct-artifact OTA now classifies every
+  two-argument form, plus any one-argument value with a scheme (`http://`,
+  `ftp://`, …), as direct. Exactly two arguments reach the strict URL/sha
+  guards; extra arguments get the usage refusal. Invalid direct URLs can no
+  longer be read as channel names with argument 2 silently ignored. Bare
+  one-argument channel names and bare `ota` keep their channel behavior.
+  `tools/ota_push.py` counts only
   `OTA staged` as success (`... - nothing staged` used to pass), and a
   configured bench board that is offline now fails the job instead of
   skipping. Each CI `build` job asserts its app's board stamp

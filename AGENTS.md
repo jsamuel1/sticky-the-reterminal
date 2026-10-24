@@ -29,7 +29,7 @@ recovery/                factory-dump manifest + sha (the 32 MB dump itself is g
 
 Versions live in exactly one place: `firmware/main/tiny/tiny_version.h` —
 `TINY_FW_VERSION` (string, e.g. `0.27.0-u2`) and `TINY_GRAMMAR_VERSION`
-(int, currently 16). CMake reads the first; the heartbeat and `status` report
+(int, currently 19). CMake reads the first; the heartbeat and `status` report
 both. Bump the grammar on **any** change to a verb, its args, or a reply
 shape, and write a line in `CHANGELOG.md`.
 
@@ -156,7 +156,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 
 Other NVS namespaces: `tinywifi` (breadcrumbs), `tinyaskq`, `tinyboot`.
 
-## 5. The verb grammar (v15) and the parity rule
+## 5. The verb grammar (v19) and the parity rule
 
 Dispatched in `tiny_node.cpp::dispatch_inner()` — **23 verbs**:
 

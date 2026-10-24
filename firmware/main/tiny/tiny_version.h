@@ -145,4 +145,11 @@
 //        byte-identical (tests/host/render_golden.txt).
 //      + `rotate auto` on a board with no IMU stays manual (reply mode
 //        "manual"); settings hides the follow-gravity row there.
-#define TINY_GRAMMAR_VERSION 18  // v18: status caps + battery_mv; compact layouts
+// v19 = strict direct-artifact OTA argument classification:
+//      + any `ota` invocation with two or more arguments uses the direct form;
+//        exactly two then reach the URL/sha guards, while extra arguments get
+//        the usage refusal. A one-argument value containing "://" also uses
+//        the direct form. Bare one-argument channel names and bare `ota` keep
+//        the channel behavior. This prevents malformed URLs and channel plus
+//        extra-argument forms from silently discarding argument 2.
+#define TINY_GRAMMAR_VERSION 19  // v19: strict direct-artifact OTA arguments
