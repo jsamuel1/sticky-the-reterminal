@@ -6,6 +6,11 @@
 # devbench-<board>; tools/devbench/fetch_ci.sh pulls them into
 # tools/devbench/images/ci-<board>/ so the bench flashes exactly what CI built.
 # Public repository → standard runners cost no Actions minutes.
+#
+# On push to main, job ota-bench then pushes each board's app image to the
+# owner's bench boards over the tiny.technology relay (tools/ota_push.py,
+# AGENTS.md §10b). Secrets: TINY_TOKEN (user session JWT), TINY_BENCH_DEVICES
+# ({"<board>":"<device id>"}). Missing secret or board entry = notice + skip.
 name: firmware-build
 on:
   push:
@@ -13,9 +18,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# PRs supersede themselves. main does not: a newer push must never cancel an
+# ota-bench job between "ota sent" and "new fw_commit seen".
 concurrency:
   group: firmware-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -58,3 +65,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: tests/run.sh
+
+  # Which boards have a bench device, and is the token still good? Board names
+  # only leave this job; the token and device ids stay in secrets.
+  ota-plan:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      boards: ${{ steps.plan.outputs.boards }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        shell: bash
+        env:
+          TINY_TOKEN: ${{ secrets.TINY_TOKEN }}
+          TINY_BENCH_DEVICES: ${{ secrets.TINY_BENCH_DEVICES }}
+        run: |
+          if [ -z "$TINY_TOKEN" ] || [ -z "$TINY_BENCH_DEVICES" ]; then
+            echo "::notice::bench OTA skipped: TINY_TOKEN or TINY_BENCH_DEVICES secret not set"
+            echo 'boards=[]' >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          days=$(python3 tools/ota_push.py --token-days)
+          echo "TINY_TOKEN expires in $days days"
+          if [ "$days" -lt 14 ]; then
+            echo "::error::TINY_TOKEN (user session JWT) expires in $days days - run 'tiny-tech login' and 'gh secret set TINY_TOKEN' (AGENTS.md 10b)"
+            exit 1
+          fi
+          boards=$(python3 -c 'import json,os; m=json.loads(os.environ["TINY_BENCH_DEVICES"]); print(json.dumps(sorted(b for b in ("reterminal","fnk0104s","amoled18") if m.get(b))))') \
+            || { echo "::error::TINY_BENCH_DEVICES is not a JSON object"; exit 1; }
+          for b in reterminal fnk0104s amoled18; do
+            case "$boards" in *"\"$b\""*) ;; *) echo "::notice::bench OTA: no TINY_BENCH_DEVICES entry for $b - skipped";; esac
+          done
+          echo "boards=$boards" >> "$GITHUB_OUTPUT"
+
+  ota-bench:
+    needs: [build, host-tests, ota-plan]
+    if: needs.ota-plan.outputs.boards != '[]' && needs.ota-plan.outputs.boards != ''
+    concurrency:
+      group: ota-bench
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        board: ${{ fromJSON(needs.ota-plan.outputs.boards) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # ancestry check against the on-glass fw_commit
+      - uses: actions/download-artifact@v4
+        with:
+          name: devbench-${{ matrix.board }}
+          path: img
+      - name: push ${{ matrix.board }}
+        shell: bash
+        env:
+          TINY_TOKEN: ${{ secrets.TINY_TOKEN }}
+          TINY_BENCH_DEVICES: ${{ secrets.TINY_BENCH_DEVICES }}
+          BOARD: ${{ matrix.board }}
+        run: |
+          export TINY_DEVICE=$(python3 -c 'import json,os; print(json.loads(os.environ["TINY_BENCH_DEVICES"]).get(os.environ["BOARD"],""))')
+          unset TINY_BENCH_DEVICES
+          [ -n "$TINY_DEVICE" ] || { echo "::notice::no bench device for $BOARD"; exit 0; }
+          python3 tools/ota_push.py --board "$BOARD" --sha "$GITHUB_SHA" --image img/tiny_sticky.bin

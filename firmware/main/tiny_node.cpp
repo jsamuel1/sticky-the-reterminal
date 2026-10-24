@@ -2361,15 +2361,35 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                                "play stop first");
         else
             reply(envelope_id, "stream refused: need https manifest url");
-    } else if (strncmp(prompt, "ota", 3) == 0) {
-        // ota [channel] — stage from the channel pointer, reply, THEN reboot
-        // (reply first: after esp_restart nobody would ever hear the result).
-        const char *ch = prompt[3] == ' ' ? prompt + 4 : "sticky-dev";
-        esp_err_t r = tiny_ota_check_and_stage(ch);
+    } else if (strncmp(prompt, "ota", 3) == 0 && (prompt[3] == 0 || prompt[3] == ' ')) {
+        // ota [channel]        — stage from the channel pointer
+        // ota <url> <sha256>   — stage this exact artifact (v15, CI bench push)
+        // Reply first, THEN reboot: after esp_restart nobody hears the result.
+        const char *arg = prompt[3] == ' ' ? prompt + 4 : "";
+        char a1[200] = "", a2[80] = "", extra[2] = "";
+        const int na = sscanf(arg, "%199s %79s %1s", a1, a2, extra);
+        const bool url_form = strncmp(a1, "https://", 8) == 0;
+        esp_err_t r;
+        if (url_form && na != 2) {
+            reply(envelope_id, "OTA refused: usage ota <url> <sha256>");
+            return;
+        }
+        r = url_form ? tiny_ota_stage_url(a1, a2)
+                     : tiny_ota_check_and_stage(a1[0] ? a1 : "sticky-dev");
         if (r == ESP_OK) {
             reply(envelope_id, "OTA staged + sha verified — rebooting into trial (rollback-armed)");
             vTaskDelay(pdMS_TO_TICKS(1500));
             esp_restart();
+        } else if (url_form && r == ESP_ERR_INVALID_ARG) {
+            reply(envelope_id,
+                  "OTA refused: url must be https://plugin.tiny.technology/media/<key> "
+                  "and sha256 64 hex - nothing staged");
+        } else if (r == ESP_ERR_INVALID_RESPONSE) {
+            reply(envelope_id,
+                  "OTA refused: board guard - image is not stamped for this board ("
+                  "see log) - nothing staged, slot untouched");
+        } else if (r == ESP_ERR_INVALID_CRC) {
+            reply(envelope_id, "OTA refused: sha256 mismatch - nothing staged");
         } else if (r == ESP_ERR_INVALID_VERSION) {
             reply(envelope_id, "already up to date (" TINY_FW_VERSION ")");
         } else if (r == ESP_ERR_NOT_SUPPORTED) {
@@ -2380,9 +2400,8 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                   TINY_FW_VERSION " and bundle has no \"force\":\"1\" — "
                   "publish a newer version, or set force to downgrade");
         } else if (r == ESP_ERR_INVALID_STATE && !tiny_board_caps()->ota) {
-            reply(envelope_id,
-                  "OTA refused: no channel carries images for this board - "
-                  "flash it over USB");
+            reply(envelope_id, "OTA refused: OTA is disabled on this board - "
+                               "flash it over USB");
         } else {
             char out[96];
             snprintf(out, sizeof out, "OTA failed: %s", esp_err_to_name(r));
@@ -2396,7 +2415,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
               "page <home|status|sensors|settings|wifi|ble|back|next|prev>, "
               "rotate <0|90|180|270|auto|report>, tap <x> <y>, swipe <x0> <y0> <x1> <y1>, "
               "scroll [up|down|top|<±px>], "
-              "sleep [seconds], ota [channel].");
+              "sleep [seconds], ota [channel|<url> <sha256>].");
     }
 }
 

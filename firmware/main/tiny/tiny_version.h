@@ -102,4 +102,16 @@
 //        denied/error variants. ob: namespace gains ob:pair (new code now)
 //        and ob:portal (the Phase A paste page, kept as the fallback);
 //        `page onboard portal` previews it.
-#define TINY_GRAMMAR_VERSION 14  // v14: pair_code in status + /info
+// v15 = board-stamped images + direct-artifact OTA (CI bench push):
+//      + `ota <url> <sha256>` — stage that exact artifact. url must be
+//        https://plugin.tiny.technology/media/<key>, sha256 64 hex. No
+//        version ordering on this form (CI ships many builds of one version
+//        string); the pusher (tools/ota_push.py) proves git ancestry first.
+//        `ota [channel]` is unchanged, ver_cmp and all.
+//      + every image carries a 32-byte board stamp in .rodata_custom_desc
+//        (image offset 288); both ota forms refuse an image whose stamp is
+//        not this board's, before the slot is touched. New reply sentences:
+//        "OTA refused: board guard ...", "OTA refused: sha256 mismatch ...",
+//        "OTA refused: url must be ...".
+//      + fnk0104s and amoled18 accept OTA: status `absent` drops "ota".
+#define TINY_GRAMMAR_VERSION 15  // v15: ota <url> <sha256> + board stamp

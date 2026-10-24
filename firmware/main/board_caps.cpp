@@ -1,6 +1,7 @@
 #include "tiny/board_caps.h"
 
 #include "sdkconfig.h"
+#include "tiny/tiny_ota_util.h"
 
 namespace {
 
@@ -48,7 +49,7 @@ constexpr tiny_board_caps_t kCaps = {
     .sd = false,
     .power_latch = false,
     .page_buttons = false,
-    .ota = false,
+    .ota = true,  // image carries a board stamp; tiny_ota refuses foreign ones
     .flash_mb = 16,
 };
 #elif defined(CONFIG_TINY_BOARD_AMOLED18)
@@ -72,7 +73,7 @@ constexpr tiny_board_caps_t kCaps = {
     .sd = false,
     .power_latch = false,
     .page_buttons = false,
-    .ota = false,
+    .ota = true,  // image carries a board stamp; tiny_ota refuses foreign ones
     .flash_mb = 16,
 };
 #else
@@ -80,6 +81,41 @@ constexpr tiny_board_caps_t kCaps = {
 #endif
 
 }  // namespace
+
+// The board stamp (tiny/tiny_ota_util.h): IDF's linker script places
+// .rodata_custom_desc straight after esp_app_desc_t, so these 32 bytes sit at
+// image offset 288 and arrive in the first chunk of any OTA download. The
+// section has no KEEP in the linker script, so the component links with
+// `-u tiny_board_stamp` (main/CMakeLists.txt) and tiny_ota reads it at run
+// time; either alone keeps it alive under --gc-sections.
+extern "C" const tiny_board_stamp_t tiny_board_stamp
+    __attribute__((section(".rodata_custom_desc"), used)) = {
+        {'T', 'I', 'N', 'Y', 'B', 'R', 'D', '1'},
+#if defined(CONFIG_TINY_BOARD_RETERMINAL)
+        "reterminal",
+#elif defined(CONFIG_TINY_BOARD_FNK0104S)
+        "fnk0104s",
+#elif defined(CONFIG_TINY_BOARD_AMOLED18)
+        "amoled18",
+#endif
+        {0},
+};
+
+namespace {
+constexpr bool same(const char *a, const char *b) {
+    return *a == *b && (*a == 0 || same(a + 1, b + 1));
+}
+}  // namespace
+static_assert(same(kCaps.id,
+#if defined(CONFIG_TINY_BOARD_RETERMINAL)
+                   "reterminal"
+#elif defined(CONFIG_TINY_BOARD_FNK0104S)
+                   "fnk0104s"
+#else
+                   "amoled18"
+#endif
+                   ),
+              "board stamp must equal board_caps id");
 
 extern "C" const tiny_board_caps_t *tiny_board_caps(void) { return &kCaps; }
 

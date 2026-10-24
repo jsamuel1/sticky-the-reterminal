@@ -43,7 +43,7 @@ use_device invoke → prompt: "status"
 | `sleep` | `[seconds]` | reply first, goodbye card, then deep sleep at 10&ndash;20 µA; AI button wakes | ok, sent while the radio is up |
 | `play` | `<manifest_url> [interval_s] [max_frames]` / `stop` / `status` | frames prefetched to PSRAM *before* the ack; a pure metronome paints them | `status` holds the last run's verdict |
 | `config` | <code>{"networks":[{ssid,password} &vert; {ssid,forget:true}]}</code> | merges a Wi-Fi roaming list into NVS; **identity fields are refused** | counts only — keys never echoed, log prints `<redacted>` |
-| `ota` | `[channel]` | sha256-verified stage, reply, *then* reboot into a rollback-armed trial | ok, or a downgrade refusal (`force:"1"` overrides, loudly) |
+| `ota` | `[channel]` or `<url> <sha256>` | sha256-verified stage, reply, *then* reboot into a rollback-armed trial. Either form refuses an image not stamped for my board. The url form takes only `https://plugin.tiny.technology/media/<key>` and skips the version check (the pusher proves ancestry) | ok, a downgrade refusal (`force:"1"` overrides, loudly), or a board-guard / sha256 / url refusal |
 | `sd` | <code>[status &vert; df &vert; ls [path] &vert; probe &vert; format yes]</code> | the microSD's own verb (0.26); same shape as the `sd` object in `status` | JSON, or `no card`; `format` without `yes` is refused |
 
 !!! note "Parity, restored in 0.28.0"

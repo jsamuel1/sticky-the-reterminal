@@ -7,6 +7,11 @@
 // Rollback safety: CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is on — the new
 // image boots as PENDING_VERIFY and tiny_node marks it valid only after its
 // first heartbeat 200 (a build that can't reach home rolls back by itself).
+//
+// Two entries, one stage (stage_from): `ota [channel]` reads the pointer
+// above; `ota <url> <sha256>` (grammar v15) takes the artifact directly from
+// the CI bench pusher (tools/ota_push.py). Both refuse an image whose board
+// stamp (tiny/tiny_ota_util.h) is not this board's, before esp_ota_begin.
 #include "tiny/tiny_ota.h"
 
 #include <limits.h>
@@ -14,6 +19,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
@@ -22,9 +28,12 @@
 #include "mbedtls/sha256.h"
 #include "tiny/board_caps.h"
 #include "tiny/tiny_config.h"
+#include "tiny/tiny_ota_util.h"
 #include "tiny/tiny_version.h"
 
 static const char *TAG = "tiny_ota";
+
+extern "C" const tiny_board_stamp_t tiny_board_stamp;  // board_caps.cpp
 
 // Artifact hosts pinned (API_CONTRACT.md): media lives on a DIFFERENT host
 // than the api, so both are legitimate; nothing else is.
@@ -142,13 +151,112 @@ static int ver_cmp(const char *pointer, const char *current) {
     return 0;
 }
 
+// Read until `want` bytes are in buf (HTTP reads may return short).
+static int read_full(esp_http_client_handle_t c, char *buf, int want) {
+    int have = 0;
+    while (have < want) {
+        int n = esp_http_client_read(c, buf + have, want - have);
+        if (n <= 0) return have;
+        have += n;
+    }
+    return have;
+}
+
+// The shared stage: stream url into the next slot while hashing, and refuse
+// unless (1) the first bytes are an app image stamped for THIS board and
+// project, and (2) the whole download's sha256 equals sha_want. Check (1)
+// runs before esp_ota_begin, so a foreign image never erases the slot.
+static esp_err_t stage_from(const char *url, const char *sha_want, const char *label) {
+    const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
+    if (!slot) return ESP_ERR_NOT_FOUND;
+    ESP_LOGI(TAG, "staging %s -> %s (%s)", label, slot->label, url);
+
+    esp_http_client_config_t hc = {};
+    hc.url = url;
+    hc.timeout_ms = 30000;
+    hc.crt_bundle_attach = esp_crt_bundle_attach;
+    esp_http_client_handle_t c = esp_http_client_init(&hc);
+    if (!c) return ESP_FAIL;
+    esp_err_t err = esp_http_client_open(c, 0);
+    if (err != ESP_OK) { esp_http_client_cleanup(c); return err; }
+    int64_t total = esp_http_client_fetch_headers(c);
+    int st = esp_http_client_get_status_code(c);
+    if (st != 200 || total < (int64_t)tiny_ota_util::kHeadLen ||
+        total > (int64_t)slot->size) {
+        ESP_LOGE(TAG, "artifact fetch: status %d, len %lld (slot %lu)", st,
+                 (long long)total, (unsigned long)slot->size);
+        esp_http_client_cleanup(c);
+        return ESP_FAIL;
+    }
+
+    static char chunk[4096];
+    const int head = read_full(c, chunk, (int)tiny_ota_util::kHeadLen);
+    char img_board[20];
+    const tiny_ota_util::Verdict v = tiny_ota_util::parse_image(
+        (const uint8_t *)chunk, head, esp_app_get_description()->project_name,
+        tiny_board_stamp.board, img_board, sizeof img_board);
+    if (v != tiny_ota_util::IMG_OK) {
+        ESP_LOGE(TAG, "REFUSED board guard: image is %s (image board '%s', "
+                 "this board '%s') - slot %s untouched",
+                 tiny_ota_util::verdict_name(v), img_board, tiny_board_stamp.board,
+                 slot->label);
+        esp_http_client_cleanup(c);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    ESP_LOGI(TAG, "board guard ok: image stamped '%s'", img_board);
+
+    esp_ota_handle_t ota = 0;
+    err = esp_ota_begin(slot, total, &ota);
+    if (err != ESP_OK) { esp_http_client_cleanup(c); return err; }
+
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+
+    int64_t got = 0;
+    int n = head;  // the head is already in chunk: write it first
+    while (true) {
+        err = esp_ota_write(ota, chunk, n);
+        if (err != ESP_OK) break;
+        mbedtls_sha256_update(&sha, (const unsigned char *)chunk, n);
+        got += n;
+        if (got >= total) break;
+        n = esp_http_client_read(c, chunk, sizeof chunk);
+        if (n <= 0) { err = ESP_FAIL; break; }
+    }
+    esp_http_client_cleanup(c);
+
+    unsigned char digest[32];
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+
+    if (err != ESP_OK || got != total) {
+        esp_ota_abort(ota);
+        ESP_LOGE(TAG, "download broke at %lld/%lld: %s", (long long)got,
+                 (long long)total, esp_err_to_name(err));
+        return err != ESP_OK ? err : ESP_FAIL;
+    }
+
+    char sha_got[65];
+    for (int i = 0; i < 32; i++) sprintf(sha_got + 2 * i, "%02x", digest[i]);
+    if (strcasecmp(sha_got, sha_want) != 0) {
+        esp_ota_abort(ota);
+        ESP_LOGE(TAG, "sha256 MISMATCH want %s got %s", sha_want, sha_got);
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    err = esp_ota_end(ota);
+    if (err != ESP_OK) return err;
+    err = esp_ota_set_boot_partition(slot);
+    if (err != ESP_OK) return err;
+    ESP_LOGI(TAG, "staged %s in %s, sha verified — reboot to apply", label,
+             slot->label);
+    return ESP_OK;
+}
+
 extern "C" esp_err_t tiny_ota_check_and_stage(const char *channel) {
-    // The OTA channels carry reTerminal images (32 MB layout, e-ink pins).
-    // Staging one on another board would boot the wrong pin map. Refuse
-    // before any network until the channel names the board it targets.
     if (!tiny_board_caps()->ota) {
-        ESP_LOGE(TAG, "REFUSED: no OTA channel carries %s images",
-                 tiny_board_caps()->id);
+        ESP_LOGE(TAG, "REFUSED: OTA disabled on %s", tiny_board_caps()->id);
         return ESP_ERR_INVALID_STATE;
     }
     char ver[48], url[256], sha_want[72];
@@ -182,73 +290,26 @@ extern "C" esp_err_t tiny_ota_check_and_stage(const char *channel) {
         ESP_LOGE(TAG, "artifact host not in allowlist: %s", url);
         return ESP_ERR_INVALID_ARG;
     }
+    return stage_from(url, sha_want, ver);
+}
 
-    const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
-    if (!slot) return ESP_ERR_NOT_FOUND;
-    ESP_LOGI(TAG, "staging %s -> %s (%s)", ver, slot->label, url);
-
-    // Streamed download: open → read chunks → esp_ota_write + sha256.
-    esp_http_client_config_t hc = {};
-    hc.url = url;
-    hc.timeout_ms = 30000;
-    hc.crt_bundle_attach = esp_crt_bundle_attach;
-    esp_http_client_handle_t c = esp_http_client_init(&hc);
-    if (!c) return ESP_FAIL;
-    esp_err_t err = esp_http_client_open(c, 0);
-    if (err != ESP_OK) { esp_http_client_cleanup(c); return err; }
-    int64_t total = esp_http_client_fetch_headers(c);
-    int st = esp_http_client_get_status_code(c);
-    if (st != 200 || total <= 0 || total > (int64_t)slot->size) {
-        ESP_LOGE(TAG, "artifact fetch: status %d, len %lld (slot %lu)", st,
-                 (long long)total, (unsigned long)slot->size);
-        esp_http_client_cleanup(c);
-        return ESP_FAIL;
+extern "C" esp_err_t tiny_ota_stage_url(const char *url, const char *sha256) {
+    if (!tiny_board_caps()->ota) {
+        ESP_LOGE(TAG, "REFUSED: OTA disabled on %s", tiny_board_caps()->id);
+        return ESP_ERR_INVALID_STATE;
     }
-
-    esp_ota_handle_t ota = 0;
-    err = esp_ota_begin(slot, total, &ota);
-    if (err != ESP_OK) { esp_http_client_cleanup(c); return err; }
-
-    mbedtls_sha256_context sha;
-    mbedtls_sha256_init(&sha);
-    mbedtls_sha256_starts(&sha, 0);
-
-    static char chunk[4096];
-    int64_t got = 0;
-    while (got < total) {
-        int n = esp_http_client_read(c, chunk, sizeof chunk);
-        if (n <= 0) { err = ESP_FAIL; break; }
-        err = esp_ota_write(ota, chunk, n);
-        if (err != ESP_OK) break;
-        mbedtls_sha256_update(&sha, (const unsigned char *)chunk, n);
-        got += n;
+    // Exact origin + one media key; anything else is refused before any
+    // network. No ver_cmp on this form: CI pushes many builds of one version
+    // string, so the version cannot order them. The pusher proves ancestry
+    // (docs/release.md rule 5) before it sends the verb; the board stamp,
+    // sha256 pin, host pin and rollback-armed trial stay mandatory here.
+    if (!tiny_ota_util::media_url_ok(url)) {
+        ESP_LOGE(TAG, "REFUSED: url is not %s<key>", tiny_ota_util::kMediaPrefix);
+        return ESP_ERR_INVALID_ARG;
     }
-    esp_http_client_cleanup(c);
-
-    unsigned char digest[32];
-    mbedtls_sha256_finish(&sha, digest);
-    mbedtls_sha256_free(&sha);
-
-    if (err != ESP_OK || got != total) {
-        esp_ota_abort(ota);
-        ESP_LOGE(TAG, "download broke at %lld/%lld: %s", (long long)got,
-                 (long long)total, esp_err_to_name(err));
-        return err != ESP_OK ? err : ESP_FAIL;
+    if (!tiny_ota_util::sha256_hex_ok(sha256)) {
+        ESP_LOGE(TAG, "REFUSED: sha256 must be 64 hex chars");
+        return ESP_ERR_INVALID_ARG;
     }
-
-    char sha_got[65];
-    for (int i = 0; i < 32; i++) sprintf(sha_got + 2 * i, "%02x", digest[i]);
-    if (strcasecmp(sha_got, sha_want) != 0) {
-        esp_ota_abort(ota);
-        ESP_LOGE(TAG, "sha256 MISMATCH want %s got %s", sha_want, sha_got);
-        return ESP_ERR_INVALID_CRC;
-    }
-
-    err = esp_ota_end(ota);
-    if (err != ESP_OK) return err;
-    err = esp_ota_set_boot_partition(slot);
-    if (err != ESP_OK) return err;
-    ESP_LOGI(TAG, "staged %s in %s, sha verified — reboot to apply", ver,
-             slot->label);
-    return ESP_OK;
+    return stage_from(url, sha256, "url");
 }

@@ -53,3 +53,8 @@ add_custom_target(tiny_gen_commit ALL
   COMMENT "gen tiny_commit.h (git describe --always --dirty)")
 add_dependencies(${COMPONENT_LIB} tiny_gen_commit)
 target_include_directories(${COMPONENT_LIB} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen)
+
+# Board stamp (board_caps.cpp, .rodata_custom_desc at image offset 288): force
+# the symbol into the link so --gc-sections can never drop the one thing an
+# OTA image uses to say which board it is for.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u tiny_board_stamp")

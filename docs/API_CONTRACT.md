@@ -30,7 +30,8 @@ Third person; contracts don't do voices. Base URL from config (`api`, default
 | `POST /api/devices/transcript` | after every ask | `text`, `label:"sticky-ask"`, `audioUrl`, `durationS` | durable record |
 | `POST /api/devices/event` | button tap on a card | `kind:"ui_tap"`, `card_id`, `button_id` | lands in the owner's activity feed |
 | `POST /api/devices/messages` | messages app, `messages` verb | <code>op:unread&vert;<wbr>inbox&vert;<wbr>thread&vert;<wbr>send</code> (+`with` / `to`,`body`) | see below |
-| `PUT /api/firmware/manifest` | `ota`, boot check | `channel:"sticky-stable"` | `{bundle:{url, sha256[, force]}}` |
+| `PUT /api/firmware/manifest` | `ota [channel]`, boot check | `channel:"sticky-stable"` | `{bundle:{url, sha256[, force]}}` |
+| `GET https://plugin.tiny.technology/media/<key>` | `ota <url> <sha256>` (v15) | — (capability URL, no auth) | the app image; `Content-Length` set |
 
 `status` exposes `poll_cadence`, so the claim is a read, not a belief. Boot
 and wake always start *active*.
@@ -59,6 +60,23 @@ The original trigger was **direction-blind** (`strcmp` difference, not
   publisher also proves ancestry ([release rule 5](release.md)).
 - **watch** — the dashboard's `ota` opens a 30-minute watch and renders a
   verdict: upgraded / DOWNGRADED / expired — never silence.
+
+Since grammar v15 two more:
+
+- **board** — every image carries a 32-byte stamp in `.rodata_custom_desc`
+  (`"TINYBRD1"` + board id, NUL-padded), which IDF links directly after
+  `esp_app_desc_t`: image offset 288. Both `ota` forms read the first 320
+  bytes, compare the stamp and the project name with the running image's,
+  and refuse before `esp_ota_begin`. Unstamped (pre-v15) images are refused
+  too. Parser: `firmware/main/tiny/tiny_ota_util.h`.
+- **direct artifact** — `ota <url> <sha256>` takes the image straight from
+  the media store (`https://plugin.tiny.technology/media/<key>`, one path
+  segment, nothing else). It has no version ordering: CI produces many builds
+  of one version string. The downgrade guard for this form lives in the
+  pusher, `tools/ota_push.py`, which refuses unless the on-glass `fw_commit`
+  is a git ancestor of the image's commit. Uploads use the user session
+  (`Authorization: Bearer`), `contentType:"application/octet-stream"`; 2.6 MB
+  measured fine (the worker caps decoded media at 6 MB).
 
 ## Provisioning portal (device-side, Nicla-compatible)
 

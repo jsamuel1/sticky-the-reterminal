@@ -29,7 +29,7 @@ recovery/                factory-dump manifest + sha (the 32 MB dump itself is g
 
 Versions live in exactly one place: `firmware/main/tiny/tiny_version.h` —
 `TINY_FW_VERSION` (string, e.g. `0.27.0-u2`) and `TINY_GRAMMAR_VERSION`
-(int, currently 12). CMake reads the first; the heartbeat and `status` report
+(int, currently 15). CMake reads the first; the heartbeat and `status` report
 both. Bump the grammar on **any** change to a verb, its args, or a reply
 shape, and write a line in `CHANGELOG.md`.
 
@@ -66,7 +66,8 @@ tests/run.sh                                 # host tests: askq, bootmark, sleep
   HAL set per board in `main/CMakeLists.txt`, run-time facts in
   `tiny/board_caps.h` (status `board` + `absent[]`). Colour boards layer
   `sdkconfig.defaults.<board>` on the base, use `partitions_16mb.csv`, log on
-  USB-Serial-JTAG, and refuse `ota` (no channel carries their images). Shared
+  USB-Serial-JTAG, and accept `ota` only for images stamped with their own
+  board id (see §10b). Shared
   `tiny_*` code takes no board `#if` beyond touch/audio/buttons/console.
 
 - `tools/port.sh` resolves the port and **refuses to guess** when several
@@ -88,6 +89,8 @@ tests/run.sh                                 # host tests: askq, bootmark, sleep
   (`devbench-<board>`, made by `tools/devbench/mkset.py`).
   `tools/devbench/fetch_ci.sh [board…]` pulls the latest green `main` run
   into `tools/devbench/images/ci-<board>/` — flash those, not local builds.
+  On push to `main`, job `ota-bench` then pushes each board's app image to
+  the owner's bench boards over the relay (§10b).
   `release.yml` and `docs.yml` stay workflow_dispatch only; the docs site
   publishes via `mkdocs gh-deploy` to `gh-pages` (legacy Pages).
 
@@ -132,7 +135,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 | `tiny_wifi` | STA join + roaming `networks[]` walk · 30 s re-roam task · per-walk failure log (boot "confession" card on wrong password) |
 | `tiny_config` | NVS namespace `tiny`, key `cfg`: ONE JSON blob {device_id, token, api, name, networks[]} · `merge_json` is the single owner of merge semantics (portal, serial, `config` verb all funnel here) |
 | `tiny_provision` | softAP `tiny-XXXX` / `tinysetup` / 192.168.4.1 · `GET /` form · `GET /info` · `POST /setup` (JSON from the iOS app, or urlencoded from a human) → merge → reboot · also the **rescue portal** (APSTA) after auth-halt |
-| `tiny_ota` | `PUT /api/firmware/manifest` → sha256-pinned download to the other slot → reboot as rollback-armed trial · hosts pinned to `tiny.technology` / `plugin.tiny.technology` · numeric `ver_cmp` refuses downgrade unless `force` |
+| `tiny_ota` | `ota [channel]`: `PUT /api/firmware/manifest` → sha256-pinned download to the other slot → reboot as rollback-armed trial · numeric `ver_cmp` refuses downgrade unless `force` · `ota <url> <sha256>` (v15): media-store URL only, no ver_cmp (pusher proves ancestry) · both refuse an image whose board stamp (offset 288, `tiny/tiny_ota_util.h`) is not this board's, before the slot is touched |
 | `tiny_stream` | `play <manifest>`: all frames prefetched to PSRAM in the **node task** before the ack, then a socket-less metronome task |
 | `tiny_askq` | NVS ring of 8 queued text asks; one drained per healthy heartbeat |
 | `tiny_agent` | which public tiny answers (`agent` verb, roster in NVS, `@slug` badge) |
@@ -141,7 +144,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 
 Other NVS namespaces: `tinywifi` (breadcrumbs), `tinyaskq`, `tinyboot`.
 
-## 5. The verb grammar (v12) and the parity rule
+## 5. The verb grammar (v15) and the parity rule
 
 Dispatched in `tiny_node.cpp::dispatch_inner()` — **23 verbs**:
 
@@ -331,6 +334,42 @@ Measured 2026-10-18 (both on `303a:1001`, ESP32-S3 QFN56 v0.2, embedded PSRAM 8 
 - On CH340, esptool-js's baud change re-opens the port, which resets the board.
   It then falls back to 115200 on its own, so probes work but slowly.
 - The first stub read after each command reports "serial noise"; the per-chunk retry succeeds.
+
+### 10b. Bench OTA: CI pushes every green `main` build to the bench
+
+Job `ota-bench` in `.github/workflows/firmware-build.yml` runs on push to
+`main` after `build` and `host-tests`. For each board with an entry in
+`TINY_BENCH_DEVICES` it downloads `devbench-<board>`, and
+`tools/ota_push.py` does: `status` (board must match, OTA must not be
+`absent`) → `git merge-base --is-ancestor <on-glass fw_commit> <sha>`
+(release rule 5; a downgrade, a dirty or unknown on-glass commit is refused)
+→ `POST /api/media` → relay `ota <url> <sha256>` → poll `status` until
+`fw_commit` is the pushed sha (5 min; the old commit coming back = rollback =
+failed job). Runs never interleave (`concurrency: ota-bench`).
+
+Secrets (repo jsamuel1/sticky-the-reterminal). The device map is keyed by
+**device id**, not name (names collide; tiny-eba6 once enrolled as tiny-ed39):
+
+```sh
+tiny-tech login                       # 90-day user session JWT → ~/.tiny/credentials.json
+python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.tiny/credentials.json")))["token"])' \
+  | gh secret set TINY_TOKEN -R jsamuel1/sticky-the-reterminal
+gh secret set TINY_BENCH_DEVICES -R jsamuel1/sticky-the-reterminal \
+  -b '{"fnk0104s":"4e6ed293-f54f-48e7-88d5-330c84234cd8"}'
+```
+
+- A missing secret or a board with no entry is a `::notice::` and a skip,
+  never a failure. A JWT with under 14 days left fails the job loudly; refresh
+  with the two commands above. The token is never printed.
+- Bootstrap: an image from before grammar v15 refuses OTA on the colour
+  boards and has no board stamp, so the first v15 image goes on by USB
+  (devbench). From then on CI keeps the bench current.
+- Prove the guard by hand (the board must stay on its slot and the reply must
+  say "board guard"):
+  `TINY_DEVICE=<id> tools/ota_push.py --creds --board fnk0104s --sha HEAD --image firmware/build-amoled18/tiny_sticky.bin --board-override`.
+- `tools/ota_push.py --inspect <bin>` prints an image's stamp.
+- Cloudflare 403s ("error code: 1010") the default `Python-urllib`
+  User-Agent on tiny.technology; the pusher sends its own.
 
 ## 11. Things that are personal, secret, or must never be committed
 

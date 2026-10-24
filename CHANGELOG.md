@@ -6,6 +6,21 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware + CI** (grammar v15) — bench OTA. Every app image now carries a
+  32-byte board stamp (`TINYBRD1` + board id) in `.rodata_custom_desc`, which
+  IDF links straight after `esp_app_desc_t` (image offset 288). `tiny_ota`
+  reads it from the first 320 downloaded bytes and refuses a foreign,
+  unstamped or truncated image before `esp_ota_begin`, so the inactive slot
+  is never touched. With that guard, fnk0104s and amoled18 accept OTA
+  (`absent` drops `"ota"`). New verb form `ota <url> <sha256>`: url must be
+  `https://plugin.tiny.technology/media/<key>`, no version ordering (the
+  pusher proves git ancestry); sha256 pin and rollback-armed trial as before.
+  `tools/ota_push.py` drives it (status → ancestry → upload → ota → status),
+  and the `ota-bench` job in `firmware-build.yml` runs it after every green
+  push to `main` for each board in `TINY_BENCH_DEVICES`. Host test:
+  `tests/host/ota_host_test.sh` (parser cases + the Python twin on the same
+  bytes + the real `.bin` of each local build).
+
 - **tools** — `tools/provision_new.sh` is board-aware and builds from any
   source: `--board reterminal|fnk0104s|amoled18`, `--repo <url|path>`,
   `--branch <ref>` (temp clone unless it is this checkout's HEAD; the flashed
