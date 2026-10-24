@@ -30,8 +30,11 @@ release, newest first.
   is null, not 0, with no reading.
   The `sensors` summary now counts `errors[]` as `(N errors)` (it said
   `unread`, which misnamed the FNK no-plausible-cell fault), and the sensors
-  card footer names the GPIO 9 divider when that read fails;
-  `tests/host/sensors_summary_host_test.sh` pins both.- **tests** — `tests/host/batt_curve_host_test.sh` (39 checks, built with
+  card footer names the GPIO 9 divider when that read fails (`no plausible
+  cell` only when the divider measured a non-cell voltage, `no reading` for
+  an ADC/calibration fault); `tests/host/sensors_summary_host_test.sh` pins
+  both.
+- **tests** — `tests/host/batt_curve_host_test.sh` (39 checks, built with
   UBSan in trap mode): median, spike tolerance, divider precision, curve,
   plausibility gates, no signed overflow across INT_MIN..INT_MAX.
 
