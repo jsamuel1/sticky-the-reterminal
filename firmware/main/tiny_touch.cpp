@@ -11,6 +11,7 @@
 #include "tiny/tiny_touch.h"
 #include "esp_attr.h"  // EXT_RAM_BSS_ATTR: statics off the internal rail
 #include "tiny/tiny_lock.h"
+#include "tiny/tiny_admit.h"
 
 #include <algorithm>
 #include <cctype>
@@ -249,6 +250,13 @@ void act_task(void *) {
     ActMsg m = {};
     while (true) {
         if (xQueueReceive(s_act_q, &m, portMAX_DELAY) != pdTRUE) continue;
+        // Work/sleep admission (tiny_admit.h): routes fetch over HTTPS and
+        // paint; none may run once a sleep is claimed. Held for the route.
+        tiny_admit::Work work;
+        if (!work) {
+            ESP_LOGW(kTag, "action %d dropped: going to sleep", (int)m.act);
+            continue;
+        }
         // Wedge watchdog stamp: the node task watches
         // this. A route that wedges the act task must never silence the whole
         // device — better one honest reboot than a brick nobody can reach.

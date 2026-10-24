@@ -9,6 +9,7 @@
 #include "tiny/tiny_agent.h"
 #include "tiny/tiny_lock.h"
 #include "tiny/tiny_led.h"
+#include "tiny/tiny_admit.h"
 
 #include "tiny/tiny_provision.h"
 
@@ -564,6 +565,15 @@ static void voice_fail_card(const char *title, const char *why, esp_err_t r) {
 
 extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
                                       char *out, size_t out_cap) {
+    // Work/sleep admission (tiny_admit.h): an ask records the mic, holds a
+    // TLS socket and paints its answer for up to ~90 s, and every ask path
+    // (relay verb, AI/BOOT button, typed, queued drain) comes through here,
+    // so the PWR key or auto-sleep cannot power down in the middle of one.
+    tiny_admit::Work work;
+    if (!work) {
+        snprintf(out, out_cap, "ask refused: going to sleep");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_ask_mux) s_ask_mux = xSemaphoreCreateMutex();
     if (!s_ask_mux || xSemaphoreTake(s_ask_mux, 0) != pdTRUE) {
         snprintf(out, out_cap, "ask already in flight - one panel, one answer");
@@ -1489,6 +1499,8 @@ static esp_err_t render_thread(const char *json, char *sum, size_t scap, int old
 // nothing has to remember which card is on the glass.
 extern "C" esp_err_t tiny_node_messages_open(const char *what) {
     if (!what) return ESP_ERR_INVALID_ARG;
+    tiny_admit::Work work;  // HTTPS + a refresh: never under a sleep
+    if (!work) return ESP_ERR_INVALID_STATE;
     // "c:<login>" — compose. Pure UI, no network: hand off to the shell's
     // keyboard and let its "ok" call tiny_node_messages_send.
     if (strncmp(what, "c:", 2) == 0) return tiny_shell_compose(what + 2);
@@ -1521,6 +1533,8 @@ extern "C" esp_err_t tiny_node_messages_open(const char *what) {
 extern "C" esp_err_t tiny_node_messages_send(const char *login,
                                              const char *body) {
     if (!login || !*login || !body || !*body) return ESP_ERR_INVALID_ARG;
+    tiny_admit::Work work;  // HTTPS + a refresh: never under a sleep
+    if (!work) return ESP_ERR_INVALID_STATE;
     if (!tiny_wifi_is_up()) return ESP_ERR_INVALID_STATE;
     char *buf = msg_buf_alloc();
     if (!buf) return ESP_ERR_NO_MEM;
@@ -2516,6 +2530,15 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         // which holds the power latch and gates the wake pin.
         int secs = 0;
         sscanf(prompt + 5, "%d", &secs);
+        // This verb runs as admitted work (dispatch), so it claims sleep
+        // only when it is the ONE thing in flight: a physical ask or a
+        // messages fetch on another task refuses it instead of losing power
+        // mid-capture. From here on nothing new is admitted.
+        if (!tiny_admit::work_to_sleep()) {
+            reply(envelope_id, "sleep refused: busy (an ask or fetch is in "
+                               "flight) - retry when it finishes");
+            return;
+        }
         char bye[160];
         if (secs > 0)
             snprintf(bye, sizeof bye,
@@ -2669,6 +2692,13 @@ void tiny_node_crumb_boot_capture(void) {
 const char *tiny_node_died_doing(void) { return s_died_doing; }
 
 static void dispatch(const char *envelope_id, const char *prompt) {
+    // Work/sleep admission (tiny_admit.h). A verb that arrives after the
+    // PWR key or auto-sleep claimed sleep is refused, not run half-way.
+    tiny_admit::Work work;
+    if (!work) {
+        reply(envelope_id, "refused: going to sleep");
+        return;
+    }
     const bool secret = strncmp(prompt, "config ", 7) == 0;
     strlcpy(s_crumb, secret ? "config <redacted>" : prompt, sizeof s_crumb);
     s_crumb_step[0] = 0;  // stages belong to THIS verb only
@@ -2925,7 +2955,14 @@ static void node_task(void *) {
         const bool idle = cadence_idle();
         // Auto-sleep sits AFTER envelope handling in the tick, so a
         // verb that just arrived always executes before the due-check runs.
-        if (autosleep_due() && !s_crumb_inflight && !tiny_stream_playing()) {
+        // Claiming sleep (tiny_admit.h) is what makes "nothing in flight"
+        // true for the rest of this branch: a physical ask, a messages
+        // fetch or a verb either finished first or now refuses. A stream
+        // only starts from a verb, so once claimed it can only stop.
+        if (autosleep_due() && tiny_admit::sleep_claim()) {
+          if (tiny_stream_playing()) {
+            tiny_admit::sleep_release();  // due again next tick
+          } else {
             BatteryDetail bd = {};
             // No evidence of running on battery = wall power: stay on the
             // relay. That is: no gauge at all; a divider that answers
@@ -2987,7 +3024,9 @@ static void node_task(void *) {
             }
             // Charging or unenrolled: not due again until activity resets —
             // push the clock so this branch doesn't re-run every tick.
+            tiny_admit::sleep_release();
             note_activity();
+          }
         }
         hb_countdown -= idle ? 6 : 1;  // idle tick spends the whole 30s budget
         vTaskDelay(pdMS_TO_TICKS(idle ? POLL_IDLE_MS : POLL_ACTIVE_MS));
@@ -3028,12 +3067,18 @@ void tiny_node_stop(void) { s_stop = true; }
 // the unlock, not at whatever the pocket last did.
 void tiny_node_note_activity(void) { note_activity(); }
 
-// A local "sleep now" (AMOLED-1.8 PWR key long press). Same guards as
-// auto-sleep for the things a human cannot see from the glass: never in the
-// middle of a verb or a stream. Same goodbye-card contract as the `sleep`
-// verb, so the wake paint has its baseline. No timer wake: the human asked.
+// A local "sleep now" (AMOLED-1.8 PWR key long press). Never in the middle
+// of work or a stream: it claims the work/sleep gate (tiny_admit.h) first,
+// which fails while a verb, an ask (any path) or a messages fetch is in
+// flight and, once held, admits no new one. Same goodbye-card contract as
+// the `sleep` verb, so the wake paint has its baseline. No timer wake: the
+// human asked.
 esp_err_t tiny_node_sleep_now(const char *why) {
-    if (s_crumb_inflight || tiny_stream_playing()) return ESP_ERR_INVALID_STATE;
+    if (!tiny_admit::sleep_claim()) return ESP_ERR_INVALID_STATE;
+    if (tiny_stream_playing()) {
+        tiny_admit::sleep_release();
+        return ESP_ERR_INVALID_STATE;
+    }
     ESP_LOGI(TAG, "sleep now: %s", why ? why : "local request");
     const char *bye = "sleeping - press BOOT to wake";
     char card[240];

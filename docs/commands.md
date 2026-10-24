@@ -41,7 +41,7 @@ use_device invoke → prompt: "status"
 | `agent` | <code>[slug &vert; list &vert; clear &vert; add&vert;<wbr>rm &lt;slug&gt;]</code> | which tiny answers my asks; persists in NVS | `active`, `roster` |
 | `messages` | <code>[unread &vert; thread &lt;login&gt;]</code> | paints the inbox or a thread; `unread` answers counts and paints **nothing** | counts, or card id |
 | `lock` / `unlock` | — | pocket lockout: touch discarded, AI button refused, every mic path dead at one funnel | `locked` |
-| `sleep` | `[seconds]` | reply first, goodbye card, then deep sleep at 10&ndash;20 µA; AI button wakes | ok, sent while the radio is up |
+| `sleep` | `[seconds]` | reply first, goodbye card, then deep sleep at 10&ndash;20 µA; AI button wakes. Refused while an ask or fetch runs on another task | ok, sent while the radio is up; or `sleep refused: busy ...` (v23) |
 | `brightness` | `[0-100]` | colour boards only (grammar v22): sets the backlight (FNK0104S) or emission level (AMOLED-1.8) now and saves it; boot restores it, never below 10. Bare form reports. Settings has the same control as a row | `brightness`, `boot`, `persisted`. A non-number or 101+ is refused with the level unchanged; the reTerminal answers `not supported` |
 | `play` | `<manifest_url> [interval_s] [max_frames]` / `stop` / `status` | frames prefetched to PSRAM *before* the ack; a pure metronome paints them | `status` holds the last run's verdict |
 | `config` | <code>{"networks":[{ssid,password} &vert; {ssid,forget:true}]}</code> | merges a Wi-Fi roaming list into NVS; **identity fields are refused** | counts only — keys never echoed, log prints `<redacted>` |

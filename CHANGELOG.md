@@ -18,7 +18,16 @@ release, newest first.
   PCF85063A is the board's RTC. On every board the boot clock now really
   comes from the RTC; it used to be read before the RTC was attached, so
   `clock_source` stayed `unset` until SNTP. Auto-sleep treats USB power as
-  wall power. `tests/host/pmu_host_test.sh` pins the decoding.
+  wall power. A failed PMU setup write (ADC, battery detect, gauge, key
+  IRQs, stale-key clear) now fails init and drops the device, so no
+  battery or PWR-key capability is reported half set up. Every sleep path
+  (PWR key, auto-sleep, the `sleep` verb) claims one work/sleep admission
+  gate (`tiny/tiny_admit.h`) that every relay verb, ask path, messages
+  fetch, touch route and page flip enters, so sleep refuses while any of
+  them is in flight and none starts once sleep is claimed; the `sleep`
+  verb answers `sleep refused: busy` then. `tests/host/pmu_host_test.sh`
+  pins the decoding and setup failures; `admit_host_test.sh` races the
+  gate.
 
 - **firmware, grammar v22** — colour-board brightness. New verb
   `brightness [0-100]` on the FNK0104S (ST7796 backlight, LEDC duty on

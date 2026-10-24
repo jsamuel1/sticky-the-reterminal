@@ -16,8 +16,9 @@ void      tiny_node_stop(void);
 // chord restores the full auto-sleep budget starting at unlock).
 void      tiny_node_note_activity(void);
 // Local deep sleep now (a hardware key, not a verb): paints the sleep card
-// and does not return. ESP_ERR_INVALID_STATE (and no sleep) while a verb or
-// a stream is in flight.
+// and does not return. ESP_ERR_INVALID_STATE (and no sleep) while any work
+// (a verb, an ask on any path, a messages fetch, a touch route or page
+// flip) or a stream is in flight - see tiny/tiny_admit.h.
 esp_err_t tiny_node_sleep_now(const char *why);
 // Post a device event upstream (ui_tap etc) — used by tiny_touch.
 esp_err_t tiny_node_post_event(const char *kind, const char *json_fields);
