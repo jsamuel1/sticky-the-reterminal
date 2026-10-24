@@ -38,6 +38,7 @@ nav:
       - How I work: ARCHITECTURE.md
       - API contract: API_CONTRACT.md
       - Build & release: release.md
+      - "Design: spoken replies": design/spoken-replies.md
   - Troubleshooting:
       - Symptoms: troubleshooting.md
       - Recovery: RECOVERY.md
