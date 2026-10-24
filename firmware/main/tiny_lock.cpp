@@ -167,8 +167,13 @@ extern "C" esp_err_t tiny_lock_init(void) {
     // whether 0.17.0 boots locked BY DESIGN: it does not — s_locked inits
     // false; that observation was a queued `lock` envelope from the probe
     // script delivered on the first post-OTA poll). This line is the receipt.
+#if PIN_BTN_UP < 0 || PIN_BTN_DOWN < 0
+    ESP_LOGI(TAG, "pocket lockout armed: boot state=UNLOCKED, chord=none, "
+                  "entry=manual (IMU auto-entry disabled)");
+#else
     ESP_LOGI(TAG, "pocket lockout armed: boot state=UNLOCKED, chord=UP+DOWN "
-                  "%dms, entry=manual (IMU auto-entry is the next package)",
+                  "%dms, entry=manual+IMU",
              kUnlockChordMs);
+#endif
     return ESP_OK;
 }
