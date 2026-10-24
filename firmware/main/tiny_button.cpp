@@ -19,6 +19,7 @@
 #include "tiny/tiny_node.h"
 #include "tiny/tiny_shell.h"
 #include "tiny/tiny_lock.h"
+#include "tiny/tiny_admit.h"
 
 static const char *TAG = "tiny_button";
 
@@ -59,6 +60,9 @@ extern "C" esp_err_t tiny_button_request_voice_ask(void) {
     }
     AskReq req = {};
     if (!s_ask_q) return ESP_ERR_INVALID_STATE;
+    // A claimed sleep refuses at the door, so the press is felt as refused
+    // (callers beep) instead of queueing an ask tiny_node_do_ask will refuse.
+    if (tiny_admit::sleep_claimed()) return ESP_ERR_INVALID_STATE;
     if (xQueueSend(s_ask_q, &req, 0) != pdTRUE) {
         ESP_LOGW(TAG, "ask already in flight - request dropped");
         return ESP_ERR_INVALID_STATE;
@@ -72,6 +76,7 @@ extern "C" esp_err_t tiny_button_request_voice_ask(void) {
 extern "C" esp_err_t tiny_button_request_text_ask(const char *text) {
     if (!s_ask_q) return ESP_ERR_INVALID_STATE;
     if (!text || !*text) return ESP_ERR_INVALID_ARG;
+    if (tiny_admit::sleep_claimed()) return ESP_ERR_INVALID_STATE;
     AskReq req = {};
     if (strlcpy(req.text, text, sizeof req.text) >= sizeof req.text) {
         ESP_LOGE(TAG, "typed ask %d B exceeds %u — refusing to clip a question",
@@ -109,6 +114,10 @@ static void nav_task(void *) {
     Nav n;
     for (;;) {
         if (xQueueReceive(s_nav_q, &n, portMAX_DELAY) != pdTRUE) continue;
+        // Work/sleep admission (tiny_admit.h): once a sleep is claimed, a
+        // page flip must not paint over the goodbye card the wake diffs.
+        tiny_admit::Work work;
+        if (!work) continue;
         switch (n) {
             case Nav::kHome: tiny_shell_home(); break;
             // Phone rule (M12): when the card on the glass overflows, UP/DOWN

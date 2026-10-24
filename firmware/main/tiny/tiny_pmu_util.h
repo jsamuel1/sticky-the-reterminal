@@ -121,6 +121,70 @@ constexpr KeyEvent key_event(uint8_t intsts2)
                                         : KeyEvent::None;
 }
 
+// ---- init sequence ----
+//
+// The writes init() makes after the chip ID matches, in order, each one
+// required: without the ADC channels there is no voltage, without battery
+// detection STATUS1 bit3 means nothing, without the gauge the percent
+// register is not a reading, without the key IRQs the PWR key is dead, and
+// a stale key bit left latched would fire a press nobody made. So the first
+// failure ends the sequence and is returned; the driver then drops its
+// device handle, every reader answers ESP_ERR_INVALID_STATE, and a later
+// init() runs the whole sequence again.
+//
+// Bus is anything with
+//   int rd(uint8_t reg, uint8_t &value);    0 = ok, else the error
+//   int wr(uint8_t reg, uint8_t value);
+//   void changed(const char *what, uint8_t reg, uint8_t before,
+//                uint8_t after, int err);   one call per write made
+// so the host test drives this exact sequence against a fake register file.
+
+struct SetupStep {
+    uint8_t reg;
+    uint8_t bits;      // set_bits: OR these in, keep the rest
+    bool clear_write;  // write `bits` as-is (write-1-to-clear), no read
+    const char *what;
+};
+
+constexpr SetupStep kSetup[] = {
+    {kRegAdcCtrl, kAdcMeasure, false, "ADC VBAT/VBUS/VSYS"},
+    {kRegBatDetCtrl, 1U << 0, false, "battery detect"},
+    {kRegGaugeCtrl, 1U << 3, false, "fuel gauge"},
+    {kRegIntEn1 + 1, kIrq2PkeyShort | kIrq2PkeyLong, false, "PWR key IRQ"},
+    // Drop a press latched before boot (the one that powered us on, or a
+    // stale one): the key reader must only see presses made from here on.
+    {kRegIntSts1 + 1, kIrq2PkeyShort | kIrq2PkeyLong, true, "stale PWR key clear"},
+};
+
+struct SetupResult {
+    int err = 0;                  // 0 = every step done
+    const char *step = nullptr;   // the step that failed
+    bool read_failed = false;     // the failure was the read, not the write
+};
+
+template <typename Bus>
+SetupResult run_setup(Bus &bus)
+{
+    SetupResult r;
+    for (const SetupStep &s : kSetup) {
+        if (s.clear_write) {
+            const int e = bus.wr(s.reg, s.bits);
+            bus.changed(s.what, s.reg, 0, s.bits, e);
+            if (e) { r.err = e; r.step = s.what; return r; }
+            continue;
+        }
+        uint8_t v = 0;
+        int e = bus.rd(s.reg, v);
+        if (e) { r.err = e; r.step = s.what; r.read_failed = true; return r; }
+        const uint8_t nv = static_cast<uint8_t>(v | s.bits);
+        if (nv == v) continue;  // already as needed: no write
+        e = bus.wr(s.reg, nv);
+        bus.changed(s.what, s.reg, v, nv, e);
+        if (e) { r.err = e; r.step = s.what; return r; }
+    }
+    return r;
+}
+
 }  // namespace axp2101
 
 // ---- PCF85063A -------------------------------------------------------------

@@ -193,6 +193,9 @@
 //        battery_voltage and rtc flip true, `absent` drops "battery", "rtc".
 //      + `sensors` battery.source gains "axp2101": that object carries ONLY
 //        source, percent, voltage_mv, charging, full and present.
+//      + `sleep` may now answer `sleep refused: busy (...)` and not sleep,
+//        when an ask or messages fetch runs on another task; any verb that
+//        arrives while a sleep is claimed answers `refused: going to sleep`.
 //      + not a reply-shape change, recorded so nobody hunts: the boot clock
 //        now really comes from the RTC on every board (it was read before
 //        the RTC was attached, so clock_source stayed "unset" until SNTP).

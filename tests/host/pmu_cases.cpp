@@ -68,6 +68,81 @@ static void axp_key() {
                                            axp2101::kIrq2PkeyLong == (1u << (10 - 8)));
 }
 
+// A fake AXP2101 register file. fail_rd/fail_wr = the register whose read /
+// write answers an error (-1 = none).
+struct FakeBus {
+    uint8_t regs[256] = {};
+    int fail_rd = -1, fail_wr = -1;
+    int writes = 0;
+    int rd(uint8_t reg, uint8_t &v) {
+        if (reg == fail_rd) return 0x107;  // ESP_ERR_TIMEOUT
+        v = regs[reg];
+        return 0;
+    }
+    int wr(uint8_t reg, uint8_t v) {
+        ++writes;
+        if (reg == fail_wr) return 0x107;
+        if (reg == axp2101::kRegIntSts1 + 1) regs[reg] &= static_cast<uint8_t>(~v);
+        else regs[reg] = v;
+        return 0;
+    }
+    void changed(const char *, uint8_t, uint8_t, uint8_t, int) {}
+};
+
+static void axp_setup() {
+    using namespace axp2101;
+    {
+        FakeBus b;
+        b.regs[kRegAdcCtrl] = kAdcTs;       // NTC on: must stay on
+        b.regs[kRegIntSts1 + 1] = 0xC8;     // stale short + VBUS bits latched
+        const auto r = run_setup(b);
+        CHECK("setup: all steps ok", r.err == 0 && r.step == nullptr);
+        CHECK("setup: ADC measure on, TS kept",
+              b.regs[kRegAdcCtrl] == (kAdcMeasure | kAdcTs));
+        CHECK("setup: battery detect on", b.regs[kRegBatDetCtrl] & 1);
+        CHECK("setup: gauge on", b.regs[kRegGaugeCtrl] & (1u << 3));
+        CHECK("setup: key IRQs on", (b.regs[kRegIntEn1 + 1] & 0x0C) == 0x0C);
+        CHECK("setup: stale key cleared, VBUS bits kept",
+              b.regs[kRegIntSts1 + 1] == 0xC0);
+    }
+    {
+        FakeBus b;  // already set up: only the IRQ clear writes
+        b.regs[kRegAdcCtrl] = kAdcMeasure;
+        b.regs[kRegBatDetCtrl] = 1;
+        b.regs[kRegGaugeCtrl] = 1u << 3;
+        b.regs[kRegIntEn1 + 1] = 0x0C;
+        CHECK("setup: no rewrite of set bits", run_setup(b).err == 0 && b.writes == 1);
+    }
+    // Every required step, read and write: the first failure is returned,
+    // named, and nothing after it runs.
+    const uint8_t rmw[] = {kRegAdcCtrl, kRegBatDetCtrl, kRegGaugeCtrl,
+                           static_cast<uint8_t>(kRegIntEn1 + 1)};
+    bool rd_ok = true, wr_ok = true;
+    for (unsigned i = 0; i < sizeof rmw; ++i) {
+        FakeBus b;
+        b.fail_rd = rmw[i];
+        auto r = run_setup(b);
+        rd_ok &= r.err != 0 && r.read_failed && r.step == kSetup[i].what &&
+                 b.regs[kRegIntSts1 + 1] == 0 && b.writes == static_cast<int>(i);
+        FakeBus c;
+        c.regs[kRegIntSts1 + 1] = 0x0C;
+        c.fail_wr = rmw[i];
+        r = run_setup(c);
+        // stopped here: the stale key bits were NOT cleared
+        wr_ok &= r.err != 0 && !r.read_failed && r.step == kSetup[i].what &&
+                 c.regs[kRegIntSts1 + 1] == 0x0C;
+    }
+    CHECK("setup: each required read failure fails setup", rd_ok);
+    CHECK("setup: each required write failure fails setup", wr_ok);
+    {
+        FakeBus b;
+        b.fail_wr = kRegIntSts1 + 1;
+        const auto r = run_setup(b);
+        CHECK("setup: stale-IRQ clear failure fails setup",
+              r.err != 0 && !r.read_failed && r.step == kSetup[4].what);
+    }
+}
+
 static void rtc_cases() {
     // 2026-10-24 21:07:45, Saturday (6).
     pcf85063::Fields f;
@@ -111,6 +186,7 @@ int main() {
     axp_status();
     axp_adc();
     axp_key();
+    axp_setup();
     rtc_cases();
     if (fails) { printf("%d FAILED\n", fails); return 1; }
     return 0;
