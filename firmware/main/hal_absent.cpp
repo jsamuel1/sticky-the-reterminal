@@ -5,6 +5,8 @@
 // ESP_ERR_NOT_SUPPORTED, so the existing "null over guess" paths in
 // tiny_sensors, `status` and the glance strip report "no reading" instead of
 // a fabricated value, and nothing in the shared code needs a board #if.
+// A board that drives one of these parts defines its HAL_* macro in
+// pin_config_<board>.h and builds the real driver instead.
 //
 // The buzzer API is NOT here: both colour boards drive it through the ES8311
 // (sticky_buzzer_es8311.cpp).
@@ -16,6 +18,8 @@
 #include "sticky_sht40.h"
 
 // ---- battery gauge ----------------------------------------------------------
+#if !defined(HAL_PMU_AXP2101)
+// The AMOLED-1.8 builds sticky_pmu_axp2101.cpp for the whole API instead.
 #ifndef PIN_BAT_ADC
 // Boards with a pack-voltage divider build sticky_battery_adc.cpp instead.
 esp_err_t sticky_battery_init(i2c_master_bus_handle_t) { return ESP_ERR_NOT_SUPPORTED; }
@@ -23,11 +27,17 @@ esp_err_t sticky_battery_read(BatteryReading &) { return ESP_ERR_NOT_SUPPORTED; 
 esp_err_t sticky_battery_read_detail(BatteryDetail &) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_battery_read_voltage(int &) { return ESP_ERR_NOT_SUPPORTED; }
 #endif
+// Neither "nothing" nor a divider can see the USB input.
+esp_err_t sticky_battery_read_supply(SupplyReading &) { return ESP_ERR_NOT_SUPPORTED; }
+#endif  // HAL_PMU_AXP2101
 
 // ---- RTC -------------------------------------------------------------------
+#ifndef HAL_RTC_PCF85063
+// The AMOLED-1.8 builds sticky_rtc_pcf85063.cpp instead.
 esp_err_t sticky_rtc_init(i2c_master_bus_handle_t) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_rtc_read(RtcDateTime &) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_rtc_write(const RtcDateTime &) { return ESP_ERR_NOT_SUPPORTED; }
+#endif
 
 // ---- SHT40 -----------------------------------------------------------------
 esp_err_t sticky_sht40_init(i2c_master_bus_handle_t) { return ESP_ERR_NOT_SUPPORTED; }

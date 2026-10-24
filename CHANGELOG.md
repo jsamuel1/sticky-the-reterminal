@@ -6,6 +6,20 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware, grammar v23** — AMOLED-1.8 V2 power and clock (P7). The
+  AXP2101 reports battery percent (its fuel gauge), voltage (ADC), charging
+  and USB input; `status` gains `usb_power` and `vbus_mv` (null on boards
+  that cannot see their input) and `sensors` battery `source` gains
+  `axp2101` (percent, voltage_mv, charging, full, present only). No rail is
+  written: boot logs every DCDC/LDO as found and enables only the
+  VBAT/VBUS/VSYS ADC channels, battery detection, the gauge and the PWR key
+  IRQs. The PWR key's IRQ line goes to the TCA9554, not a GPIO, so it is
+  polled: short press = next page, long press = deep sleep (BOOT wakes). The
+  PCF85063A is the board's RTC. On every board the boot clock now really
+  comes from the RTC; it used to be read before the RTC was attached, so
+  `clock_source` stayed `unset` until SNTP. Auto-sleep treats USB power as
+  wall power. `tests/host/pmu_host_test.sh` pins the decoding.
+
 - **firmware, grammar v22** — colour-board brightness. New verb
   `brightness [0-100]` on the FNK0104S (ST7796 backlight, LEDC duty on
   GPIO 45) and the AMOLED-1.8 (CO5300 DCS 0x51). Bare `brightness` reports

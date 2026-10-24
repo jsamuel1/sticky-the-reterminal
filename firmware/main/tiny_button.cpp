@@ -11,6 +11,9 @@
 #include "iot_button.h"
 #include "pin_config.h"
 #include "sticky_buzzer.h"
+#if defined(HAL_PMU_AXP2101)
+#include "sticky_pmu.h"
+#endif
 #include "tiny/tiny_audio.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_node.h"
@@ -183,6 +186,43 @@ static void on_talk_start(void *, void *) {
 static void on_talk_release(void *, void *) { tiny_audio_talk_release(); }
 #endif
 
+#if defined(HAL_PMU_AXP2101)
+// AMOLED-1.8 PWR key. Not a GPIO: an AXP2101 interrupt whose line ends at
+// the TCA9554 (pin_config_amoled18.h), so it is polled over I2C. The PMU
+// latches short/long press events until cleared, so a 100 ms poll loses
+// nothing and costs one 1-byte read.
+//   short = next page on the ring (this board has no UP/DOWN buttons, so
+//           this is the physical page key beside touch). Locked: nothing.
+//   long  = deep sleep now. BOOT wakes it. Locked: still allowed - sleep is
+//           what a pocket wants. The PMU's own hard power-off (held past
+//           its OFF level) is untouched, so a stuck firmware can still be
+//           switched off.
+static void pwr_key_task(void *) {
+    int errors = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        PmuKey k = PmuKey::None;
+        if (sticky_pmu_take_key(k) != ESP_OK) {
+            if (++errors == 50) ESP_LOGW(TAG, "PWR key: PMU not answering");
+            continue;
+        }
+        errors = 0;
+        if (k == PmuKey::Short) {
+            ESP_LOGI(TAG, "PWR key: short");
+            if (tiny_lock_is_locked()) continue;  // §11: locked keys page nothing
+            tiny_lock_note_activity();
+            tiny_node_note_activity();
+            queue_nav(Nav::kDown);
+            tiny_node_post_event("device_note", "button: pwr");
+        } else if (k == PmuKey::Long) {
+            ESP_LOGI(TAG, "PWR key: long - sleeping");
+            if (tiny_node_sleep_now("PWR key long press") != ESP_OK)
+                sticky_buzzer_beep_double();  // busy: dead-end word
+        }
+    }
+}
+#endif
+
 static void on_page_click(void *, void *usr) {
     // §11: while locked, UP/DOWN are the unlock chord ONLY (tiny_lock's own
     // GPIO watcher reads them raw) — they page nothing here.
@@ -243,6 +283,12 @@ extern "C" esp_err_t tiny_button_init(void) {
 #else
     // Single-button board (BOOT): see the remap note above on_boot_click.
     (void)s_up; (void)s_down; (void)on_page_click;
+#endif
+#if defined(HAL_PMU_AXP2101)
+    // 6 KB, like shell_nav: the long press renders the sleep card here.
+    if (xTaskCreate(pwr_key_task, "pwr_key", 6144, NULL, 3, NULL) != pdPASS)
+        return ESP_ERR_NO_MEM;
+    ESP_LOGI(TAG, "PWR key (AXP2101, polled): short = next page, long = sleep");
 #endif
     ESP_LOGI(TAG, "buttons live: AI=%d up=%d down=%d", PIN_BTN_OK, PIN_BTN_UP,
              PIN_BTN_DOWN);

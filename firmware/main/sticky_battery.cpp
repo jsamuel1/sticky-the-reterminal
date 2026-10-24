@@ -145,3 +145,6 @@ esp_err_t sticky_battery_read_voltage(int &millivolts)
     if (err == ESP_OK) millivolts = detail.voltage_mv;
     return err;
 }
+
+// The BQ27220 sits on the pack side: it cannot see whether USB is present.
+esp_err_t sticky_battery_read_supply(SupplyReading &) { return ESP_ERR_NOT_SUPPORTED; }

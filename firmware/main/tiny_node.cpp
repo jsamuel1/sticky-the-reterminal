@@ -979,6 +979,20 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     // divider (FNK0104S) cannot see current at all: null there too.
     if (have_batt && bd.charging_known) cJSON_AddBoolToObject(s, "charging", bd.charging);
     else                                cJSON_AddNullToObject(s, "charging");
+    // v22: the external supply, where the power chip can see it (AXP2101).
+    // null = this board cannot tell, never "no USB". A board on USB with a
+    // full or absent cell reports charging false/null and usb_power true.
+    {
+        SupplyReading sup;
+        if (sticky_battery_read_supply(sup) == ESP_OK) {
+            cJSON_AddBoolToObject(s, "usb_power", sup.vbus_present);
+            if (sup.vbus_present) cJSON_AddNumberToObject(s, "vbus_mv", sup.vbus_mv);
+            else                  cJSON_AddNullToObject(s, "vbus_mv");
+        } else {
+            cJSON_AddNullToObject(s, "usb_power");
+            cJSON_AddNullToObject(s, "vbus_mv");
+        }
+    }
     cJSON_AddBoolToObject(s, "wifi", wifi_up);
     if (have_ap) {
         cJSON_AddNumberToObject(s, "rssi_dbm", ap.rssi);
@@ -2923,10 +2937,17 @@ static void node_task(void *) {
             // and log say n/a instead of a fabricated 0%.
             const esp_err_t be = sticky_battery_read_detail(bd);
             const bool divider = strcmp(bd.source, "adc") == 0;
+            // A PMU that sees USB (AXP2101) counts it as wall power too: a
+            // full or absent cell on USB is not charging, but it is not the
+            // pocket either.
+            SupplyReading sup;
+            const bool on_usb = sticky_battery_read_supply(sup) == ESP_OK &&
+                                sup.vbus_present;
             const bool charging =
                 !tiny_board_caps()->battery_gauge ||
                 (divider && be != ESP_OK) ||
-                (be == ESP_OK && (!bd.charging_known || bd.charging));
+                (be == ESP_OK && (!bd.charging_known || bd.charging)) ||
+                on_usb;
             char pct_s[12] = "n/a";
             if (be == ESP_OK) snprintf(pct_s, sizeof pct_s, "%d%%", bd.percent);
             tiny_config_t cfg = {};
@@ -3006,6 +3027,24 @@ void tiny_node_stop(void) { s_stop = true; }
 // punish — tiny_lock_set(false) calls this so the full idle budget starts at
 // the unlock, not at whatever the pocket last did.
 void tiny_node_note_activity(void) { note_activity(); }
+
+// A local "sleep now" (AMOLED-1.8 PWR key long press). Same guards as
+// auto-sleep for the things a human cannot see from the glass: never in the
+// middle of a verb or a stream. Same goodbye-card contract as the `sleep`
+// verb, so the wake paint has its baseline. No timer wake: the human asked.
+esp_err_t tiny_node_sleep_now(const char *why) {
+    if (s_crumb_inflight || tiny_stream_playing()) return ESP_ERR_INVALID_STATE;
+    ESP_LOGI(TAG, "sleep now: %s", why ? why : "local request");
+    const char *bye = "sleeping - press BOOT to wake";
+    char card[240];
+    snprintf(card, sizeof card,
+             "{\"type\":\"text\",\"title\":\"zzz\",\"card_id\":\"sleep\","
+             "\"body\":\"%s\",\"footer\":\"deep sleep\"}", bye);
+    tiny_display_render_card(card);
+    tiny_display_note_sleep_card(bye);
+    vTaskDelay(pdMS_TO_TICKS(1500));  // let the panel show it before the rails drop
+    sticky_power_enter_deep_sleep();  // noreturn
+}
 
 esp_err_t tiny_node_post_event(const char *kind, const char *detail) {
     // Producer side only: queue and return. The node task owns all HTTP.

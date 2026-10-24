@@ -34,13 +34,22 @@ struct BatteryDetail {
     uint16_t status_bits = 0;
     // Where the numbers came from. "bq27220" = the gauge above (every field
     // is real). "adc" = a divider on a gauge-less board (FNK0104S): only
-    // percent (a resting-voltage estimate) and voltage_mv are real; every
-    // other field is zero and MUST NOT be reported.
+    // percent (a resting-voltage estimate) and voltage_mv are real.
+    // "axp2101" = the AMOLED-1.8 PMU: percent (its fuel gauge), voltage_mv
+    // (ADC), charging and full are real. For "adc" and "axp2101" every other
+    // field is zero and MUST NOT be reported.
     const char *source = "bq27220";
     // false = the hardware cannot tell charging from discharging (a divider
     // sees a voltage, not a current). Consumers report charging as null and
     // must not treat the pack as discharging.
     bool charging_known = true;
+};
+
+// The external supply, on boards whose power chip can see it (AXP2101).
+struct SupplyReading {
+    bool vbus_present = false;   // USB power in and good
+    int vbus_mv = 0;             // 0 when vbus_present is false
+    int vsys_mv = 0;             // system rail
 };
 
 // Attaches the BQ27220 fuel gauge to the shared sensor I2C bus.
@@ -62,3 +71,8 @@ esp_err_t sticky_battery_read_detail(BatteryDetail &detail);
 // "adc" and charging_known false. They answer ESP_ERR_INVALID_RESPONSE when
 // the reading is not a plausible single cell (USB with no cell fitted).
 esp_err_t sticky_battery_read_voltage(int &millivolts);
+
+// USB/VBUS state. Only a PMU that sees the input answers (AXP2101); the
+// BQ27220 and the FNK0104S divider cannot, so they answer
+// ESP_ERR_NOT_SUPPORTED and `status` reports usb_power as null.
+esp_err_t sticky_battery_read_supply(SupplyReading &supply);

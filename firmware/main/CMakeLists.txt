@@ -23,9 +23,10 @@ if(CONFIG_TINY_BOARD_FNK0104S)
     "tiny_led.cpp")
 elseif(CONFIG_TINY_BOARD_AMOLED18)
   # AMOLED-1.8 V2: CO5300 QSPI AMOLED behind the shared colour-panel canvas.
+  # AXP2101 (battery, USB, PWR key) and PCF85063A replace hal_absent's stubs.
   set(TINY_BOARD_SRCS
     "board_generic.cpp" "sticky_power_generic.cpp" "lcd_canvas.cpp" "lcd_panel_co5300.cpp"
-    "hal_absent.cpp" "sticky_imu_qmi8658.cpp"
+    "hal_absent.cpp" "sticky_imu_qmi8658.cpp" "sticky_pmu_axp2101.cpp" "sticky_rtc_pcf85063.cpp"
     "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp")
 else()
   # reTerminal Sticky (default): Seeed's HAL adapted from the dashboard demo.

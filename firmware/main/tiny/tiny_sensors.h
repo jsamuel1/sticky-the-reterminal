@@ -2,7 +2,7 @@
 //
 // SHT40 (ambient temp/RH), LSM6DS3TR-C (acceleration + orientation), PCF8563
 // (RTC wall clock), and battery from either the BQ27220 gauge or the FNK0104S
-// GPIO 9 ADC divider.
+// GPIO 9 ADC divider. AMOLED-1.8: QMI8658, PCF85063A and the AXP2101 PMU.
 //
 // Two rules this module exists to enforce:
 //   1. A source that failed to read emits JSON null plus an `errors` entry
@@ -21,7 +21,7 @@ extern "C" {
 
 // Attaches SHT40 + IMU + RTC to the shared sensor I2C bus. The battery source
 // is initialized separately (sticky_battery_init): BQ27220 on reTerminal, ADC
-// divider on FNK0104S. Returns ESP_OK if at least one I2C sensor came up;
+// divider on FNK0104S, AXP2101 on AMOLED-1.8. Returns ESP_OK if at least one I2C sensor came up;
 // per-sensor failures are logged and then reported honestly as nulls by
 // tiny_sensors_json().
 esp_err_t tiny_sensors_init(void);

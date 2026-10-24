@@ -184,6 +184,18 @@ extern "C" esp_err_t tiny_sensors_json(char *out, size_t cap) {
         cJSON_AddNullToObject(b, "charging");
         cJSON_AddBoolToObject(b, "present", bat.present);
         cJSON_AddItemToObject(s, "battery", b);
+    } else if (have_bat && strcmp(bat.source, "axp2101") == 0) {
+        // v22: the AMOLED-1.8 PMU. Percent is its fuel gauge, voltage its
+        // ADC, charging and full its charger state. It has no current sense,
+        // coulomb counter or health model: nothing else is reported.
+        cJSON *b = cJSON_CreateObject();
+        cJSON_AddStringToObject(b, "source", "axp2101");
+        cJSON_AddNumberToObject(b, "percent", bat.percent);
+        cJSON_AddNumberToObject(b, "voltage_mv", bat.voltage_mv);
+        cJSON_AddBoolToObject(b, "charging", bat.charging);
+        cJSON_AddBoolToObject(b, "full", bat.full);
+        cJSON_AddBoolToObject(b, "present", bat.present);
+        cJSON_AddItemToObject(s, "battery", b);
     } else if (have_bat) {
         cJSON *b = cJSON_CreateObject();
         cJSON_AddStringToObject(b, "source", "bq27220");  // v20
@@ -250,7 +262,9 @@ extern "C" esp_err_t tiny_sensors_json(char *out, size_t cap) {
         append(" %d%% %dmV (est.)", bat.percent, bat.voltage_mv);
     else if (have_bat)
         append(" %d%% %dmV %s", bat.percent, bat.voltage_mv,
-               bat.charging ? "charging" : "on battery");
+               bat.charging ? "charging"
+               : strcmp(bat.source, "axp2101") == 0 ? "not charging"
+                                                     : "on battery");
     // errors[] holds faults (a missing part, a failed read, an implausible ADC
     // cell, an untrusted gauge) — not just sensors that went unread, so the
     // count says what it counts. tests/host/sensors_summary_host_test.sh.
@@ -344,6 +358,10 @@ extern "C" esp_err_t tiny_sensors_render_card(void) {
         if (strcmp(bat.source, "adc") == 0)
             snprintf(power, sizeof power, "%d%% %d mV (est.)", bat.percent,
                      bat.voltage_mv);
+        else if (strcmp(bat.source, "axp2101") == 0)
+            snprintf(power, sizeof power, "%d%% %d mV %s", bat.percent,
+                     bat.voltage_mv,
+                     bat.charging ? "charging" : bat.full ? "full" : "not charging");
         else
             snprintf(power, sizeof power, "%d%% %d mV %d mA %s", bat.percent,
                      bat.voltage_mv, bat.current_ma,
@@ -363,6 +381,8 @@ extern "C" esp_err_t tiny_sensors_render_card(void) {
                  have_bat ? "percent is an estimate"
                  : be == ESP_ERR_INVALID_RESPONSE ? "no plausible cell"
                                                   : "no reading");
+    else if (have_bat && strcmp(bat.source, "axp2101") == 0)
+        snprintf(foot, sizeof foot, "read live over I2C - AXP2101 gauge + ADC");
     else if (have_bat)
         snprintf(foot, sizeof foot,
                  "read live over I2C1 - pack health %d%%, %d cycles, gauge %.0fC",

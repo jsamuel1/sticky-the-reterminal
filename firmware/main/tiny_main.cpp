@@ -37,6 +37,7 @@
 #include "tiny/tiny_beacon.h"
 #include "tiny/tiny_wifi.h"
 #include "sticky_battery.h"
+#include "sticky_rtc.h"
 #include "sticky_sdcard.h"
 #include "tiny/tiny_audio.h"
 #include "tiny/tiny_button.h"
@@ -117,13 +118,19 @@ extern "C" void app_main(void)
     // about loading. The splash now lives exactly as long as boot does.
 
     // The paint's ONLY data dependencies: battery source (BQ27220 gauge or
-    // FNK GPIO 9 ADC) and, where present, the RTC clock. These are millisecond
+    // AXP2101 PMU or FNK GPIO 9 ADC) and, where present, the RTC clock.
+    // These are millisecond
     // local reads — I2C or ADC — and stay ahead of the paint on every path.
     ESP_LOGI(TAG, "battery init: %s",
              esp_err_to_name(sticky_battery_init(board_sensor_i2c_bus())));
-    // The PCF8563 is battery-backed, so it can hand us a clock before wifi
-    // exists. ESP_ERR_INVALID_STATE here just means "never set" (factory VL
-    // flag) — SNTP below fixes that permanently.
+    // The RTC is battery-backed, so it can hand us a clock before wifi
+    // exists. ESP_ERR_INVALID_STATE here means "never set" (VL / OS flag) -
+    // SNTP below fixes that permanently. Attach it HERE: tiny_sensors_init()
+    // attaches it too (idempotent), but that runs after this read, and an
+    // unattached RTC answers INVALID_STATE, so the boot clock never came
+    // from the RTC at all.
+    ESP_LOGI(TAG, "rtc init: %s",
+             esp_err_to_name(sticky_rtc_init(board_sensor_i2c_bus())));
     ESP_LOGI(TAG, "clock from rtc: %s",
              esp_err_to_name(tiny_time_init_from_rtc()));
     tiny_bootmark_stage(5);
