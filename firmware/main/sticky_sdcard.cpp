@@ -230,6 +230,31 @@ extern "C" esp_err_t sticky_sdcard_info(uint64_t *total_bytes,
     return ESP_OK;
 }
 
+extern "C" void sticky_sdcard_report(sticky_sdcard_report_t *out) {
+    if (!out) return;
+    *out = {};
+    out->state = STICKY_SD_STATE_NO_CARD;
+    if (!s_gpio_ready) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    // DETECT is the truth for presence. Reconcile only the cheap direction:
+    // a yanked card is unmounted before anything reads its FAT. An inserted
+    // card is mounted by ensure() (the `sd` verb, gallery, photo save), not
+    // by every `status`: a card that will not mount would otherwise pay a
+    // power cycle and a full mount attempt on each status poll.
+    out->present = detect_inserted();
+    if (!out->present) unmount_locked(true);
+    out->mounted = s_card != nullptr;
+    out->state = out->mounted   ? STICKY_SD_STATE_MOUNTED
+                 : out->present ? STICKY_SD_STATE_NO_FAT
+                                : STICKY_SD_STATE_NO_CARD;
+    if (out->mounted &&
+        esp_vfs_fat_info(STICKY_SD_MOUNT_POINT, &out->total_bytes,
+                         &out->free_bytes) != ESP_OK) {
+        out->total_bytes = out->free_bytes = 0;
+    }
+    xSemaphoreGive(s_lock);
+}
+
 extern "C" esp_err_t sticky_sdcard_format(void) {
     if (!s_gpio_ready) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_lock, portMAX_DELAY);

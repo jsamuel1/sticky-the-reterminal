@@ -182,7 +182,18 @@ extern "C" void app_main(void)
     // sequencing + mount never touch the glance budget; after display init so
     // SPI2 exists (the driver adds a device, never re-inits the bus). A
     // missing card is a clean skip inside init — boot stays identical.
-    ESP_LOGI(TAG, "sdcard init: %s", esp_err_to_name(sticky_sdcard_init()));
+    // internal free is logged around it: SDMMC takes internal DMA RAM, and a
+    // voice upload needs 60 KB of it (tiny_upload pre-flight).
+    {
+        const size_t sd_before =
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const esp_err_t sderr = sticky_sdcard_init();
+        const size_t sd_after =
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        ESP_LOGI(TAG, "sdcard init: %s, mounted=%d (internal %d B, %u B free)",
+                 esp_err_to_name(sderr), (int)sticky_sdcard_mounted(),
+                 (int)sd_after - (int)sd_before, (unsigned)sd_after);
+    }
 
     // M3: load config; join wifi when provisioned with at least one network.
     tiny_config_t cfg;

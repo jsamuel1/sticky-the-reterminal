@@ -55,7 +55,11 @@ const char *sticky_imu_orientation_name(StickyImuOrientation orientation)
 }
 #endif  // QMI8658_I2C_ADDR
 
-// ---- microSD (phase 1: not driven) -----------------------------------------
+// ---- microSD ---------------------------------------------------------------
+// Boards that build sticky_sdcard_sdmmc.cpp define SD_SDMMC_DRIVEN in their
+// pin_config (pins alone are not enough: AMOLED-1.8 records its SD pins but
+// does not drive the slot yet).
+#ifndef SD_SDMMC_DRIVEN
 extern "C" esp_err_t sticky_sdcard_init(void) { return ESP_ERR_NOT_SUPPORTED; }
 extern "C" bool sticky_sdcard_present(void) { return false; }
 extern "C" bool sticky_sdcard_mounted(void) { return false; }
@@ -63,5 +67,9 @@ extern "C" esp_err_t sticky_sdcard_ensure(void) { return ESP_ERR_NOT_FOUND; }
 extern "C" esp_err_t sticky_sdcard_mount(void) { return ESP_ERR_NOT_SUPPORTED; }
 extern "C" esp_err_t sticky_sdcard_unmount(void) { return ESP_OK; }
 extern "C" esp_err_t sticky_sdcard_info(uint64_t *, uint64_t *) { return ESP_ERR_INVALID_STATE; }
+extern "C" void sticky_sdcard_report(sticky_sdcard_report_t *out) {
+    if (out) *out = {false, false, STICKY_SD_STATE_NO_CARD, 0, 0};
+}
 extern "C" void sticky_sdcard_prepare_sleep(void) {}
 extern "C" esp_err_t sticky_sdcard_format(void) { return ESP_ERR_NOT_SUPPORTED; }
+#endif
