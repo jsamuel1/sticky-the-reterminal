@@ -213,7 +213,7 @@ extern "C" esp_err_t tiny_audio_record_wav(int seconds, uint8_t **wav, size_t *l
 
     // Status light: blue from here until the capture ends (every return
     // below goes through `out`). No-op on boards without the light.
-    tiny_led_set(TINY_LED_LISTENING);
+    tiny_led_capture_begin();
 
     // Drain what the DMA ring collected while nobody listened (~90 ms).
     {
@@ -252,7 +252,7 @@ extern "C" esp_err_t tiny_audio_record_wav(int seconds, uint8_t **wav, size_t *l
     }
 
 out:
-    tiny_led_set(TINY_LED_IDLE);
+    tiny_led_capture_end(err == ESP_OK);  // hands a pending voice ask amber
     ESP_LOGI(TAG, "record %ds -> %s (%u bytes)", seconds, esp_err_to_name(err),
              (unsigned)*len);
     return err;

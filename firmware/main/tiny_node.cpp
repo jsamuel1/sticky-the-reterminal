@@ -551,14 +551,16 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
     // each would eventually miss one (that is how locks die).
     struct AskGuard { ~AskGuard() { xSemaphoreGive(s_ask_mux); } } guard;
     // Status light (FNK0104S; no-op elsewhere): amber while the ask is in
-    // flight, off when it returns, red if it painted askfail. A queued-ask
-    // DRAIN stays dark for the same reason it paints no card: nobody is
-    // standing at it. Declared after `guard`, so it runs first on return.
+    // flight, off when it returns, red if it painted askfail. A voice ask
+    // arms PENDING (dark); the capture shows blue, and its OK end promotes
+    // PENDING to amber in one write. A queued-ask DRAIN stays dark for the
+    // same reason it paints no card: nobody is standing at it. Declared
+    // after `guard`, so it runs first on return.
     struct LedGuard {
         bool on;
-        ~LedGuard() { if (on) tiny_led_set(TINY_LED_IDLE); }
+        ~LedGuard() { if (on) tiny_led_ask(TINY_LED_ASK_IDLE); }
     } led{!s_askq_draining};
-    if (led.on && text) tiny_led_set(TINY_LED_THINKING);
+    if (led.on) tiny_led_ask(text ? TINY_LED_ASK_THINKING : TINY_LED_ASK_PENDING);
     s_ask_backend_spoke = false;  // §16 drain context — set true when st > 0
     static char audio_url[256];
     audio_url[0] = 0;
@@ -583,7 +585,6 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
             voice_fail_card("couldn't record", out, r);
             return r;
         }
-        if (led.on) tiny_led_set(TINY_LED_THINKING);  // before the ack chime: no dark gap
         tiny_audio_chime("ack");  // "heard you" — upload+think takes a while
         tiny_display_stream_note("(( thinking ))");
         r = tiny_upload_media(wav, wlen, "audio/wav", audio_url, sizeof audio_url);

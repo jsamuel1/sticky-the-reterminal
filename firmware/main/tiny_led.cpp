@@ -9,7 +9,10 @@
 // the RMT TX ISR and encoders, which IDF 5.4 marks IRAM_ATTR unconditionally.
 //
 // Writes come from several tasks (button worker, node task, esp_timer task
-// for the error expiry), so every resolve + refresh runs under one mutex.
+// for the error expiry), so every state change, the error timer's re-arm and
+// the resolve + refresh run under one mutex. s_mux is published only after
+// the strip and timer exist, so a non-null s_mux means a complete light;
+// every runtime entry point returns early on null.
 // A refresh is ~30 us on the wire plus the 280 us reset latch.
 #include "sdkconfig.h"
 
@@ -76,19 +79,46 @@ void apply()
 
 void on_error_expired(void *) { apply(); }
 
+// Caller holds s_mux. Keeps the expiry timer in step with error_until_us:
+// stopped when no error shows, (re)armed for the full window when one
+// starts. Holding s_mux across stop+start means two error reports cannot
+// interleave their stop/start pairs. esp_timer_stop does not wait for a
+// running callback, so a callback blocked on s_mux cannot deadlock this;
+// it simply re-resolves after we release, which is idempotent.
+void rearm_error_timer_locked(bool showing)
+{
+    esp_err_t err = esp_timer_stop(s_err_timer);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)  // INVALID_STATE: not armed
+        ESP_LOGW(TAG, "error timer stop: %s", esp_err_to_name(err));
+    if (!showing) return;
+    err = esp_timer_start_once(s_err_timer, kErrorShowUs + 1000);
+    if (err != ESP_OK)
+        // Red would then only clear on the next activity change; say so.
+        ESP_LOGW(TAG, "error timer start: %s - red holds until next activity",
+                 esp_err_to_name(err));
+}
+
 }  // namespace
 
+// Called once, from app_main's init_inputs (a single task, before the
+// button worker, node task or lock timer can reach any tiny_led_* call).
+// The unlocked re-entry guard relies on that; every other entry point
+// tolerates a light that never finished init (s_mux stays null).
 extern "C" void tiny_led_init(void)
 {
-    if (s_strip) return;
+    if (s_mux) return;
     const size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-    s_mux = xSemaphoreCreateMutex();
+    // Build everything locally and publish s_mux last: a half-initialised
+    // light (mutex without timer or strip) must stay invisible to callers.
+    SemaphoreHandle_t mux = xSemaphoreCreateMutex();
+    esp_timer_handle_t timer = nullptr;
     esp_timer_create_args_t ta = {};
     ta.callback = on_error_expired;
     ta.name = "led_err";
-    if (!s_mux || esp_timer_create(&ta, &s_err_timer) != ESP_OK) {
+    if (!mux || esp_timer_create(&ta, &timer) != ESP_OK) {
         ESP_LOGE(TAG, "init: no memory for mutex/timer - light stays dark");
+        if (mux) vSemaphoreDelete(mux);
         return;
     }
 
@@ -107,10 +137,14 @@ extern "C" void tiny_led_init(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "init: led_strip_new_rmt_device: %s - light stays dark",
                  esp_err_to_name(err));
+        esp_timer_delete(timer);
+        vSemaphoreDelete(mux);
         return;
     }
-    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_err_timer = timer;
     s_strip = strip;
+    s_mux = mux;  // published last: from here callers may take it
+    xSemaphoreTake(s_mux, portMAX_DELAY);
     // A soft reset (OTA, panic) leaves the pixel latched at whatever it last
     // showed; the first apply writes black unconditionally.
     apply_locked();
@@ -123,13 +157,33 @@ extern "C" void tiny_led_init(void)
              (unsigned)after);
 }
 
-extern "C" void tiny_led_set(tiny_led_activity_t activity)
+extern "C" void tiny_led_capture_begin(void)
 {
     if (!s_mux) return;
     xSemaphoreTake(s_mux, portMAX_DELAY);
-    s_in.activity = activity;
-    // A new capture or ask supersedes the last failure.
-    if (activity != TINY_LED_IDLE) s_in.error_until_us = 0;
+    const bool had_error = s_in.error_until_us != 0;
+    tiny_led_on_capture_begin(&s_in);  // a new capture supersedes the failure
+    if (had_error) rearm_error_timer_locked(false);
+    apply_locked();
+    xSemaphoreGive(s_mux);
+}
+
+extern "C" void tiny_led_capture_end(bool ok)
+{
+    if (!s_mux) return;
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    // One resolve for "capture over" and "pending ask now thinking": blue
+    // goes straight to amber, never through a latched black frame.
+    tiny_led_on_capture_end(&s_in, ok);
+    apply_locked();
+    xSemaphoreGive(s_mux);
+}
+
+extern "C" void tiny_led_ask(tiny_led_ask_t state)
+{
+    if (!s_mux) return;
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    if (tiny_led_on_ask(&s_in, state)) rearm_error_timer_locked(false);
     apply_locked();
     xSemaphoreGive(s_mux);
 }
@@ -138,12 +192,10 @@ extern "C" void tiny_led_error(void)
 {
     if (!s_mux) return;
     xSemaphoreTake(s_mux, portMAX_DELAY);
-    s_in.activity = TINY_LED_IDLE;
-    s_in.error_until_us = esp_timer_get_time() + kErrorShowUs;
+    tiny_led_on_error(&s_in, esp_timer_get_time() + kErrorShowUs);
+    rearm_error_timer_locked(true);  // same critical section as the deadline
     apply_locked();
     xSemaphoreGive(s_mux);
-    esp_timer_stop(s_err_timer);  // ESP_ERR_INVALID_STATE when idle: fine
-    esp_timer_start_once(s_err_timer, kErrorShowUs + 1000);
 }
 
 extern "C" void tiny_led_sync(void) { apply(); }
@@ -153,6 +205,7 @@ extern "C" void tiny_led_prepare_sleep(void)
     if (!s_mux) return;
     xSemaphoreTake(s_mux, portMAX_DELAY);
     s_in.asleep = true;  // never cleared: deep sleep ends in a reset
+    rearm_error_timer_locked(false);  // no late expiry after the channel goes
     apply_locked();
     // A WS2812 holds the last frame it latched for as long as it has power,
     // so black is written before the rails idle (whether the FNK0104S cuts

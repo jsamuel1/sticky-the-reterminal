@@ -1,15 +1,24 @@
-// tiny_led_state — which colour the status light shows, as a pure function.
+// tiny_led_state — which colour the status light shows, as pure functions.
 //
 // No ESP-IDF headers: tests/host/led_host_test.sh compiles this file on the
-// host and walks the whole table. tiny_led.cpp owns the inputs (who set what,
-// when) and the RMT write; this file owns only the decision.
+// host and walks the whole table. tiny_led.cpp owns the mutex, the timer and
+// the RMT write; this file owns the inputs' transitions and the decision.
+//
+// Two owners feed the light, each through its own field:
+//   capture (tiny_audio)  -> `capturing` while the mic records
+//   ask     (tiny_node)   -> `ask`: PENDING (voice ask waiting on its
+//                            capture, dark), THINKING (upload or ask in
+//                            flight), IDLE
+// A voice ask arms PENDING before capture starts; a capture that ends OK
+// promotes PENDING to THINKING inside the same transition, so blue goes
+// straight to amber with no black frame latched between them.
 //
 // Precedence, strongest first:
 //   locked or asleep  -> off   (UX_SPEC §11: a pocket shows nothing)
-//   listening         -> blue  (the mic is capturing)
-//   thinking          -> amber (upload or ask in flight)
+//   capturing         -> blue  (the mic is capturing)
+//   ask THINKING      -> amber (upload or ask in flight)
 //   error, unexpired  -> red   (askfail card / upload refused, a few seconds)
-//   otherwise         -> off
+//   otherwise         -> off   (includes ask PENDING before capture starts)
 #pragma once
 
 #include <stdbool.h>
@@ -20,17 +29,18 @@ extern "C" {
 #endif
 
 typedef enum {
-    TINY_LED_IDLE = 0,
-    TINY_LED_LISTENING,
-    TINY_LED_THINKING,
-} tiny_led_activity_t;
+    TINY_LED_ASK_IDLE = 0,
+    TINY_LED_ASK_PENDING,   // voice ask armed; turns THINKING when capture ends OK
+    TINY_LED_ASK_THINKING,
+} tiny_led_ask_t;
 
 typedef struct {
     uint8_t r, g, b;
 } tiny_led_rgb_t;
 
 typedef struct {
-    tiny_led_activity_t activity;
+    bool capturing;          // mic capture running
+    tiny_led_ask_t ask;      // ask engine state
     int64_t error_until_us;  // red until this uptime; 0 = no error showing
     bool locked;             // pocket lockout engaged
     bool asleep;             // deep sleep is being entered
@@ -40,6 +50,41 @@ typedef struct {
 #define TINY_LED_RGB_LISTENING {0, 40, 255}
 #define TINY_LED_RGB_THINKING {255, 110, 0}
 #define TINY_LED_RGB_ERROR {255, 0, 0}
+
+// --- transitions (caller holds the light's lock) ---------------------------
+
+// Capture starts: blue, and a new capture supersedes the last failure.
+static inline void tiny_led_on_capture_begin(tiny_led_inputs_t *in) {
+    in->capturing = true;
+    in->error_until_us = 0;
+}
+
+// Capture ends. A pending voice ask takes over in the same step when the
+// capture produced audio; a failed capture leaves it dark for the caller's
+// error report.
+static inline void tiny_led_on_capture_end(tiny_led_inputs_t *in, bool ok) {
+    in->capturing = false;
+    if (ok && in->ask == TINY_LED_ASK_PENDING) in->ask = TINY_LED_ASK_THINKING;
+}
+
+// The ask engine reports its state. Starting an ask supersedes the last
+// failure. Returns true when an error was cleared (the expiry timer can go).
+static inline bool tiny_led_on_ask(tiny_led_inputs_t *in, tiny_led_ask_t a) {
+    in->ask = a;
+    if (a != TINY_LED_ASK_IDLE && in->error_until_us) {
+        in->error_until_us = 0;
+        return true;
+    }
+    return false;
+}
+
+// A failure card was painted: the ask is over and red shows until `until`.
+static inline void tiny_led_on_error(tiny_led_inputs_t *in, int64_t until_us) {
+    in->ask = TINY_LED_ASK_IDLE;
+    in->error_until_us = until_us;
+}
+
+// --- decision ----------------------------------------------------------------
 
 static inline uint8_t tiny_led_scale(uint8_t c, uint8_t brightness) {
     if (!c || !brightness) return 0;
@@ -52,10 +97,10 @@ static inline tiny_led_rgb_t tiny_led_resolve(const tiny_led_inputs_t *in,
                                               uint8_t brightness) {
     tiny_led_rgb_t c = {0, 0, 0};
     if (!in || in->locked || in->asleep) return c;
-    if (in->activity == TINY_LED_LISTENING) {
+    if (in->capturing) {
         const tiny_led_rgb_t k = TINY_LED_RGB_LISTENING;
         c = k;
-    } else if (in->activity == TINY_LED_THINKING) {
+    } else if (in->ask == TINY_LED_ASK_THINKING) {
         const tiny_led_rgb_t k = TINY_LED_RGB_THINKING;
         c = k;
     } else if (in->error_until_us > now_us) {

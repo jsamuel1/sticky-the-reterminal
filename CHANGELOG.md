@@ -7,7 +7,9 @@ release, newest first.
 ## Unreleased
 
 - **firmware (FNK0104S)** — the board's WS2812 (GPIO 42) is a status light:
-  blue while the mic captures, amber while the upload and ask are in flight,
+  blue while the mic captures, amber while the upload and ask are in flight
+  (the capture's end hands blue straight to amber in one write, no black
+  frame between),
   red for 5 s after an askfail card (not for "saved for later" or a backend
   refusal sentence), off otherwise. Dark while pocket-locked, and latched
   black before deep sleep. espressif/led_strip 3.0.3 over one RMT channel
