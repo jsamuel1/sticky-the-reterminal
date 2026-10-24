@@ -53,15 +53,16 @@ constexpr tiny_board_caps_t kCaps = {
     .flash_mb = 16,
 };
 #elif defined(CONFIG_TINY_BOARD_AMOLED18)
-// Phase 1: radio, BOOT button and the TCA9554 rails. CO5300, CST820,
-// ES8311, AXP2101, PCF85063A, QMI8658 and SD land in later phases.
+// Phase 2b: CO5300 AMOLED (lcd_canvas) and ES8311 audio code are built;
+// CST820 touch, AXP2101, PCF85063A, QMI8658 and SD land in later phases.
+// mic/buzzer/speaker stay false until a board proves them.
 constexpr tiny_board_caps_t kCaps = {
     .id = "amoled18",
     .name = "Waveshare ESP32-S3-Touch-AMOLED-1.8 V2",
-    .display = "none (phase 1 headless canvas)",
-    .display_short = "headless",
+    .display = "368x448 AMOLED (4-gray canvas)",
+    .display_short = "368x448",
     .eink = false,
-    .panel = false,
+    .panel = true,
     .touch = false,
     .mic = false,
     .buzzer = false,

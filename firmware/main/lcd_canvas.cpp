@@ -11,14 +11,16 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "lcd_band.h"
 #include "lcd_gray4.h"
 #include "sticky_display.h"
 
 namespace {
 
 constexpr char kTag[] = "lcd_canvas";
-// Rows per DMA strip. Two strips live in internal DMA RAM (320 px: 2 x 10 KB),
-// the scarcest memory on the board; 16 rows keeps a full frame at 30 pushes.
+// Rows per DMA strip. Two strips live in internal DMA RAM (320 px: 2 x 10 KB,
+// 368 px: 2 x 11.5 KB), the scarcest memory on the board; 16 rows keeps a
+// full frame at 28-30 pushes.
 constexpr int kStripRows = 16;
 constexpr uint32_t kDrawTimeoutMs = 1000;
 
@@ -114,6 +116,7 @@ esp_err_t partial(const char *kind)
         // Nothing changed; still make sure a sleeping panel comes back.
         return commit(0, 0, kind);
     }
+    lcd_band::align(s_ops->row_align, &y0, &y1);
     return commit(y0, y1, kind);
 }
 
@@ -138,6 +141,11 @@ esp_err_t sticky_display_init()
     if (s_canvas != nullptr) return ESP_OK;
     s_ops = lcd_panel_ops();
     if (s_ops == nullptr || s_ops->width % 4 != 0) return ESP_ERR_INVALID_STATE;
+    // Strips start at an aligned row and are kStripRows tall, so they stay
+    // aligned as long as the strip height is a multiple too.
+    const int align = s_ops->row_align > 1 ? s_ops->row_align : 1;
+    if (s_ops->height % align != 0 || kStripRows % align != 0)
+        return ESP_ERR_INVALID_STATE;
     const int w = s_ops->width, h = s_ops->height;
     const size_t strip_bytes = static_cast<size_t>(w) * kStripRows * 2;
 

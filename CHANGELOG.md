@@ -6,6 +6,20 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware** — AMOLED-1.8 V2: the CO5300 368×448 AMOLED is driven
+  (`lcd_panel_co5300.cpp` behind `lcd_canvas`; replaces the headless canvas,
+  which is removed). QSPI on SPI2 (CS 12, PCLK 11, D0–D3 4–7) at
+  `CONFIG_TINY_LCD_SPI_MHZ` (40), RGB565, `espressif/esp_lcd_co5300` 2.2.0.
+  Init table and x-gap rule are the Waveshare BSP 2.0.3's (x-gap 16 when
+  the CST816S-class touch answers at 0x15), except brightness starts at 0 so
+  power-on panel RAM is never lit. Brightness is DCS 0x51; sleep is dark +
+  DISPOFF + SLPIN, wake SLPOUT + DISPON; the TCA9554 rail stays up.
+  `LcdPanelOps` gains `row_align` (CO5300: 2): partial refreshes widen the
+  dirty band to even rows. Canvas, screenshot and status `display` are now
+  368×448 (`"368x448 AMOLED (4-gray canvas)"`) on this board; no verb or
+  reply shape changed, so the grammar is unchanged. reTerminal and FNK0104S
+  behaviour unchanged.
+
 - **firmware + CI** (grammar v15) — bench OTA. Every app image now carries a
   32-byte board stamp (`TINYBRD1` + board id) in `.rodata_custom_desc`, which
   IDF links straight after `esp_app_desc_t` (image offset 288). `tiny_ota`

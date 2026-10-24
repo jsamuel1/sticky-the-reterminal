@@ -22,7 +22,9 @@
 // Canvas::width()/height() already, rotation still lives in Canvas, and the
 // screenshot, tap regions and touch all share the panel's own coordinates.
 //
-// A board adds exactly one panel file that defines lcd_panel_ops().
+// A board adds exactly one panel file that defines lcd_panel_ops():
+//   FNK0104S  lcd_panel_st7796.cpp  ST7796S 320x480 SPI LCD
+//   AMOLED18  lcd_panel_co5300.cpp  CO5300 368x448 QSPI AMOLED (P2b)
 
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +35,10 @@ struct LcdPanelOps {
     const char *name;       // for logs, e.g. "ST7796S"
     uint16_t width;         // physical pixels in the panel's native orientation
     uint16_t height;        //   (width must be a multiple of 4)
+    // Every draw()'s y0 and y1 are multiples of this (1 = any row). The
+    // CO5300 takes windows in 2-pixel units; a partial refresh widens its
+    // dirty band outward to meet it. height must be a multiple too.
+    uint8_t row_align;
     // Bring up the bus and panel, backlight OFF. `max_transfer_bytes` = one
     // strip, the largest single draw() the canvas will issue.
     esp_err_t (*init)(size_t max_transfer_bytes);
@@ -44,6 +50,8 @@ struct LcdPanelOps {
     esp_err_t (*wait_done)(uint32_t timeout_ms);
     esp_err_t (*sleep)(bool sleep);
     // 0..100. 0 = dark. A panel without a dimmer may treat >0 as on.
+    // (ST7796: LEDC backlight duty. CO5300: DCS 0x51, the AMOLED's own
+    // emission level - there is no backlight.)
     esp_err_t (*brightness)(uint8_t percent);
 };
 

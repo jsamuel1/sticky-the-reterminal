@@ -4,8 +4,9 @@
 // touch). 16 MB QIO flash, 8 MB octal PSRAM. No board schematic is published:
 // every pin and polarity here is vendor-code evidence (BSP
 // waveshare/esp32_s3_touch_amoled_1_8 2.0.3 + the Arduino pin_config.h) and
-// must be confirmed on hardware. Phase 1 drives the BOOT button, the shared
-// I2C bus and the TCA9554 expander only.
+// must be confirmed on hardware. Driven so far: BOOT button, the shared I2C
+// bus, the TCA9554 expander, the CO5300 panel (lcd_panel_co5300.cpp) and the
+// ES8311 codec.
 
 // Buttons: BOOT is OK/AI. The PWR key is an AXP2101 event (not wired yet).
 #define PIN_BTN_OK          0

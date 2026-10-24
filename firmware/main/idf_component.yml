@@ -13,6 +13,11 @@ dependencies:
   # ST7796S panel driver for the FNK0104S (lcd_panel_st7796.cpp). Pinned:
   # 1.5.0 is the version the vendor-init review was done against.
   espressif/esp_lcd_st7796: "==1.5.0"
+  # CO5300 AMOLED driver for the AMOLED-1.8 V2 (lcd_panel_co5300.cpp). Pinned:
+  # 2.2.0 is the first 2.x with disp_sleep (plain SLPIN/SLPOUT without a
+  # reset GPIO); the Waveshare BSP 2.0.3 asks ^2.0.3. The BSP itself is not
+  # used (it pulls LVGL). Linked only where referenced, like the two above.
+  espressif/esp_lcd_co5300: "==2.2.0"
   # ES8311 register control for the colour boards' audio (audio_es8311.cpp),
   # over the new i2c_master driver on the shared bus. Linked only where
   # referenced, so the reTerminal image does not carry it.

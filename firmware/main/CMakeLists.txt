@@ -20,9 +20,9 @@ if(CONFIG_TINY_BOARD_FNK0104S)
     "hal_absent.cpp"
     "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp")
 elseif(CONFIG_TINY_BOARD_AMOLED18)
-  # Colour boards, phase 1: no latch, headless canvas, absent sensors.
+  # AMOLED-1.8 V2: CO5300 QSPI AMOLED behind the shared colour-panel canvas.
   set(TINY_BOARD_SRCS
-    "board_generic.cpp" "sticky_power_generic.cpp" "sticky_display_headless.cpp"
+    "board_generic.cpp" "sticky_power_generic.cpp" "lcd_canvas.cpp" "lcd_panel_co5300.cpp"
     "hal_absent.cpp"
     "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp")
 else()
