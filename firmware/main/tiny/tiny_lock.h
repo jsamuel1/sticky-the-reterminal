@@ -7,13 +7,15 @@
 // same privacy incident with extra steps.
 //
 // States: UNLOCKED ⇄ LOCKED. No third state — "locking…" does not exist on
-// e-ink. Entry: manual (lock verb) or IMU auto-entry — face-down ≥3 s, or
-// walking-motion ≥5 s with no input for 30 s (constants below, tuned
-// on-device per spec).
+// e-ink. Entry: manual (lock verb) on every board; on boards with an UP+DOWN
+// chord (reTerminal) also IMU auto-entry — face-down ≥3 s, or walking-motion
+// ≥5 s with no input for 30 s (constants below, tuned on-device per spec).
 //
-// Exit: hold UP+DOWN together ≥1 s (raw GPIO poll — iot_button's long-press
-// clock is 2 s and per-button; the chord is OURS) → full re-render of the
-// card already on the glass → unlocked.
+// Exit: on chord boards, hold UP+DOWN together ≥1 s (raw GPIO poll —
+// iot_button's long-press clock is 2 s and per-button; the chord is OURS) →
+// full re-render of the card already on the glass → unlocked. Boards without
+// the chord (FNK0104S, AMOLED-1.8) leave lockout only over the relay
+// (`unlock`), which is why they never auto-enter it.
 #pragma once
 #include "esp_err.h"
 #ifdef __cplusplus
