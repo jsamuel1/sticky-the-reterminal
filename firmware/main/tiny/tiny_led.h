@@ -10,6 +10,9 @@
 //                  capture's OK end promotes it to THINKING atomically),
 //                  tiny_led_ask(THINKING) for a text ask, IDLE on return,
 //                  tiny_led_error() when the askfail card is painted
+//   tiny_display -> tiny_led_alert() each time a card commits (true only for
+//                  a priority:"alert" card; every other commit clears it)
+//   tiny_node   -> tiny_led_unread() when the heartbeat's unread count moves
 //   tiny_lock   -> tiny_led_sync() on every lock change (locked = dark)
 //   sticky_power_generic -> tiny_led_prepare_sleep() before deep sleep
 #pragma once
@@ -31,6 +34,8 @@ void tiny_led_capture_begin(void);       // blue; clears a showing error
 void tiny_led_capture_end(bool ok);      // ok + pending ask -> amber, same frame
 void tiny_led_ask(tiny_led_ask_t state); // non-IDLE clears a showing error
 void tiny_led_error(void);         // red for a few seconds, then off
+void tiny_led_alert(bool on);      // magenta while an alert card is on glass
+void tiny_led_unread(bool on);     // green while unread DMs > 0
 void tiny_led_sync(void);          // re-resolve (lock state changed)
 void tiny_led_prepare_sleep(void); // off, and stays off until reset
 
@@ -41,6 +46,8 @@ static inline void tiny_led_capture_begin(void) {}
 static inline void tiny_led_capture_end(bool) {}
 static inline void tiny_led_ask(tiny_led_ask_t) {}
 static inline void tiny_led_error(void) {}
+static inline void tiny_led_alert(bool) {}
+static inline void tiny_led_unread(bool) {}
 static inline void tiny_led_sync(void) {}
 static inline void tiny_led_prepare_sleep(void) {}
 

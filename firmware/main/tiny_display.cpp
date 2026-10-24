@@ -23,6 +23,7 @@
 #include "tiny/tiny_node.h"
 #include "tiny/tiny_shell.h"
 #include "tiny/tiny_agent.h"
+#include "tiny/tiny_led.h"  // FNK0104S status light: alert layer (no-op elsewhere)
 
 #include <algorithm>
 #include <cstring>
@@ -495,6 +496,11 @@ static SemaphoreHandle_t s_region_mux = NULL;
 // re-checks at lift: if the card changed under the finger, the tap is dropped
 // rather than applied to a button the human never saw (audit TOUCH P0-1).
 static uint32_t s_card_gen = 0;
+// The card being committed is a priority:"alert" card. Set by the main card
+// renderer just before publish_regions; every commit consumes it, so an image,
+// gallery, splash or blit commit (which never set it) reads false and turns
+// the status light's alert layer off.
+static bool s_commit_alert = false;
 
 static void regions_lock(void) {
     if (!s_region_mux) s_region_mux = xSemaphoreCreateMutex();
@@ -529,7 +535,12 @@ static void publish_regions(const char *card_id) {
     for (int i = 0; i < s_region_count; ++i)
         strlcpy(s_regions[i].card_id, s_card_id, sizeof s_regions[i].card_id);
     ++s_card_gen;
+    const bool alert = s_commit_alert;
+    s_commit_alert = false;
     regions_unlock();
+    // Same moment the card becomes touchable: the light says "alert" exactly
+    // while that card is what the human sees.
+    tiny_led_alert(alert);
 }
 
 // Stage one extra tappable region from a body renderer (keyboard keys, menu
@@ -2509,6 +2520,7 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     // draw time made taps in the ~2s refresh window resolve against a layout
     // that was not on the glass yet.
     if (err == ESP_OK) {
+        s_commit_alert = is_alert;
         publish_regions(cid_s);
     } else {
         ESP_LOGW(TAG, "refresh failed (%s) — keeping previous tap regions",

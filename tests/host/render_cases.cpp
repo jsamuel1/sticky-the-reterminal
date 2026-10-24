@@ -89,6 +89,12 @@ extern "C" void tiny_time_utc_string(char *out, size_t cap) {
 }
 extern "C" bool tiny_wifi_is_up(void) { return true; }
 
+// Status light (tiny/tiny_led.h, CONFIG_TINY_STATUS_LED via render_shim's
+// sdkconfig.h): record what the renderer tells the alert layer.
+static int g_led_alert_calls = 0;
+static bool g_led_alert = false;
+extern "C" void tiny_led_alert(bool on) { ++g_led_alert_calls; g_led_alert = on; }
+
 // ---- PNG (gray8, stored deflate via zlib) -----------------------------------
 static void put32(std::vector<uint8_t> &v, uint32_t x) {
     for (int i = 3; i >= 0; --i) v.push_back((uint8_t)(x >> (8 * i)));
@@ -228,8 +234,17 @@ int main(int argc, char **argv) {
         tiny_display_set_rotation(sz.rot);
         for (const Fixture &fx : fixtures()) {
             const std::string key = std::string(sz.tag) + "/" + fx.name;
+            const int led_calls_before = g_led_alert_calls;
             const esp_err_t r = tiny_display_render_card(fx.json.c_str());
             CHECK(r == 0, "%s: render returned %d", key.c_str(), r);
+            // Status light: exactly one alert-layer update per committed card,
+            // on only for the priority:"alert" fixture.
+            const bool want_alert = !strcmp(fx.name, "alert");
+            CHECK(g_led_alert_calls == led_calls_before + 1,
+                  "%s: %d tiny_led_alert calls for one commit", key.c_str(),
+                  g_led_alert_calls - led_calls_before);
+            CHECK(g_led_alert == want_alert, "%s: led alert %d, want %d",
+                  key.c_str(), g_led_alert, want_alert);
             // Ink in the outer 4 px of the glass is ink the edge cut off.
             const int ink = edge_ink(4);
             CHECK(fx.full_bleed || ink == 0, "%s: %d px of ink in the 4 px edge band",
