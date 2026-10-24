@@ -398,7 +398,8 @@ console.log(JSON.stringify(out));
     sys.path.insert(0, str(REPO / "tools"))
     import provision_lib as plib  # the CLI path's implementation (tools/provision_new.sh)
     check("provision.js names == provision_lib names", o["names"] == [plib.board_name(m)[1] for m in ("b8:1f:3f:d7:23:60", "b8:1f:3f:d7:80:ff", "00:00:00:00:00:00")], o["names"])
-    check("provision.js capabilities == provision_lib FW_CAPS", o["caps"] == plib.FW_CAPS, o["caps"])
+    fw_caps = plib.firmware_caps(str(REPO / "firmware"))
+    check("provision.js capabilities == firmware tiny_node.cpp s_caps[]", o["caps"] == fw_caps, {"js": o["caps"], "firmware": fw_caps})
     check("stickyClaim: body cap first, esp32s3, daemon", o["claim"]["capabilities"][0] == "body:sticky-the-reterminal" and o["claim"]["platform"] == "esp32s3" and o["claim"]["kind"] == "daemon")
     for n in cfgs:
         mine = (vec / f"{n}.js.bin").read_bytes()

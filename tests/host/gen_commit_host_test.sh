@@ -22,7 +22,7 @@ printf 'tool\n' >"$R/tools/x.sh"
 printf 'firmware/build-*/\nfirmware/sdkconfig\n' >"$R/.gitignore"
 git -C "$R" init -q
 git -C "$R" -c user.email=t@t -c user.name=t add -A
-git -C "$R" -c user.email=t@t -c user.name=t commit -qm init
+GIT_COMMITTER_DATE="2026-10-24T13:05:00+02:00" git -C "$R" -c user.email=t@t -c user.name=t commit -qm init
 SHA="$(git -C "$R" rev-parse --short=8 HEAD)"
 
 stamp() {
@@ -50,5 +50,10 @@ expect "project CMakeLists (outside main)"  firmware/CMakeLists.txt             
 expect "partition table (outside main)"     firmware/partitions_16mb.csv                                  dirty
 expect "sdkconfig defaults (outside main)"  firmware/sdkconfig.defaults.fnk0104s                          dirty
 expect "vendored component"                 vendor/Sticky_dashboard_demo/components/seeed_epaper/epaper_panel.c dirty
+# main's TINY_FW_COMMIT_DATE survives the widened dirty scope: committer date, in UTC.
+git -C "$R" checkout -q -- . && git -C "$R" clean -qfd
+stamp >/dev/null
+DATE="$(sed -n 's/.*TINY_FW_COMMIT_DATE "\(.*\)"/\1/p' "$T/out.h")"
+if [ "$DATE" = "2026-10-24 11:05 UTC" ]; then echo "  ok   commit date → $DATE"; else echo "  FAIL commit date → '$DATE' (want 2026-10-24 11:05 UTC)"; FAILS=$((FAILS + 1)); fi
 [ "$FAILS" = 0 ] || { echo "gen_commit host test: $FAILS FAILED"; exit 1; }
 echo "gen_commit host test: ALL GREEN"

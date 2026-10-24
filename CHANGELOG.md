@@ -38,7 +38,10 @@ release, newest first.
   size (`sdkconfig.defaults[.<board>]`) from the source it flashes instead of
   hand-kept copies. It refuses uncommitted `firmware/`/`vendor/` source before
   building, and a build whose `fw_commit` is `-dirty`, `nogit` or not the
-  source HEAD (stale `--no-build`), unless `--allow-dirty`.
+  source HEAD (stale `--no-build`), unless `--allow-dirty`. The browser
+  installer's `provision.js` roster (a static page cannot read the source)
+  gains `sd` too; `tools/devbench/selftest.py` now fails when it drifts from
+  `s_caps[]`.
 
 - **firmware** — colour UI on colour boards, grammar v16. The Canvas gains an
   optional 4-bit accent plane beside the unchanged 2-bit gray plane; only

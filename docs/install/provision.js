@@ -194,9 +194,11 @@ export function readNvsStrings(img) {
 // pair/start {name, platform, kind, capabilities, secretHash} → {code, ttl_s}
 // pair/poll  {code, secret} → {status:"approved", device_id, device_token, name}
 //            | denied | expired | claimed | 404 "unknown code"
-// Firmware verbs, the same list as tools/provision_lib.py FW_CAPS (selftest.py checks).
+// Firmware verbs: firmware/main/tiny_node.cpp s_caps[] verbatim, in order. A static page
+// cannot read the source, so this is a copy — tools/devbench/selftest.py fails the day it
+// drifts from provision_lib.firmware_caps(firmware/).
 export const STICKY_CAPABILITIES = ["render_ui", "status", "sensors", "say", "ask", "play", "voice", "screenshot",
-  "miccheck", "page", "rotate", "glance", "tap", "swipe", "scroll", "lock", "unlock", "sleep", "ota", "messages", "config", "agent"];
+  "miccheck", "page", "rotate", "glance", "tap", "swipe", "scroll", "lock", "unlock", "sleep", "ota", "messages", "config", "agent", "sd"];
 export function stickyClaim(name, via) {
   const caps = ["body:sticky-the-reterminal", ...(via ? [`via:${String(via).slice(0, 8)}`] : []), ...STICKY_CAPABILITIES];
   return { name, platform: "esp32s3", kind: "daemon", capabilities: [...new Set(caps.map((c) => c.toLowerCase().slice(0, 32)))].slice(0, 32) };
