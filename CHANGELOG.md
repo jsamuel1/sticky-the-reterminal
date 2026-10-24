@@ -6,6 +6,33 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware** — FNK0104S drives its microSD slot: SDMMC 4-bit on
+  CLK 38 / CMD 40 / D0–D3 39/41/48/47 through the GPIO matrix, 20 MHz,
+  the board's own 10K pull-ups (`sticky_sdcard_sdmmc.cpp`, same contract as
+  the reTerminal's SPI driver, so `status`, `sd`, the gallery cache and the
+  photo archive run unchanged). The slot has no detect switch, so `present`
+  means mounted; `status` and `sd status` share one snapshot that
+  reconciles hot-plug first, so a card pushed in after an empty boot shows
+  in plain `status`. A mounted card is checked with CMD13 before file I/O
+  and unmounted when it stops answering, and an unmounted slot is
+  re-probed at most every 2/4/8 s with the IDF's probe errors silenced.
+  Each probe traces its commands (did the card answer, did a data block
+  fail), because the mount's return code cannot say: a data error surfaces
+  as ESP_FAIL like "no FAT", and a TIMEOUT is either an empty slot or a
+  lost block. A 4-bit attempt whose card answered and then hit a
+  signal/protocol data failure retries 1-bit and logs either outcome; a
+  narrow timeout cannot erase the wide attempt's evidence that a card
+  answered. Software, configuration and heap failures stay probe errors and
+  do not retry. `sd format yes` is suggested only when
+  every transfer worked and the FAT did not mount.
+  Boot logs the internal-RAM cost of the mount. Cap `sd` is now true, so
+  `absent[]` drops it. No grammar change: the `sd` object's shape is the
+  same. AMOLED-1.8 (1-bit slot) stays stubbed until tested.
+- **tests** — `tests/host/sd_policy_host_test.sh`: the SDMMC driver's probe
+  rules (command trace → absent/unreadable/mounted, 1-bit retry, FAT hint,
+  widths, wrap-safe backoff). `tests/host/sd_report_host_test.sh`: `status`
+  and `sd status` read the reconciled snapshot, and the SDMMC driver's
+  `present` is mounted-only.
 - **firmware, grammar v21** — AMOLED-1.8 V2 auto-rotate. New
   `sticky_imu_qmi8658.cpp` drives the QMI8658 at 0x6B on the shared I2C bus.
   It checks WHO_AM_I 0x05, soft-resets, and runs the accelerometer only

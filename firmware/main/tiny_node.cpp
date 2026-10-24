@@ -977,19 +977,22 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     // symptom at all — heap watermarks can't see a stack death. This can.
     cJSON_AddNumberToObject(s, "node_stack_min_free",
         (double)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
-    // SD card: present = the physical detect switch, mounted = FAT is
+    // SD card: present = a card is in the slot (the reTerminal's detect
+    // switch; on a board without one present == mounted), mounted = FAT is
     // live at /sdcard. Sizes only when mounted (a guess is worse than null).
+    // sticky_sdcard_report() reconciles hot-plug first, so a card pushed into
+    // a no-detect slot after boot shows here within one re-probe backoff.
     {
+        sticky_sdcard_report_t sdr;
+        sticky_sdcard_report(&sdr);
         cJSON *sd = cJSON_CreateObject();
-        cJSON_AddBoolToObject(sd, "present", sticky_sdcard_present());
-        cJSON_AddBoolToObject(sd, "mounted", sticky_sdcard_mounted());
-        uint64_t sd_total = 0, sd_free = 0;
-        if (sticky_sdcard_mounted() &&
-            sticky_sdcard_info(&sd_total, &sd_free) == ESP_OK) {
+        cJSON_AddBoolToObject(sd, "present", sdr.present);
+        cJSON_AddBoolToObject(sd, "mounted", sdr.mounted);
+        if (sdr.mounted && sdr.total_bytes) {
             cJSON_AddNumberToObject(sd, "size_gb",
-                (double)(uint64_t)((sd_total / 1e9) * 10 + 0.5) / 10.0);
+                (double)(uint64_t)((sdr.total_bytes / 1e9) * 10 + 0.5) / 10.0);
             cJSON_AddNumberToObject(sd, "free_gb",
-                (double)(uint64_t)((sd_free / 1e9) * 10 + 0.5) / 10.0);
+                (double)(uint64_t)((sdr.free_bytes / 1e9) * 10 + 0.5) / 10.0);
         } else {
             cJSON_AddNullToObject(sd, "size_gb");
             cJSON_AddNullToObject(sd, "free_gb");
@@ -2101,17 +2104,19 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                 }
             }
         } else {  // "", "status", "df"
-            sticky_sdcard_ensure();  // reconcile hot-plug before reporting
+            // Same reconciled snapshot as the `status` verb's sd object, so
+            // no two readers disagree. ensure() first: this verb is the
+            // explicit "look now", so the reTerminal mounts an inserted card.
+            sticky_sdcard_ensure();
+            sticky_sdcard_report_t sdr;
+            sticky_sdcard_report(&sdr);
             cJSON *root = cJSON_CreateObject();
-            const bool present = sticky_sdcard_present();
-            const bool mounted = sticky_sdcard_mounted();
-            cJSON_AddBoolToObject(root, "present", present);
-            cJSON_AddBoolToObject(root, "mounted", mounted);
-            uint64_t sd_total = 0, sd_free = 0;
+            cJSON_AddBoolToObject(root, "present", sdr.present);
+            cJSON_AddBoolToObject(root, "mounted", sdr.mounted);
             char sum[128];
-            if (mounted && sticky_sdcard_info(&sd_total, &sd_free) == ESP_OK) {
-                const double tg = (double)(uint64_t)((sd_total / 1e9) * 10 + 0.5) / 10.0;
-                const double fg = (double)(uint64_t)((sd_free / 1e9) * 10 + 0.5) / 10.0;
+            if (sdr.mounted && sdr.total_bytes) {
+                const double tg = (double)(uint64_t)((sdr.total_bytes / 1e9) * 10 + 0.5) / 10.0;
+                const double fg = (double)(uint64_t)((sdr.free_bytes / 1e9) * 10 + 0.5) / 10.0;
                 cJSON_AddNumberToObject(root, "size_gb", tg);
                 cJSON_AddNumberToObject(root, "free_gb", fg);
                 snprintf(sum, sizeof sum,
@@ -2119,9 +2124,17 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
             } else {
                 cJSON_AddNullToObject(root, "size_gb");
                 cJSON_AddNullToObject(root, "free_gb");
-                strlcpy(sum, present ? "card present but not mounted (exFAT "
-                                       "factory card? -> sd format yes)"
-                                     : "no sd card in the slot", sizeof sum);
+                const char *why =
+                    sdr.state == STICKY_SD_STATE_NO_FAT
+                        ? "card answered but not mounted (exFAT factory "
+                          "card? -> sd format yes)"
+                    : sdr.state == STICKY_SD_STATE_UNREADABLE
+                        ? "card answered but a transfer failed (reseat it)"
+                    : sdr.state == STICKY_SD_STATE_PROBE_ERROR
+                        ? "sd probe failed (see device log)"
+                    : sdr.mounted ? "sd mounted, size unreadable"
+                                  : "no sd card in the slot";
+                strlcpy(sum, why, sizeof sum);
             }
             cJSON_AddStringToObject(root, "summary", sum);
             char *cs = cJSON_PrintUnformatted(root);

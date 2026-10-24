@@ -17,7 +17,7 @@ if(CONFIG_TINY_BOARD_FNK0104S)
   # FNK0104S: ST7796S LCD behind the shared colour-panel canvas (lcd_canvas).
   set(TINY_BOARD_SRCS
     "board_generic.cpp" "sticky_power_generic.cpp" "lcd_canvas.cpp" "lcd_panel_st7796.cpp"
-    "hal_absent.cpp" "sticky_battery_adc.cpp" "tiny_batt_curve.cpp"
+    "hal_absent.cpp" "sticky_battery_adc.cpp" "tiny_batt_curve.cpp" "sticky_sdcard_sdmmc.cpp"
     "audio_es8311.cpp" "sticky_buzzer_es8311.cpp" "tiny_pcm.cpp"
     # WS2812 status light (empty unless CONFIG_TINY_STATUS_LED).
     "tiny_led.cpp")

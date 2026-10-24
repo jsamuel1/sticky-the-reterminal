@@ -31,8 +31,8 @@ constexpr tiny_board_caps_t kCaps = {
     .flash_mb = 32,
 };
 #elif defined(CONFIG_TINY_BOARD_FNK0104S)
-// ST7796S LCD (lcd_canvas), FT6336U touch and the GPIO 9 battery ADC are
-// driven; SDMMC lands later.
+// ST7796S LCD (lcd_canvas), FT6336U touch, the GPIO 9 battery ADC and the
+// SDMMC 4-bit microSD (sticky_sdcard_sdmmc.cpp) are driven.
 // The board has no RTC, IMU, env sensor, fuel gauge or power latch. Mic,
 // buzzer tones and speaker are the ES8311 (P4), proven on the owner's unit:
 // chimes audible, voice ask round-trips through the agent.
@@ -54,7 +54,7 @@ constexpr tiny_board_caps_t kCaps = {
     .rtc = false,
     .imu = false,
     .env = false,
-    .sd = false,
+    .sd = true,  // SDMMC 4-bit, no detect pin: present = mounted
     .power_latch = false,
     .page_buttons = false,
     .ota = true,  // image carries a board stamp; tiny_ota refuses foreign ones

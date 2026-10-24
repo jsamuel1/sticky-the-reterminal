@@ -4,8 +4,8 @@
 // PSRAM; 16 MB flash, JEDEC 0x18405e measured on the owner's unit).
 // Sources: Freenove_ESP32_S3_Display 4.0inch schematic, the vendor TFT_eSPI
 // setup FNK0104S_4.0_320x480_ST7796.h, and the vendor XiaoZhi flash script.
-// Phase 1 drives only the BOOT button and the shared I2C bus; the rest is
-// recorded here for the display/touch/audio phases.
+// Phase 1 drives only the BOOT button and the shared I2C bus; later phases
+// drive the LCD, touch, audio, battery ADC and microSD from these pins.
 
 // Buttons: BOOT is the only user button. click = home, hold = push-to-talk
 // (tiny_button.cpp colour-board remap).
@@ -47,7 +47,10 @@
 #define PIN_WS2812          42
 #define PIN_BAT_ADC         9   // behind a 2:1 divider
 
-// MicroSD, SDMMC 4-bit.
+// MicroSD, SDMMC 4-bit, driven by sticky_sdcard_sdmmc.cpp. Schematic: 10K
+// pull-ups to 3V3 on CLK/CMD/D0..D3, slot pin 9 (detect) NC, no card power
+// switch: presence is learned by probing the card.
+#define SD_SDMMC_DRIVEN     1
 #define PIN_SD_CLK          38
 #define PIN_SD_CMD          40
 #define PIN_SD_D0           39
