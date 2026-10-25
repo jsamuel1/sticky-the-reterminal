@@ -756,6 +756,34 @@ int main(int argc, char **argv) {
                   "gallery race: reopen shows cached a2 with no fetch");
             CHECK(tiny_display_gallery_nav(-1) == ESP_OK && fetches() == f0,
                   "gallery race: prev pages set A (cached a1), not set C");
+
+            // Panel-native gallery commits own no text scroll window: both a
+            // gallery card and a page flip over a long text card must clear
+            // every stale scroll claim once their frame is on glass.
+            auto render_long_text = [](const char *cid) {
+                std::string card = std::string(R"J({"type":"text","card_id":")J") +
+                                   cid + R"J(","title":"long","body":")J";
+                for (int i = 0; i < 80; ++i) card += "overflowing line\\n";
+                card += R"J("})J";
+                return tiny_display_render_card(card.c_str()) == ESP_OK &&
+                       tiny_display_can_scroll();
+            };
+            auto scroll_cleared = [] {
+                int off = -1, content = -1, view = -1;
+                tiny_display_scroll_state(&off, &content, &view);
+                return !tiny_display_can_scroll() && off == 0 && content == 0 &&
+                       view == 0 &&
+                       tiny_display_scroll(40) == ESP_ERR_INVALID_STATE;
+            };
+            CHECK(render_long_text("long-before-gallery") &&
+                      tiny_display_scroll(40) == ESP_OK,
+                  "gallery scroll: long text scrolls");
+            CHECK(tiny_display_render_card(gal_a) == ESP_OK && scroll_cleared(),
+                  "gallery scroll: gallery card clears stale scroll geometry");
+            CHECK(render_long_text("long-before-flip"),
+                  "gallery scroll: long text again");
+            CHECK(tiny_display_gallery_nav(0) == ESP_OK && scroll_cleared(),
+                  "gallery scroll: page flip clears stale scroll geometry");
             {
                 std::lock_guard<std::mutex> lock(g_http_mutex);
                 g_hold_http = false;
@@ -939,6 +967,23 @@ int main(int argc, char **argv) {
                       !tiny_display_stream_active() &&
                       !strcmp(tiny_display_current_card_id(), "blit"),
                   "blit stream: committed raw frame retires text stream");
+            {
+                std::string card =
+                    R"J({"type":"text","card_id":"long-before-blit","title":"long","body":")J";
+                for (int i = 0; i < 80; ++i) card += "overflowing line\\n";
+                card += R"J("})J";
+                CHECK(tiny_display_render_card(card.c_str()) == ESP_OK &&
+                          tiny_display_can_scroll(),
+                      "blit scroll: long text scrolls");
+                CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_OK,
+                      "blit scroll: raw frame commits");
+                int off = -1, content = -1, view = -1;
+                tiny_display_scroll_state(&off, &content, &view);
+                CHECK(!tiny_display_can_scroll() && off == 0 && content == 0 &&
+                          view == 0 &&
+                          tiny_display_scroll(40) == ESP_ERR_INVALID_STATE,
+                      "blit scroll: raw frame clears stale scroll geometry");
+            }
 
             // ---- structured stream finale over HTTPS ------------------------
             // Successful image finale: requested identity, stream retired.
