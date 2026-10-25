@@ -768,6 +768,9 @@ extern "C" int tiny_display_rotation(void) {
 // the normal policy — the designer's lazy clean-flash runs 6s later from
 // tiny_main so any waveform residue self-heals.
 static uint8_t *s_wake_baseline = nullptr;  // gray4 canvas-format, PSRAM
+// Defined with the stream state below. True when a live stream answered the
+// rerender (redrawn in place); *err carries that render's result.
+static bool stream_rerender_if_live(esp_err_t *err);
 // The goodbye card's variable content + the rotation it was drawn at, kept
 // in RTC slow RAM (survives deep sleep, dies on power loss — and on power
 // loss the glass is stale anyway, so the guard below refuses the partial).
@@ -783,12 +786,15 @@ extern "C" esp_err_t tiny_display_arm_wake_baseline(void) {
     // No note (cold boot / power loss / pre-0.18.4 sleep) = no baseline =
     // the caller falls back to the honest full flash.
     if (!s_rtc_goodbye[0] || s_rtc_sleep_rot < 0) return ESP_ERR_INVALID_STATE;
-    const char *goodbye_body = s_rtc_goodbye;
+    // Copy BEFORE consuming the one-shot RTC note: the redraw must carry the
+    // goodbye body the glass physically shows, not the cleared slot.
+    char goodbye_body[sizeof s_rtc_goodbye];
+    strlcpy(goodbye_body, s_rtc_goodbye, sizeof goodbye_body);
     s_rot = static_cast<CanvasRotation>(s_rtc_sleep_rot);
     s_rtc_goodbye[0] = 0;  // one shot: a baseline may only be spent once
     s_rtc_sleep_rot = -1;
     Canvas *c = sticky_display_canvas();
-    if (!c || !goodbye_body) return ESP_ERR_INVALID_ARG;
+    if (!c) return ESP_ERR_INVALID_ARG;
     cJSON *card = cJSON_CreateObject();
     if (!card) return ESP_ERR_NO_MEM;
     const bool complete =
@@ -835,6 +841,13 @@ extern "C" esp_err_t tiny_display_glance(void) {
 
 extern "C" esp_err_t tiny_display_rerender(void) {
     RenderGuard guard;
+    // A live stream owns the glass: redraw IT (latest buffered words + caret)
+    // in the new layout instead of replaying the last committed stream frame
+    // as an outsider card, which would end the answer mid-sentence. Stream
+    // renders that scroll themselves (follow_tail) arrive with
+    // s_stream_rendering set and take the cached path below.
+    esp_err_t stream_err;
+    if (stream_rerender_if_live(&stream_err)) return stream_err;
     if (!s_card_cache) return ESP_ERR_INVALID_STATE;
     // Hosted images/gallery frames are panel-native bytes, not card-layout
     // coordinates. Re-fetching cannot rotate them and would add network to an
@@ -943,7 +956,9 @@ static int s_view_bot = 1 << 28;
 // One stream at a time, one caller task at a time (the ask engine). The
 // buffer lives in PSRAM and is capped at the relay's own reply ceiling: an
 // answer the reply PATCH cannot carry is an answer the stream should not
-// pretend to hold either.
+// pretend to hold either. Every read/write of this state happens under
+// RenderGuard: rotation, glance and outsider cards run on other tasks and
+// read the same buffer through stream_render / stream_reset.
 #define STREAM_BUF_MAX 8192
 static bool    s_stream_on = false;
 static bool    s_stream_partial = false;   // commit -> partial refresh gate
@@ -2040,10 +2055,11 @@ static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch) {
         heap_caps_free(buf);
         return ESP_ERR_INVALID_STATE;
     }
-    photos_sd_save(ju->valuestring, buf, len);  // archive before the canvas eats it
+    // Archive only what PAINTED: a failed panel commit leaves no photo on the
+    // glass, so it must not leave one in the archive (or poison the same-URL
+    // dedupe so a successful retry is never archived).
     display_lock();
     blit_raw_locked(c, buf, len);
-    heap_caps_free(buf);
     err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
     s_staged_count = 0;                  // an image has no buttons
@@ -2052,6 +2068,8 @@ static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch) {
         publish_regions("image");
     }
     display_unlock();
+    if (err == ESP_OK) photos_sd_save(ju->valuestring, buf, len);
+    heap_caps_free(buf);
     return err;
 }
 
@@ -2235,50 +2253,52 @@ extern "C" int tiny_display_gallery_count(void) {
     return s_gal_count;
 }
 
-// dir: -1/+1 page (wraps), 0 = reopen current. Fetches OUTSIDE the display
-// lock like every other network path. Empty set → INVALID_STATE (callers
-// show the friendly card; this layer never invents one).
-static esp_err_t gallery_nav_locked(int dir, uint32_t render_epoch) {
-    gal_lazy_load();
-    if (s_gal_count <= 0) return ESP_ERR_INVALID_STATE;
-    int idx = (s_gal_index + dir) % s_gal_count;
-    if (idx < 0) idx += s_gal_count;
+// One gallery paint, staged. Nothing the committed gallery owns — URL set,
+// count, page index, PSRAM LRU, SD frames/manifest, NVS — changes until this
+// claim is still the newest (epoch) AND its panel refresh succeeded. A fetch
+// that fails, or that a newer card overtakes while the lock is released for
+// HTTPS, leaves the glass and the gallery state that describes it untouched,
+// so the old gallery's prev/next buttons still page the old set.
+//   new_urls == nullptr : page within the committed set (nav / reopen).
+//   new_urls != nullptr : a NEW set (claim-owned copy); old cache/SD frames
+//                         belong to the old index space and are never read.
+static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
+                                     const char (*new_urls)[256], int new_count) {
+    const bool new_set = new_urls != nullptr;
+    const int count = new_set ? new_count : s_gal_count;
+    if (count <= 0 || idx < 0 || idx >= count) return ESP_ERR_INVALID_STATE;
     Canvas *c = sticky_display_canvas();
     if (!c) return ESP_ERR_INVALID_STATE;
     uint8_t *buf = nullptr; size_t len = 0;
+    bool cache_owned = false;   // true: buf belongs to s_gal_cache, never free
+    bool from_net = false;
     esp_err_t err = ESP_OK;
-    // Read order: PSRAM LRU (this boot) → SD card (any boot) → network.
-    // A frame from SD or network enters the LRU so the next flip back is
-    // a memcpy; a frame from the network also lands on the card so the
-    // next BOOT never fetches it again.
-    if ((buf = gal_cache_get(idx, &len)) != nullptr) {
-        // LRU hit — buf stays cache-owned, nothing to do.
-    } else if ((buf = gal_sd_read(idx, &len)) != nullptr) {
-        gal_cache_put(idx, buf, len);  // cache takes ownership
+    // Read order (committed set only): PSRAM LRU (this boot) → SD card (any
+    // boot) → network. The render lock is held across the LRU and SD paths,
+    // so a cache-owned pointer cannot be evicted while it is blitted.
+    if (!new_set && (buf = gal_cache_get(idx, &len)) != nullptr) {
+        cache_owned = true;
+    } else if (!new_set && (buf = gal_sd_read(idx, &len)) != nullptr) {
+        // claim-owned until committed to the LRU below
     } else {
         char url[sizeof s_gal_urls[0]];
-        strlcpy(url, s_gal_urls[idx], sizeof url);
+        strlcpy(url, new_set ? new_urls[idx] : s_gal_urls[idx], sizeof url);
         render_unlock();
         err = tiny_display_fetch_raw(url, &buf, &len);
         render_lock();
         if (err != ESP_OK) return err;  // no RAM, no disk, no net: honest miss
         if (render_epoch != s_render_epoch) {
-            heap_caps_free(buf);
+            heap_caps_free(buf);        // overtaken: touch nothing shared
             return ESP_ERR_INVALID_STATE;
         }
-        gal_sd_write(idx, buf, len);   // download-once (before cache owns it)
-        gal_cache_put(idx, buf, len);  // cache takes ownership
+        from_net = true;
     }
-    // Page position survives too: a u8 write per flip (no blob churn), so
-    // a reboot reopens the photo the owner was looking at, not photo 1.
-    if (idx != s_gal_index) tiny_config_gallery_save_index((uint8_t)idx);
-    s_gal_index = idx;
     display_lock();
-    blit_raw_locked(c, buf, len);  // cache owns buf — no free here
+    blit_raw_locked(c, buf, len);
     {   // page indicator chip, bottom-right: white ground so it reads on any
         // photo; tells the truth about position ("2/7"), per the contract.
-        char pg[16];
-        snprintf(pg, sizeof pg, "%d/%d", s_gal_index + 1, s_gal_count);
+        char pg[24];
+        snprintf(pg, sizeof pg, "%d/%d", idx + 1, count);
         const int tw = text_width(pg, 2);
         const int chip_w = tw + 24, chip_h = 40;
         const int cx = s_pw - 16 - chip_w, cy = s_ph - 16 - chip_h;
@@ -2301,7 +2321,47 @@ static esp_err_t gallery_nav_locked(int dir, uint32_t render_epoch) {
         publish_regions("gallery");
     }
     display_unlock();
-    return err;
+    if (err != ESP_OK) {
+        if (!cache_owned) heap_caps_free(buf);
+        return err;  // glass unchanged -> gallery state unchanged
+    }
+    // ---- commit: the glass now shows (set, idx) ----
+    if (new_set) {
+        gal_cache_clear();          // new set = new index space, stale frames lie
+        memcpy(s_gal_urls, new_urls, (size_t)count * sizeof s_gal_urls[0]);
+        for (int i = count; i < kGalMax; ++i) s_gal_urls[i][0] = 0;
+        s_gal_count = count;
+        s_gal_index = idx;
+        s_gal_nvs_tried = true;     // RAM set is authoritative now
+        gal_sd_reset(s_gal_urls, count);  // card mirrors the rule: stale NNN.raw lie too
+        // A set that painted once is a set that survives reboot. Only
+        // occupied slots travel; a save failure is logged, never fatal.
+        const esp_err_t perr = tiny_config_gallery_save(
+            s_gal_urls, (size_t)count * sizeof s_gal_urls[0], (uint8_t)count,
+            (uint8_t)idx);
+        if (perr != ESP_OK)
+            ESP_LOGW(TAG, "gallery manifest NVS save failed: %s (set is RAM-only "
+                          "this boot)", esp_err_to_name(perr));
+    } else if (idx != s_gal_index) {
+        // Page position survives too: a u8 write per flip (no blob churn), so
+        // a reboot reopens the photo the owner was looking at, not photo 1.
+        tiny_config_gallery_save_index((uint8_t)idx);
+        s_gal_index = idx;
+    }
+    if (from_net) gal_sd_write(idx, buf, len);  // download-once
+    if (!cache_owned) gal_cache_put(idx, buf, len);  // cache takes ownership
+    return ESP_OK;
+}
+
+// dir: -1/+1 page (wraps), 0 = reopen current. Fetches OUTSIDE the display
+// lock like every other network path. Empty set → INVALID_STATE (callers
+// show the friendly card; this layer never invents one).
+static esp_err_t gallery_nav_locked(int dir, uint32_t render_epoch) {
+    gal_lazy_load();
+    if (s_gal_count <= 0) return ESP_ERR_INVALID_STATE;
+    int idx = (s_gal_index + dir) % s_gal_count;
+    if (idx < 0) idx += s_gal_count;
+    return gallery_show_locked(idx, render_epoch, nullptr, 0);
 }
 
 extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
@@ -2310,9 +2370,14 @@ extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
     return gallery_nav_locked(dir, render_epoch);
 }
 
-static esp_err_t render_gallery_card(cJSON *root) {
+static esp_err_t render_gallery_card(cJSON *root, uint32_t render_epoch) {
     const cJSON *ja = cJSON_GetObjectItem(root, "urls");
     if (!cJSON_IsArray(ja)) return ESP_ERR_INVALID_ARG;
+    // Claim-owned copy of the requested set: the committed s_gal_urls keep
+    // describing the glass until this set's first frame actually paints.
+    auto *urls = (char (*)[256])heap_caps_malloc(sizeof s_gal_urls,
+                                                 MALLOC_CAP_SPIRAM);
+    if (!urls) return ESP_ERR_NO_MEM;
     int n = 0;
     const cJSON *u = nullptr;
     cJSON_ArrayForEach(u, ja) {
@@ -2320,34 +2385,29 @@ static esp_err_t render_gallery_card(cJSON *root) {
         if (!cJSON_IsString(u) ||
             strncmp(u->valuestring, "https://", 8) != 0) continue;
         if (strlen(u->valuestring) >= sizeof s_gal_urls[0]) continue;
-        strlcpy(s_gal_urls[n++], u->valuestring, sizeof s_gal_urls[0]);
+        strlcpy(urls[n++], u->valuestring, sizeof s_gal_urls[0]);
     }
-    if (n == 0) return ESP_ERR_INVALID_ARG;
+    if (n == 0) { heap_caps_free(urls); return ESP_ERR_INVALID_ARG; }
+    gal_lazy_load();
+    bool same_set = n == s_gal_count;
+    for (int i = 0; same_set && i < n; ++i)
+        same_set = strcmp(urls[i], s_gal_urls[i]) == 0;
+    esp_err_t err;
     // A RE-LAYOUT (rotation/glance replaying the cached spec) must not
     // reset the page: the spec's "index" describes where the set STARTED,
     // not where the owner is now. Keep the live page and skip the NVS
     // save — replaying index:0 here is exactly how a rotation flap both
     // lost the owner's page and poisoned the saved one (0.25.9 field bug).
-    if (s_rerendering && n == s_gal_count) {
-        s_gal_index = (s_gal_index < n) ? s_gal_index : 0;
-        return gallery_nav_locked(0, s_render_epoch);
+    if (s_rerendering && same_set) {
+        err = gallery_nav_locked(0, render_epoch);
+    } else {
+        const cJSON *ji = cJSON_GetObjectItem(root, "index");
+        int idx = cJSON_IsNumber(ji) ? (int)ji->valuedouble : 0;
+        if (idx < 0 || idx >= n) idx = 0;
+        err = gallery_show_locked(idx, render_epoch, urls, n);
     }
-    gal_cache_clear();  // new set = new index space, stale frames lie
-    gal_sd_reset(s_gal_urls, n);  // card mirrors the rule: stale NNN.raw lie too
-    s_gal_count = n;
-    const cJSON *ji = cJSON_GetObjectItem(root, "index");
-    int idx = cJSON_IsNumber(ji) ? (int)ji->valuedouble : 0;
-    if (idx < 0 || idx >= n) idx = 0;
-    s_gal_index = idx;
-    // Commit the manifest before the first fetch: a set that painted once
-    // is a set that survives reboot. Only occupied slots
-    // travel; a save failure is logged, never fatal — the RAM set works.
-    esp_err_t perr = tiny_config_gallery_save(
-        s_gal_urls, (size_t)n * sizeof s_gal_urls[0], (uint8_t)n, (uint8_t)idx);
-    if (perr != ESP_OK)
-        ESP_LOGW(TAG, "gallery manifest NVS save failed: %s (set is RAM-only "
-                      "this boot)", esp_err_to_name(perr));
-    return gallery_nav_locked(0, s_render_epoch);
+    heap_caps_free(urls);
+    return err;
 }
 
 struct PendingCardCache {
@@ -2426,7 +2486,7 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
             return tiny_shell_universe_push(card_json);
         }
         if (cJSON_IsString(jt) && strcmp(jt->valuestring, "gallery") == 0) {
-            esp_err_t gerr = render_gallery_card(root);
+            esp_err_t gerr = render_gallery_card(root, render_epoch);
             if (gerr == ESP_OK) pending.publish();
             cJSON_Delete(root);
             return gerr;
@@ -2477,6 +2537,14 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     // One writer at a time: relay, voice/button, orientation and serial tasks
     // share render state under RenderGuard. The shorter panel lock below owns
     // only canvas drawing and physical commit.
+    // Scroll/body geometry describes the card ON THE GLASS (can_scroll, the
+    // gesture router and the next scroll step read it). Snapshot it so a
+    // failed panel commit restores the committed card's window.
+    const int geo_scroll = s_scroll, geo_content_h = s_content_h;
+    const int geo_body_top = s_body_top, geo_body_bot = s_body_bot;
+    const int geo_view_top = s_view_top, geo_view_bot = s_view_bot;
+    char geo_scroll_card[sizeof s_scroll_card];
+    strlcpy(geo_scroll_card, s_scroll_card, sizeof geo_scroll_card);
     display_lock();
 
     // Rotation is applied here, once per render: the layout helpers below all
@@ -2592,7 +2660,7 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     static int s_pushed_rot = -1;
     // §12 wake: baseline capture pass — draw into the canvas, push nothing.
     // Regions are NOT published (nothing new is on the glass).
-    if (s_draw_only) { display_unlock(); return ESP_OK; }
+    if (s_draw_only) { display_unlock(); cJSON_Delete(root); return ESP_OK; }
     const bool rot_changed = (s_pushed_rot != static_cast<int>(s_rot));
     esp_err_t err;
     if (s_wake_partial_pending && s_wake_baseline) {
@@ -2620,6 +2688,10 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
         s_commit_alert = is_alert;
         publish_regions(cid_s);
     } else {
+        s_scroll = geo_scroll; s_content_h = geo_content_h;
+        s_body_top = geo_body_top; s_body_bot = geo_body_bot;
+        s_view_top = geo_view_top; s_view_bot = geo_view_bot;
+        strlcpy(s_scroll_card, geo_scroll_card, sizeof s_scroll_card);
         ESP_LOGW(TAG, "refresh failed (%s) — keeping previous tap regions",
                  esp_err_to_name(err));
     }
@@ -2763,10 +2835,13 @@ extern "C" esp_err_t tiny_display_scroll(int delta_px) {
     if (ns < 0) ns = 0;
     if (ns > max_scroll) ns = max_scroll;
     if (ns == s_scroll) return ESP_OK;   // already at the edge — no flash spent
+    const int prev_scroll = s_scroll;
     s_scroll = ns;
     s_scroll_partial = true;             // paging cadence -> partial refresh
     const esp_err_t err = tiny_display_rerender();
     s_scroll_partial = false;
+    // The offset describes the glass: a failed commit left the old window up.
+    if (err != ESP_OK) s_scroll = prev_scroll;
     ESP_LOGI(TAG, "scroll -> %d/%d px (view %d) %s", s_scroll, max_scroll,
              view_h, esp_err_to_name(err));
     return err;
@@ -3018,11 +3093,21 @@ static esp_err_t stream_render(bool caret, bool follow_tail) {
     return err;
 }
 
-extern "C" bool tiny_display_stream_active(void) { return s_stream_on; }
+extern "C" bool tiny_display_stream_active(void) {
+    RenderGuard guard;
+    return s_stream_on;
+}
+
+static bool stream_rerender_if_live(esp_err_t *err) {
+    if (!s_stream_on || s_stream_rendering) return false;
+    *err = stream_render(/*caret=*/true, /*follow_tail=*/false);
+    return true;
+}
 
 extern "C" esp_err_t tiny_display_stream_begin(const char *title,
                                                const char *card_id,
                                                const char *question) {
+    RenderGuard guard;
     // Re-begin on the SAME empty home stream (voice: recording began it
     // for the listening frame, the SSE path begins it again): keep the frame,
     // skip the second full wipe — nothing on the glass would change.
@@ -3057,6 +3142,7 @@ extern "C" esp_err_t tiny_display_stream_begin(const char *title,
 }
 
 extern "C" esp_err_t tiny_display_stream_append(const char *text) {
+    RenderGuard guard;
     if (!s_stream_on || !s_stream_buf) return ESP_ERR_INVALID_STATE;
     if (!text || !*text) return ESP_OK;
     const size_t n = strlen(text);
@@ -3070,6 +3156,7 @@ extern "C" esp_err_t tiny_display_stream_append(const char *text) {
 }
 
 extern "C" esp_err_t tiny_display_stream_commit(void) {
+    RenderGuard guard;
     if (!s_stream_on) return ESP_ERR_INVALID_STATE;
     // 400ms floor: the panel's partial path is ~300-500ms and commits that
     // arrive faster COALESCE (the next one carries the accumulated text) —
@@ -3081,6 +3168,7 @@ extern "C" esp_err_t tiny_display_stream_commit(void) {
 }
 
 extern "C" esp_err_t tiny_display_stream_end(const char *final_card_json) {
+    RenderGuard guard;
     if (!s_stream_on) return ESP_ERR_INVALID_STATE;
     esp_err_t err;
     // Stream-on-home: a backend ```card``` finale is deliberately NOT painted
@@ -3113,6 +3201,7 @@ extern "C" esp_err_t tiny_display_stream_end(const char *final_card_json) {
 // "(( thinking ))"). Stores always; repaints (partial) only when a wordless
 // home stream is on the glass — the first real token replaces the note.
 extern "C" esp_err_t tiny_display_stream_note(const char *note) {
+    RenderGuard guard;
     strlcpy(s_stream_note, note ? note : "", sizeof s_stream_note);
     if (s_stream_on && s_stream_len == 0 && strcmp(s_stream_cid, "home") == 0)
         return stream_render(/*caret=*/true, /*follow_tail=*/false);
