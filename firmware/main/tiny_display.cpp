@@ -756,6 +756,23 @@ extern "C" int tiny_display_rotation(void) {
     return static_cast<int>(s_rot) * 90;
 }
 
+extern "C" esp_err_t tiny_display_preset_rotation(int degrees) {
+    RenderGuard guard;
+    const int d = ((degrees % 360) + 360) % 360;
+    if (d % 90) return ESP_ERR_INVALID_ARG;
+    s_rot = static_cast<CanvasRotation>(d / 90);
+    // The splash draws straight into the canvas frame: turn it too, so the
+    // first light already has the saved edge up. render_card re-applies s_rot
+    // (and with it the touch frame) on every card, so nothing else moves.
+    if (Canvas *c = sticky_display_canvas()) {
+        display_lock();
+        c->set_rotation(s_rot);
+        display_unlock();
+    }
+    ESP_LOGI(TAG, "rotation preset %d deg (nothing on glass yet)", d);
+    return ESP_OK;
+}
+
 // §12 glance: redraw the current card so the title-bar cluster (time,
 // battery, wifi, unread, lock) speaks NOW — via the partial path, because the
 // acceptance is explicit: from awake, the strip updates with no full-panel

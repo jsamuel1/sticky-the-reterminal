@@ -75,6 +75,11 @@ int tiny_display_brightness(void);
 // been turned must not keep showing the old picture until the next envelope.
 int tiny_display_rotation(void);
 esp_err_t tiny_display_set_rotation(int degrees);
+// Boot only, before the first card: seed the layout rotation (a saved manual
+// choice) without drawing anything. The splash and the first card then come
+// up in that frame. Every later change goes through set_rotation(), whose
+// commit/rollback keeps the glass, tap regions and gesture frame aligned.
+esp_err_t tiny_display_preset_rotation(int degrees);
 esp_err_t tiny_display_rerender(void);   // redraw the last card (ESP_ERR_INVALID_STATE if none)
 esp_err_t tiny_display_glance(void);     // §12: same redraw, partial refresh (no full flash)
 // §12 wake paint: redraw the (deterministic) goodbye card as the diff

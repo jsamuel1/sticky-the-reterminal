@@ -1,5 +1,5 @@
 #pragma once
-#define TINY_FW_VERSION "0.31.2"
+#define TINY_FW_VERSION "0.32.0"
 
 // The verb grammar is a 3-consumer contract (dashboard, iOS StickyPanel,
 // relay agents) held together by string prefixes. Bump this on ANY change to
@@ -205,4 +205,15 @@
 //        tiny_heapmark (start display touch audio inputs shell sdcard ble
 //        wifi node console; a stage the boot did not reach is absent).
 //        A stage's cost is the drop from the one before it.
-#define TINY_GRAMMAR_VERSION 24  // v24: status internal_largest + internal_boot
+// v25 = manual display rotation on boards with no accelerometer (fnk0104s):
+//      + settings: a "rotation: N deg" row (id rot:open) opens a picker card
+//        (card_id "rotation", type menu) with one row per orientation
+//        (rot:0 | rot:90 | rot:180 | rot:270) plus Back (rot:back) / Home.
+//        A tap turns the glass through the same commit/rollback as
+//        `rotate`, then saves what committed (NVS tiny/cfg "rotq", quarter
+//        turns). Boot restores it before the splash; unset/invalid = 0 deg.
+//      + boards with an IMU (reterminal, amoled18) are unchanged: the
+//        auto/lock row stays, rot:* taps are refused (NOT_SUPPORTED).
+//      + takes the number the spoken-replies design had proposed; that
+//        design takes the next free one when it lands.
+#define TINY_GRAMMAR_VERSION 25  // v25: manual rotation picker (no-IMU boards)

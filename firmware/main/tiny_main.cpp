@@ -34,6 +34,7 @@
 #include "tiny/tiny_touch.h"
 #include "tiny/tiny_config.h"
 #include "tiny/tiny_brightness.h"
+#include "tiny/tiny_rotation.h"
 #include "tiny/tiny_ble.h"
 #include "tiny/tiny_beacon.h"
 #include "tiny/tiny_wifi.h"
@@ -95,6 +96,19 @@ extern "C" void app_main(void)
     // Rotation lock survives reboot too — restore before the
     // orient watcher starts, or gravity wins one turn before the lock lands.
     tiny_orient_set_auto(tiny_config_rotauto_get());
+    // v25: a board with no accelerometer has nothing to follow, so the owner's
+    // settings choice decides which edge is up. Seeded BEFORE the splash, so
+    // the first light and the first card already use it; unset or invalid =
+    // the panel's native frame (tiny_rotation_boot_deg).
+    if (tiny_rotation_manual_offered(tiny_board_caps()->imu)) {
+        uint8_t q = 0;
+        const bool have = tiny_config_rotation_get(&q);
+        const int deg = tiny_rotation_boot_deg(have, q);
+        const esp_err_t rerr = tiny_display_preset_rotation(deg);
+        ESP_LOGI(TAG, "rotation %d deg (%s): %s", deg,
+                 !have ? "default" : (deg == q * 90 ? "saved" : "saved value invalid"),
+                 esp_err_to_name(rerr));
+    }
     // v22: panel brightness survives reboot. lcd_canvas lights the panel only
     // on the first committed frame (the splash below), so the saved level is
     // the FIRST light, never a flash at the default. Floor-clamped: a saved 0

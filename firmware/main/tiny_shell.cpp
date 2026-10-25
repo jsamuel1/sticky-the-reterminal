@@ -6,6 +6,9 @@
 #include "sticky_buzzer.h"
 #include "tiny/tiny_config.h"
 #include "tiny/tiny_brightness.h"
+#include "tiny/tiny_rotation.h"
+#include "canvas.h"
+#include "sticky_display.h"
 #include "tiny/tiny_orient.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_node.h"
@@ -152,7 +155,8 @@ static esp_err_t render_settings(void) {
         // Display section: rotation lock. Same menu block — the
         // two behavior toggles live together above the read-only vitals.
         // Only on a board with an accelerometer: without one "follow gravity"
-        // is a promise nothing can keep (`rotate 0|90|180|270` still works).
+        // is a promise nothing can keep; those boards get the manual picker
+        // row instead (v25, below).
         if (tiny_board_caps()->imu) {
         cJSON *rt = cJSON_CreateObject();
         char rlab[36], rnote[36];
@@ -169,6 +173,21 @@ static esp_err_t render_settings(void) {
         cJSON_AddStringToObject(rt, "note", rnote);
         cJSON_AddStringToObject(rt, "id", "rotlock");
         cJSON_AddItemToArray(items, rt);
+        } else if (tiny_rotation_manual_offered(tiny_board_caps()->imu)) {
+            // v25: no accelerometer = nothing to follow, so the owner picks
+            // the edge that is up. The row opens the picker (rot:open); the
+            // label is the live angle, the note what it looks like.
+            Canvas *cv = sticky_display_canvas();
+            const bool tall = cv && cv->physical_height() > cv->physical_width();
+            const int deg = tiny_display_rotation();
+            cJSON *rt = cJSON_CreateObject();
+            char rlab[36], rnote[40];
+            tiny_rotation_row_label(rlab, sizeof rlab, deg);
+            tiny_rotation_row_note(rnote, sizeof rnote, deg, tall);
+            cJSON_AddStringToObject(rt, "label", rlab);
+            cJSON_AddStringToObject(rt, "note", rnote);
+            cJSON_AddStringToObject(rt, "id", "rot:open");
+            cJSON_AddItemToArray(items, rt);
         }
         // Autosleep idle budget. The note names the NEXT value —
         // a cycling control that hides its next stop is a roulette wheel.
@@ -710,6 +729,58 @@ esp_err_t tiny_shell_key(const char *id) {
 
 esp_err_t tiny_shell_rescan_wifi(void) { return render_wifi_ex(true); }
 
+// ---- manual rotation picker (grammar v25, boards with no IMU) --------------
+// Drill card under settings, like the universe: not a nav-stack page, so its
+// [Back] (rot:back) repaints settings and the stack stays settings-on-home.
+// The card spec is built by the pure tiny_rotation_picker_json (host-tested).
+static esp_err_t render_rotation(void) {
+    if (!tiny_rotation_manual_offered(tiny_board_caps()->imu))
+        return ESP_ERR_NOT_SUPPORTED;
+    Canvas *cv = sticky_display_canvas();
+    const bool tall = cv && cv->physical_height() > cv->physical_width();
+    EXT_RAM_BSS_ATTR static char card[1024];  // act task only; PSRAM .bss
+    if (tiny_rotation_picker_json(card, sizeof card, tiny_display_rotation(),
+                                  tall) < 0)
+        return ESP_ERR_NO_MEM;
+    return tiny_display_render_card(card);
+}
+
+static int rotation_apply(int deg) { return tiny_display_set_rotation(deg); }
+static int rotation_save(uint8_t q) { return tiny_config_rotation_set(q); }
+
+// "rot:open" | "rot:back" | "rot:0|90|180|270". A selection turns the glass
+// through tiny_display_set_rotation (layout + tap regions + gesture frame in
+// one commit, rolled back on a failed refresh), then saves what committed.
+static esp_err_t rotation_route(const char *id) {
+    int deg = -1;
+    switch (tiny_rotation_parse_id(id, &deg)) {
+        case TINY_ROTATION_ID_OPEN: return render_rotation();
+        case TINY_ROTATION_ID_BACK: return render_settings();
+        case TINY_ROTATION_ID_SET: {
+            bool persisted = false;
+            const esp_err_t r = tiny_rotation_select(
+                deg, tiny_board_caps()->imu, rotation_apply, rotation_save,
+                &persisted);
+            if (r != ESP_OK) {
+                ESP_LOGW(TAG, "rotation %d deg not applied (%s) - glass and "
+                              "saved choice unchanged", deg, esp_err_to_name(r));
+                return r;
+            }
+            if (!persisted)
+                ESP_LOGW(TAG, "rotation %d deg persisted=NO - holds until "
+                              "reboot only", deg);
+            // The glass already turned (set_rotation replayed this picker in
+            // the new frame); repaint so ACTIVE names the new angle.
+            return render_rotation();
+        }
+        case TINY_ROTATION_ID_BAD:
+            ESP_LOGW(TAG, "menu id \"%s\" is not a rotation - refusing", id);
+            return ESP_ERR_INVALID_ARG;
+        case TINY_ROTATION_ID_NONE: break;
+    }
+    return ESP_ERR_INVALID_ARG;
+}
+
 // ---- THE UNIVERSE (grammar v11) --------------------------------------------
 // Who answers the asks. A composite card: caption + menu of the roster with
 // the active agent marked. Row ids carry roster INDICES (u:i:<n>) because a
@@ -834,6 +905,7 @@ esp_err_t tiny_shell_silent_toggle(void) {
 
 esp_err_t tiny_shell_menu(const char *id) {
     if (!id) return ESP_ERR_INVALID_ARG;
+    if (!strncmp(id, "rot:", 4)) return rotation_route(id);
     if (id[0] == 'w' && id[1] == ':') {
         // A w: id whose tail is not a number is NOT a network row.
         // atoi() answers 0 for "home", which used to mean "join the first AP

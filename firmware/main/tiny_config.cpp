@@ -284,6 +284,32 @@ esp_err_t tiny_config_rotauto_set(bool on) {
     return err;
 }
 
+// ---- manual rotation, quarter turns (grammar v25, boards with no IMU) ------
+// Raw u8 out, like brightness: the CONSUMER (tiny_rotation_boot_deg) decides
+// what an absent or out-of-range value boots as, so a value a future firmware
+// stops offering degrades to the default instead of being trusted.
+bool tiny_config_rotation_get(uint8_t *quarters) {
+    if (nvs_ready() != ESP_OK) return false;
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    const bool have = nvs_get_u8(h, "rotq", &v) == ESP_OK;
+    nvs_close(h);
+    if (have && quarters) *quarters = v;
+    return have;
+}
+
+esp_err_t tiny_config_rotation_set(uint8_t quarters) {
+    if (quarters > 3) return ESP_ERR_INVALID_ARG;
+    ESP_RETURN_ON_ERROR(nvs_ready(), TAG, "nvs");
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NS, NVS_READWRITE, &h), TAG, "open rw");
+    esp_err_t err = nvs_set_u8(h, "rotq", quarters);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
 // ---- autosleep idle budget, minutes (display settings) ---------------------
 // Absent = 30 (the pocket-use default). Stored raw;
 // the CONSUMER validates against the offered set — NVS holding a value a

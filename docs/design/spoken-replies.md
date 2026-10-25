@@ -899,7 +899,8 @@ PCF85063A clock (`usb_power`, `vbus_mv`, `battery.source` `axp2101`) and the
 `sleep refused: busy` / `refused: going to sleep` answers of the work/sleep
 admission gate (`tiny/tiny_admit.h`); v24 adds the internal-RAM receipts
 `status` `internal_largest` and `internal_boot` (`tiny_heapmark`). Spoken
-replies are the next grammar change, v25. If another grammar change lands
+replies are the next grammar change after v25 (manual rotation, which
+took the number this design first proposed). If another grammar change lands
 first, this proposal takes the next free
 number; the number is assigned when the complete public firmware slice is cut,
 not by this document.
