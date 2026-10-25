@@ -119,6 +119,14 @@ int render_test_http_read(esp_http_client_handle_t handle, char *out,
 
 esp_err_t render_test_http_cleanup(esp_http_client_handle_t) { return ESP_OK; }
 
+// Allocation failure injection (render_shim/esp_heap_caps.h): every request
+// of exactly g_fail_alloc_size bytes fails while armed.
+static std::atomic<size_t> g_fail_alloc_size{0};
+void *render_test_malloc(size_t n) {
+    if (n && n == g_fail_alloc_size.load()) return nullptr;
+    return malloc(n);
+}
+
 Canvas *sticky_display_canvas() { return g_canvas; }
 esp_err_t sticky_display_init() { return 0; }
 esp_err_t sticky_display_refresh() { return 0; }
@@ -754,6 +762,193 @@ int main(int argc, char **argv) {
                 g_release_http = false;
                 g_http_body.clear();
             }
+
+            // ---- image identity ---------------------------------------------
+            // A painted image publishes the card_id it was SENT with (the
+            // stream player sends "stream"); "image" only when none is named.
+            const size_t gray4 = static_cast<size_t>(sz.w) * sz.h / 4;
+            const size_t mono = static_cast<size_t>(sz.w) * sz.h / 8;
+            auto serve_http = [&](size_t bytes, bool release) {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_http_body.assign(bytes, 0x55);
+                g_hold_http = true;
+                g_http_blocked = false;
+                g_release_http = release;
+            };
+            auto stop_http = [&] {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_hold_http = false;
+                g_release_http = false;
+                g_http_body.clear();
+            };
+            auto wait_http_blocked = [&] {
+                std::unique_lock<std::mutex> lock(g_http_mutex);
+                return g_http_ready.wait_for(lock, std::chrono::seconds(2),
+                                             [] { return g_http_blocked; });
+            };
+            auto release_http = [&] {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_release_http = true;
+                g_http_ready.notify_all();
+            };
+            serve_http(gray4, true);
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"image","card_id":"stream","url":"https://h/id.raw"})J") == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "stream"),
+                  "image identity: requested card_id is published on success");
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"image","url":"https://h/id2.raw"})J") == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "image"),
+                  "image identity: unnamed image falls back to \"image\"");
+            stop_http();
+
+            // ---- replacement during a stream is a glass transaction ---------
+            // A replacing card that never lands (malformed, failed refresh,
+            // failed fetch) leaves the stream frame on glass, so it must
+            // leave the stream alive with its words; one that lands ends it.
+            CHECK(tiny_display_set_rotation(0) == ESP_OK,
+                  "stream replace: start at rotation 0");
+            CHECK(tiny_display_stream_begin("tiny", "ansR", nullptr) == ESP_OK,
+                  "stream replace: begin");
+            tiny_display_stream_append("kept words");
+            CHECK(tiny_display_render_card("{\"type\":\"text\",") == ESP_ERR_INVALID_ARG,
+                  "stream replace: malformed outsider refused");
+            CHECK(tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansR"),
+                  "stream replace: malformed outsider leaves stream live");
+            g_fail_next_full = true;
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"rep-fail","title":"x","body":"y"})J") == ESP_FAIL,
+                  "stream replace: failed outsider refresh returned");
+            CHECK(tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansR"),
+                  "stream replace: failed outsider commit leaves stream live");
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"image","card_id":"rep-img","url":"https://h/none.raw"})J") != ESP_OK,
+                  "stream replace: failed outsider fetch returned");
+            CHECK(tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansR"),
+                  "stream replace: failed outsider fetch leaves stream live");
+            // The live stream still owns rotation: its words, not a frame.
+            CHECK(tiny_display_set_rotation(90) == ESP_OK &&
+                      tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansR"),
+                  "stream replace: surviving stream redraws on rotation");
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"rep-ok","title":"x","body":"y"})J") == ESP_OK,
+                  "stream replace: landing outsider commits");
+            CHECK(!tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "rep-ok"),
+                  "stream replace: landed outsider ends stream");
+
+            // Owner ends the answer while an outsider is still fetching. The
+            // end defers behind it; when the outsider then fails at the panel
+            // the stream's closing frame is painted and the stream is over.
+            CHECK(tiny_display_stream_begin("tiny", "ansD", nullptr) == ESP_OK,
+                  "stream defer: begin");
+            tiny_display_stream_append("answer");
+            serve_http(mono, false);
+            std::atomic<int> dimg{ESP_OK};
+            std::thread dthr([&] {
+                dimg = tiny_display_render_card(
+                    R"J({"type":"image","card_id":"d-img","url":"https://h/d.raw"})J");
+            });
+            CHECK(wait_http_blocked(), "stream defer: outsider fetch held");
+            CHECK(tiny_display_stream_end(nullptr) == ESP_OK,
+                  "stream defer: owner end returns while outsider in flight");
+            CHECK(tiny_display_stream_active(),
+                  "stream defer: stream still owns glass during outsider fetch");
+            g_fail_next_full = true;
+            release_http();
+            dthr.join();
+            stop_http();
+            CHECK(dimg == ESP_FAIL, "stream defer: outsider panel failure returned");
+            CHECK(!tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansD"),
+                  "stream defer: closing frame painted after outsider fails");
+
+            // ---- cache allocation failure -----------------------------------
+            // The new card lands but no replay copy could be made: replay is
+            // CLEARED, so rotation cannot resurrect the previous card.
+            const char *oom_a =
+                R"J({"type":"text","card_id":"oom-a","title":"a","body":"first"})J";
+            const char *oom_b =
+                R"J({"type":"text","card_id":"oom-b","title":"b","body":"second card, cache-less"})J";
+            CHECK(tiny_display_render_card(oom_a) == ESP_OK,
+                  "cache oom: previous card cached");
+            g_fail_alloc_size = strlen(oom_b) + 1;
+            CHECK(tiny_display_render_card(oom_b) == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "oom-b"),
+                  "cache oom: new card commits without a replay copy");
+            g_fail_alloc_size = 0;
+            CHECK(tiny_display_rerender() == ESP_ERR_INVALID_STATE &&
+                      !strcmp(tiny_display_current_card_id(), "oom-b"),
+                  "cache oom: rerender refuses instead of resurrecting oom-a");
+            CHECK(tiny_display_set_rotation(0) == ESP_OK &&
+                      strcmp(tiny_display_current_card_id(), "oom-a") != 0,
+                  "cache oom: rotation never replays the previous card");
+            CHECK(!tiny_display_can_scroll(),
+                  "cache oom: no replay means no scroll over stale spec");
+
+            // ---- structured stream finale over HTTPS ------------------------
+            // Successful image finale: requested identity, stream retired.
+            CHECK(tiny_display_stream_begin("tiny", "ansF", nullptr) == ESP_OK,
+                  "finale: begin");
+            serve_http(gray4, true);
+            CHECK(tiny_display_stream_end(
+                      R"J({"type":"image","card_id":"fin-img","url":"https://h/f.raw"})J") == ESP_OK,
+                  "finale: image finale paints");
+            CHECK(!tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "fin-img"),
+                  "finale: image finale owns glass with its card_id");
+            stop_http();
+
+            // Held finale fetch: stream_end holds NO render ownership across
+            // HTTPS, so a newer card commits meanwhile; the stale finale is
+            // then refused and cannot overwrite it.
+            CHECK(tiny_display_stream_begin("tiny", "ansH", nullptr) == ESP_OK,
+                  "finale race: begin");
+            tiny_display_stream_append("words before the card");
+            serve_http(gray4, false);
+            std::atomic<int> fin{ESP_OK};
+            std::thread fthr([&] {
+                fin = tiny_display_stream_end(
+                    R"J({"type":"image","card_id":"fin-stale","url":"https://h/s.raw"})J");
+            });
+            CHECK(wait_http_blocked(), "finale race: final image fetch held");
+            std::atomic<int> newer_fin{ESP_FAIL};
+            std::atomic<bool> newer_done{false};
+            std::thread nthr([&] {
+                newer_fin = tiny_display_render_card(
+                    R"J({"type":"text","card_id":"after-fin","title":"n","body":"newest"})J");
+                newer_done = true;
+            });
+            for (int i = 0; i < 200 && !newer_done.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            CHECK(newer_done.load() && newer_fin == ESP_OK,
+                  "finale race: newer card commits during held finale fetch");
+            CHECK(!strcmp(tiny_display_current_card_id(), "after-fin") &&
+                      !tiny_display_stream_active(),
+                  "finale race: newer card owns glass, stream retired");
+            release_http();
+            fthr.join();
+            nthr.join();
+            stop_http();
+            CHECK(fin == ESP_ERR_INVALID_STATE,
+                  "finale race: stale finale refused");
+            CHECK(!strcmp(tiny_display_current_card_id(), "after-fin") &&
+                      tiny_display_rerender() == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "after-fin"),
+                  "finale race: stale finale overwrote neither glass nor replay");
+
+            // Malformed finale still ends the answer (as its text frame).
+            CHECK(tiny_display_stream_begin("tiny", "ansX", nullptr) == ESP_OK,
+                  "finale malformed: begin");
+            CHECK(tiny_display_stream_end("{\"type\":") == ESP_ERR_INVALID_ARG,
+                  "finale malformed: refusal returned");
+            CHECK(!tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansX"),
+                  "finale malformed: closing text frame painted, stream over");
         }
     }
 

@@ -964,6 +964,10 @@ static bool    s_stream_on = false;
 static bool    s_stream_partial = false;   // commit -> partial refresh gate
 static bool    s_stream_caret = false;     // draw the typer caret this render
 static bool    s_stream_rendering = false; // our own render, not an outsider
+// The owner ended the answer while a replacing card (or its own structured
+// finale) was in flight: if that card does not land, the closing text frame
+// is painted instead (StreamDisplacement dtor / stream_rerender_if_live).
+static bool    s_stream_end_pending = false;
 static char   *s_stream_buf = nullptr;
 static size_t  s_stream_len = 0;
 static size_t  s_stream_cap = 0;
@@ -985,9 +989,55 @@ static void stream_reset(void) {
     s_stream_note[0] = 0;
     s_stream_caret = false;
     s_stream_overflow = false;
+    s_stream_end_pending = false;
     if (s_stream_buf) { free(s_stream_buf); s_stream_buf = nullptr; }
     s_stream_len = s_stream_cap = 0;
 }
+
+// Outsider replacement of a live stream is a TRANSACTION with the glass: the
+// stream stays live (buffer, caret, active flag) until the replacing card's
+// panel commit succeeds. A malformed card, a failed fetch, a failed refresh or
+// an overtaken request leaves the stream frame on the glass, so it must leave
+// the stream alive too. While a displacement is the newest render request the
+// owner's mid-stream commits coalesce in the buffer instead of overtaking it
+// (the outsider card still outranks the typer); anything newer — a stream
+// begin, a rotation, another card — supersedes the pending displacement.
+static uint32_t s_stream_gen = 0;        // bumped by every stream_begin
+static uint32_t s_stream_displacer = 0;  // render epoch replacing the stream
+
+static bool stream_displacement_pending(void) {
+    return s_stream_displacer != 0 && s_stream_displacer == s_render_epoch;
+}
+
+struct StreamDisplacement {
+    bool active = false;
+    uint32_t gen = 0;
+    uint32_t epoch = 0;
+
+    void begin(uint32_t render_epoch) {
+        active = true;
+        gen = s_stream_gen;
+        epoch = render_epoch;
+        s_stream_displacer = render_epoch;
+    }
+    // Called only after the replacing card is physically on the glass.
+    void commit() {
+        if (!active) return;
+        active = false;
+        if (s_stream_displacer == epoch) s_stream_displacer = 0;
+        if (s_stream_on && s_stream_gen == gen) {
+            ESP_LOGW(TAG, "stream replaced by card now on glass");
+            stream_reset();
+        }
+    }
+    // Failure/overtake path: defined with the stream API (stream_finish).
+    ~StreamDisplacement();
+};
+static esp_err_t stream_finish(void);
+
+// Replay cache for a commit that is panel-native bytes (gallery page, raw
+// blit) rather than a card spec. Defined with the card cache.
+static void card_cache_mark_native(const char *type);
 
 // Bytes of `s` that end on a COMPLETE UTF-8 sequence. An SSE delta may split
 // a multibyte char across two reads; rendering the half would fold it to '?'
@@ -2039,7 +2089,8 @@ static void photos_sd_save(const char *url, const uint8_t *buf, size_t len) {
     ESP_LOGI(TAG, "photos sd: archived %05d.raw (%u B)", seq, (unsigned)len);
 }
 
-static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch) {
+static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch,
+                                   const char *card_id) {
     Canvas *c = sticky_display_canvas();
     const cJSON *ju = cJSON_GetObjectItem(root, "url");
     if (!c || !cJSON_IsString(ju)) return ESP_ERR_INVALID_ARG;
@@ -2065,7 +2116,7 @@ static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch) {
     s_staged_count = 0;                  // an image has no buttons
     if (err == ESP_OK) {
         strlcpy(s_card_type, "image", sizeof s_card_type);
-        publish_regions("image");
+        publish_regions(card_id);
     }
     display_unlock();
     if (err == ESP_OK) photos_sd_save(ju->valuestring, buf, len);
@@ -2367,7 +2418,16 @@ static esp_err_t gallery_nav_locked(int dir, uint32_t render_epoch) {
 extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
     RenderGuard guard;
     const uint32_t render_epoch = ++s_render_epoch;
-    return gallery_nav_locked(dir, render_epoch);
+    // A page flip is a commit like any card: it retires a live stream and
+    // the replay cache only once the page is on glass.
+    StreamDisplacement displace;
+    if (s_stream_on && !s_stream_rendering) displace.begin(render_epoch);
+    const esp_err_t err = gallery_nav_locked(dir, render_epoch);
+    if (err == ESP_OK) {
+        card_cache_mark_native("gallery");
+        displace.commit();
+    }
+    return err;
 }
 
 static esp_err_t render_gallery_card(cJSON *root, uint32_t render_epoch) {
@@ -2410,6 +2470,32 @@ static esp_err_t render_gallery_card(cJSON *root, uint32_t render_epoch) {
     return err;
 }
 
+// Replay source for rotation/glance/scroll. Set only once the card it
+// describes is physically on the glass; a NULL json (allocation failure)
+// CLEARS replay rather than keeping a cache that now describes an older card,
+// so the next rerender cannot resurrect that card over the one on glass.
+static void card_cache_set(char *owned_json, bool panel_native) {
+    char *old = s_card_cache;
+    s_card_cache = owned_json;
+    s_card_cache_panel_native = owned_json ? panel_native : false;
+    free(old);
+}
+
+// A panel-native commit that did not arrive as a card spec (gallery page flip,
+// raw stream blit). The old cache no longer describes the glass, so a
+// rotation must keep these pixels instead of replaying the previous card over
+// them; scroll geometry describes nothing scrollable either.
+static void card_cache_mark_native(const char *type) {
+    char spec[48];
+    snprintf(spec, sizeof spec, "{\"type\":\"%s\"}", type);
+    const size_t n = strlen(spec) + 1;
+    char *copy = (char *)malloc(n);
+    if (copy) memcpy(copy, spec, n);
+    card_cache_set(copy, true);   // NULL -> replay cleared, never stale
+    s_scroll = 0;
+    s_content_h = 0;
+}
+
 struct PendingCardCache {
     char *copy = nullptr;
     bool replace = false;
@@ -2418,37 +2504,56 @@ struct PendingCardCache {
     ~PendingCardCache() { free(copy); }
 
     void publish() {
-        if (!replace || !copy) return;  // preserve prior cache if allocation failed
-        char *old = s_card_cache;
-        s_card_cache = copy;
+        if (!replace) return;
+        if (!copy)
+            ESP_LOGW(TAG, "card on glass has no replay copy - replay cleared");
+        card_cache_set(copy, panel_native);
         copy = nullptr;
-        s_card_cache_panel_native = panel_native;
-        free(old);
     }
 };
 
+static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch);
+
 extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
+    return render_card_at(card_json, 0);
+}
+
+// claimed_epoch: 0 = a fresh request (claims the next epoch under the lock).
+// Non-zero = an epoch the caller claimed under render ownership it then
+// released (stream finale): if anything newer ran in the gap, this request
+// is already stale and must not paint.
+static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     if (!card_json) return ESP_ERR_INVALID_ARG;
     Canvas *c = sticky_display_canvas();
     if (!c) return ESP_ERR_INVALID_STATE;
     RenderGuard guard;
-
-    // A relay envelope (or any other card) outranks the typer: an active
-    // stream ends silently rather than fighting the new card for the glass.
-    if (s_stream_on && !s_stream_rendering) {
-        ESP_LOGW(TAG, "render during active stream — stream ended by new card");
-        stream_reset();
+    if (claimed_epoch && claimed_epoch != s_render_epoch) {
+        ESP_LOGW(TAG, "claimed render overtaken before start - dropped");
+        return ESP_ERR_INVALID_STATE;
     }
 
     cJSON *root = cJSON_Parse(card_json);
     if (!root) {
+        // Nothing reached the glass: an active stream keeps owning it. A
+        // malformed stream finale still ends the answer, as the text frame.
         ESP_LOGE(TAG, "card json parse failed near: %.32s",
                  cJSON_GetErrorPtr() ? cJSON_GetErrorPtr() : "?");
+        if (claimed_epoch && s_stream_on && s_stream_end_pending)
+            stream_finish();
         return ESP_ERR_INVALID_ARG;
     }
-    const uint32_t render_epoch = s_rerendering
-                                      ? s_render_epoch
-                                      : ++s_render_epoch;
+    const uint32_t render_epoch = claimed_epoch ? claimed_epoch
+                                  : s_rerendering ? s_render_epoch
+                                                  : ++s_render_epoch;
+
+    // A relay envelope (or any other card) outranks the typer: an active
+    // stream ends rather than fighting the new card for the glass — but only
+    // once this card's panel commit succeeds (StreamDisplacement::commit).
+    StreamDisplacement displace;
+    if (s_stream_on && !s_stream_rendering && !s_rerendering) {
+        ESP_LOGW(TAG, "render during active stream - stream ends if it lands");
+        displace.begin(render_epoch);
+    }
 
     // Stage the cache replacement until the panel commit succeeds. A failed or
     // overtaken image fetch must not replace the replay source for glass that
@@ -2456,16 +2561,16 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     PendingCardCache pending;
     if (!s_rerendering) {
         pending.replace = true;
+        const cJSON *cache_type = cJSON_GetObjectItem(root, "type");
+        pending.panel_native =
+            cJSON_IsString(cache_type) &&
+            (strcmp(cache_type->valuestring, "image") == 0 ||
+             strcmp(cache_type->valuestring, "gallery") == 0);
         const size_t n = strlen(card_json) + 1;
         pending.copy = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
         if (!pending.copy) pending.copy = (char *)malloc(n);
         if (pending.copy) {
             memcpy(pending.copy, card_json, n);
-            const cJSON *cache_type = cJSON_GetObjectItem(root, "type");
-            pending.panel_native =
-                cJSON_IsString(cache_type) &&
-                (strcmp(cache_type->valuestring, "image") == 0 ||
-                 strcmp(cache_type->valuestring, "gallery") == 0);
         } else {
             ESP_LOGW(TAG, "could not cache %u B card - rotation will not redraw"
                           " this one", (unsigned)n);
@@ -2481,19 +2586,26 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
         if (cJSON_IsString(jt) && strcmp(jt->valuestring, "universe") == 0) {
             // v11: the universe page owns its own layout (roster lives in
             // tiny_agent, not in the spec) — merge any pushed slugs, then
-            // the shell renders a normal composite through this function.
+            // the shell renders a normal composite through this function
+            // (which stages its own stream displacement and cache).
             cJSON_Delete(root);
             return tiny_shell_universe_push(card_json);
         }
         if (cJSON_IsString(jt) && strcmp(jt->valuestring, "gallery") == 0) {
             esp_err_t gerr = render_gallery_card(root, render_epoch);
-            if (gerr == ESP_OK) pending.publish();
+            if (gerr == ESP_OK) { pending.publish(); displace.commit(); }
             cJSON_Delete(root);
             return gerr;
         }
         if (cJSON_IsString(jt) && strcmp(jt->valuestring, "image") == 0) {
-            esp_err_t ierr = render_image_card(root, render_epoch);
-            if (ierr == ESP_OK) pending.publish();
+            // Glass identity is the REQUESTED card_id (tiny_stream sends
+            // "stream"); "image" only when the sender named none.
+            const cJSON *jc = cJSON_GetObjectItem(root, "card_id");
+            const char *image_id =
+                cJSON_IsString(jc) && jc->valuestring[0] ? jc->valuestring
+                                                         : "image";
+            esp_err_t ierr = render_image_card(root, render_epoch, image_id);
+            if (ierr == ESP_OK) { pending.publish(); displace.commit(); }
             cJSON_Delete(root);
             return ierr;
         }
@@ -2684,6 +2796,7 @@ extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     // that was not on the glass yet.
     if (err == ESP_OK) {
         pending.publish();
+        displace.commit();
         strlcpy(s_card_type, type_s, sizeof s_card_type);
         s_commit_alert = is_alert;
         publish_regions(cid_s);
@@ -2750,6 +2863,7 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     if (!c || !buf) return ESP_ERR_INVALID_ARG;
     const size_t expected = (size_t)s_pw * s_ph / 8;
     if (len < expected) return ESP_ERR_INVALID_SIZE;
+    RenderGuard guard;   // replay state below changes with the glass
     display_lock();
     // Server bytes are canvas-space at the panel's native landscape origin —
     // same law as the image card. Without this, a portrait canvas (IMU
@@ -2771,6 +2885,9 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     s_staged_count = 0;  // a raw blit has no known buttons
     if (err == ESP_OK) publish_regions("blit");
     display_unlock();
+    // Raw frame on glass: a rotation keeps it rather than replaying the card
+    // it covered.
+    if (err == ESP_OK) card_cache_mark_native("blit");
     return err;
 }
 
@@ -3001,17 +3118,17 @@ extern "C" esp_err_t tiny_display_scroll_gesture(int px0, int py0,
 // fold, wrap, scroll, rotation and the refresh gate are all inherited.
 
 // Build the stream card spec (cJSON so the buffered text is escaped — an
-// answer containing a quote must not break its own card) and render it.
-// `caret` also selects the refresh path: caret on = partial, off = full.
-static esp_err_t stream_render(bool caret, bool follow_tail) {
+// answer containing a quote must not break its own card). Caller frees.
+static char *stream_card_json(bool caret, bool *home) {
     cJSON *card = cJSON_CreateObject();
-    if (!card) return ESP_ERR_NO_MEM;
+    if (!card) return nullptr;
     // Stream-on-home: when the stream targets the home
     // card, the frame IS the agent-home surface — chrome intact, the
     // conversation in the canvas, the renderer's own caret at the text tail
     // (the generic caret below is suppressed: its y math is for scrollable
     // bodies, and home is fixed geometry).
-    if (strcmp(s_stream_cid, "home") == 0) {
+    *home = strcmp(s_stream_cid, "home") == 0;
+    if (*home) {
         cJSON_AddStringToObject(card, "type", "agent_home");
         cJSON_AddStringToObject(card, "card_id", "home");
         if (s_stream_q[0]) cJSON_AddStringToObject(card, "q", s_stream_q);
@@ -3026,15 +3143,7 @@ static esp_err_t stream_render(bool caret, bool follow_tail) {
             cJSON_AddStringToObject(card, "note", "answer exceeded 8KB - tail dropped");
         char *hcs = cJSON_PrintUnformatted(card);
         cJSON_Delete(card);
-        if (!hcs) return ESP_ERR_NO_MEM;
-        s_stream_caret = false;        // renderer draws its own tail caret
-        s_stream_partial = caret;      // mid-stream = partial; final = full
-        s_stream_rendering = true;
-        const esp_err_t herr = tiny_display_render_card(hcs);
-        s_stream_rendering = false;
-        s_stream_partial = false;
-        free(hcs);
-        return herr;
+        return hcs;
     }
     const bool chat = s_stream_q[0] != 0;
     cJSON_AddStringToObject(card, "type", chat ? "chat" : "text");
@@ -3070,8 +3179,18 @@ static esp_err_t stream_render(bool caret, bool follow_tail) {
                                 "answer exceeded 8KB - tail dropped");
     char *cs = cJSON_PrintUnformatted(card);
     cJSON_Delete(card);
+    return cs;
+}
+
+// Build + render one stream frame through the normal card funnel.
+// `caret` also selects the refresh path: caret on = partial, off = full.
+static esp_err_t stream_render(bool caret, bool follow_tail) {
+    bool home = false;
+    char *cs = stream_card_json(caret, &home);
     if (!cs) return ESP_ERR_NO_MEM;
-    s_stream_caret = caret;
+    // Home draws its own tail caret; the generic caret's y math is for
+    // scrollable bodies.
+    s_stream_caret = home ? false : caret;
     s_stream_partial = caret;      // mid-stream = partial; final = full wipe
     s_stream_rendering = true;     // our render must not end our own stream
     const esp_err_t err = tiny_display_render_card(cs);
@@ -3081,7 +3200,7 @@ static esp_err_t stream_render(bool caret, bool follow_tail) {
     free(cs);
     // Chat feel: the human reads the newest words. Only when overflowing,
     // and through the scroll path so the scrollbar stays honest.
-    if (err == ESP_OK && follow_tail && tiny_display_can_scroll()) {
+    if (!home && err == ESP_OK && follow_tail && tiny_display_can_scroll()) {
         s_stream_partial = caret;  // the follow-up render keeps the fast path
         s_stream_caret = caret;
         s_stream_rendering = true;
@@ -3093,6 +3212,24 @@ static esp_err_t stream_render(bool caret, bool follow_tail) {
     return err;
 }
 
+// The owner's closing frame (no caret, full wipe), then the stream is over.
+static esp_err_t stream_finish(void) {
+    const esp_err_t err = stream_render(/*caret=*/false, /*follow_tail=*/false);
+    stream_reset();
+    return err;
+}
+
+StreamDisplacement::~StreamDisplacement() {
+    if (!active) return;
+    if (s_stream_displacer == epoch) s_stream_displacer = 0;
+    // The replacing card did not land and nothing newer claimed the glass, so
+    // the stream frame is still what the human sees. If its owner ended the
+    // answer while this card was in flight, paint the closing frame now.
+    if (s_stream_on && s_stream_gen == gen && s_stream_end_pending &&
+        s_render_epoch == epoch)
+        stream_finish();
+}
+
 extern "C" bool tiny_display_stream_active(void) {
     RenderGuard guard;
     return s_stream_on;
@@ -3100,7 +3237,11 @@ extern "C" bool tiny_display_stream_active(void) {
 
 static bool stream_rerender_if_live(esp_err_t *err) {
     if (!s_stream_on || s_stream_rendering) return false;
-    *err = stream_render(/*caret=*/true, /*follow_tail=*/false);
+    // A deferred end (owner finished while an outsider was in flight, and
+    // this newer request superseded that outsider): close the answer here.
+    *err = s_stream_end_pending
+               ? stream_finish()
+               : stream_render(/*caret=*/true, /*follow_tail=*/false);
     return true;
 }
 
@@ -3116,6 +3257,7 @@ extern "C" esp_err_t tiny_display_stream_begin(const char *title,
         !(question && *question))
         return ESP_OK;
     if (s_stream_on) stream_reset();   // a new answer replaces a stale one
+    ++s_stream_gen;                    // a pending displacement targets the old one
     if (question && *question) {
         strlcpy(s_stream_q, question, sizeof s_stream_q);
         // strlcpy may have cut mid-UTF-8; retreat to the last complete char
@@ -3158,6 +3300,10 @@ extern "C" esp_err_t tiny_display_stream_append(const char *text) {
 extern "C" esp_err_t tiny_display_stream_commit(void) {
     RenderGuard guard;
     if (!s_stream_on) return ESP_ERR_INVALID_STATE;
+    // An outsider card is replacing this stream and still fetching: it
+    // outranks the typer, so the words coalesce in the buffer instead of
+    // overtaking it. If that card fails, the next commit repaints them.
+    if (stream_displacement_pending()) return ESP_OK;
     // 400ms floor: the panel's partial path is ~300-500ms and commits that
     // arrive faster COALESCE (the next one carries the accumulated text) —
     // never queue, a queue of stale frames is the opposite of live.
@@ -3168,9 +3314,8 @@ extern "C" esp_err_t tiny_display_stream_commit(void) {
 }
 
 extern "C" esp_err_t tiny_display_stream_end(const char *final_card_json) {
-    RenderGuard guard;
-    if (!s_stream_on) return ESP_ERR_INVALID_STATE;
-    esp_err_t err;
+    render_lock();
+    if (!s_stream_on) { render_unlock(); return ESP_ERR_INVALID_STATE; }
     // Stream-on-home: a backend ```card``` finale is deliberately NOT painted
     // over home — the rule is that the answer stays on the home
     // surface. The card is logged so nothing disappears silently.
@@ -3179,20 +3324,39 @@ extern "C" esp_err_t tiny_display_stream_end(const char *final_card_json) {
                  (int)strlen(final_card_json));
         final_card_json = NULL;
     }
+    esp_err_t err;
+    if (stream_displacement_pending() && !(final_card_json && *final_card_json)) {
+        // An outsider card is replacing this answer and still in flight. It
+        // outranks the closing wipe; if it fails, its displacement paints the
+        // closing frame (the answer still ends, honestly, on the glass).
+        s_stream_end_pending = true;
+        render_unlock();
+        ESP_LOGI(TAG, "stream end deferred behind in-flight card");
+        return ESP_OK;
+    }
     if (final_card_json && *final_card_json) {
         // The answer carried a ```card``` block: the structured card IS the
-        // final frame. stream_reset() first so render_card doesn't log the
-        // ended-by-new-card warning about our own finale.
-        stream_reset();
-        err = tiny_display_render_card(final_card_json);
-    } else {
-        // Final render: no caret, full refresh — the wipe that says "this is
-        // the whole answer and it stays". Regions publish inside render_card
-        // as for any card (none staged here; the ask engine's summary reply
-        // is the actionable surface).
-        err = stream_render(/*caret=*/false, /*follow_tail=*/false);
-        stream_reset();
+        // final frame. Claim its epoch and mark the end UNDER render
+        // ownership, then release this function's level before entering the
+        // render: an image/gallery finale fetches over HTTPS and its helper
+        // drops only the level the render itself took, so holding ours would
+        // pin render ownership through a 15 s TLS stall and no newer card
+        // could overtake it. The render stages the stream's retirement until
+        // the finale is on glass; the claimed epoch drops it if anything
+        // newer ran in the unlocked gap.
+        s_stream_end_pending = true;
+        const uint32_t claim = ++s_render_epoch;
+        render_unlock();
+        err = render_card_at(final_card_json, claim);
+        ESP_LOGI(TAG, "stream end (card) -> %s", esp_err_to_name(err));
+        return err;
     }
+    // Final render: no caret, full refresh — the wipe that says "this is
+    // the whole answer and it stays". Regions publish inside render_card
+    // as for any card (none staged here; the ask engine's summary reply
+    // is the actionable surface).
+    err = stream_finish();
+    render_unlock();
     ESP_LOGI(TAG, "stream end -> %s", esp_err_to_name(err));
     return err;
 }
@@ -3203,7 +3367,8 @@ extern "C" esp_err_t tiny_display_stream_end(const char *final_card_json) {
 extern "C" esp_err_t tiny_display_stream_note(const char *note) {
     RenderGuard guard;
     strlcpy(s_stream_note, note ? note : "", sizeof s_stream_note);
-    if (s_stream_on && s_stream_len == 0 && strcmp(s_stream_cid, "home") == 0)
+    if (s_stream_on && s_stream_len == 0 && strcmp(s_stream_cid, "home") == 0 &&
+        !stream_displacement_pending())   // an in-flight card outranks the note
         return stream_render(/*caret=*/true, /*follow_tail=*/false);
     return ESP_OK;
 }
