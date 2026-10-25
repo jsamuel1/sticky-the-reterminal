@@ -89,12 +89,34 @@ void describe_object(const cJSON *obj, char *out, size_t cap, size_t *len) {
 }  // namespace
 
 extern "C" int tiny_envelope_key_is_secret(const char *key) {
-    static const char *const kWords[] = {"token", "secret", "password", "passwd",
-                                         "key",   "auth",   "bearer",   "cookie",
-                                         "session"};
+    // Long words are unambiguous: a substring match anywhere (accesstoken,
+    // client_secret, x-cookie) is a credential.
+    static const char *const kAnywhere[] = {"token", "secret", "password", "passwd",
+                                            "bearer", "cookie", "credential",
+                                            "authorization", "apikey"};
+    // Short words collide with ordinary names (monkey, keyboard, author,
+    // sessions): they count only as a whole word of the name, split on
+    // _ - . / space and at a lower->upper camelCase step.
+    static const char *const kWord[] = {"key", "auth", "session", "sig", "pin"};
     if (!key) return 0;
-    for (const char *w : kWords)
+    for (const char *w : kAnywhere)
         if (contains_ci(key, w)) return 1;
+    char word[32];
+    size_t n = 0;
+    for (const char *p = key;; ++p) {
+        const unsigned char ch = (unsigned char)*p;
+        const bool sep = !ch || ch == '_' || ch == '-' || ch == '.' || ch == '/' || ch == ' ';
+        const bool camel = ch && n > 0 && isupper(ch) && islower((unsigned char)p[-1]);
+        if (sep || camel) {
+            word[n] = 0;
+            for (const char *w : kWord)
+                if (n && !strcmp(word, w)) return 1;
+            n = 0;
+            if (!ch) break;
+            if (sep) continue;
+        }
+        if (n + 1 < sizeof word) word[n++] = (char)tolower(ch);
+    }
     return 0;
 }
 

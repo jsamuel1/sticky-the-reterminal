@@ -2851,9 +2851,11 @@ static void poll_relay(char *resp, int cap) {
             tiny_envelope_describe(payload, why, sizeof why);
             char keys[96] = {0};
             size_t kl = 0;
-            for (const cJSON *c = m->child; c && kl + 22 < sizeof keys; c = c->next)
-                kl += snprintf(keys + kl, sizeof keys - kl, "%s%.20s", kl ? "," : "",
-                               c->string ? c->string : "?");
+            for (const cJSON *c = m->child; c && kl + 22 < sizeof keys; c = c->next) {
+                const int w = snprintf(keys + kl, sizeof keys - kl, "%s%.20s",
+                                       kl ? "," : "", c->string ? c->string : "?");
+                if (w > 0) kl += ((size_t)w < sizeof keys - kl) ? (size_t)w : sizeof keys - kl - 1;
+            }
             ESP_LOGW(TAG, "envelope %s rejected (no prompt): msg keys=[%s] %s",
                      id->valuestring, keys, why);
             reply(id->valuestring, "unparseable envelope (no prompt) - never silence");

@@ -72,6 +72,19 @@ int main() {
     expect(tiny_envelope_key_is_secret("deviceToken") && tiny_envelope_key_is_secret("PASSWORD") &&
                !tiny_envelope_key_is_secret("type") && !tiny_envelope_key_is_secret("prompt"),
            "secret-key classifier", "");
+    // Short words count only as whole words of the name.
+    const char *secret[] = {"key", "api_key", "apiKey", "x-api-key", "KEY", "privateKey",
+                            "auth", "authToken", "Authorization", "session", "session_id",
+                            "sessionId", "sig", "pin", "client_secret", "accesstoken"};
+    for (const char *k : secret) expect(tiny_envelope_key_is_secret(k), k, "want secret");
+    const char *plain[] = {"monkey", "donkey", "turkey_count", "locker", "keyboard",
+                           "author", "authored_by", "sessions", "signal", "design",
+                           "spinner", "title", "id", ""};
+    for (const char *k : plain) expect(!tiny_envelope_key_is_secret(k), k, "want plain");
+    expect(!tiny_envelope_key_is_secret(nullptr), "null key", "");
+    // ...and benign fields keep their values in the preview.
+    describe_json(R"({"payload":{"type":"t","monkey":"banana","apiKey":"SEKRIT6"}})", d, sizeof d);
+    expect(strstr(d, "banana") && !strstr(d, "SEKRIT"), "benign kept, apiKey redacted", d);
     puts("envelope host test: ALL GREEN");
     return 0;
 }

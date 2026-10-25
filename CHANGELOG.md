@@ -12,8 +12,10 @@ release, newest first.
   preview="…"`. tiny-eba6 was answering about ten of these a minute, which
   kept `status` (and with it every bench OTA) waiting behind a queue whose
   sender the reply could not name. Values under credential-looking keys are
-  redacted at every depth, and a payload that is not a JSON object shows its
-  shape only (`tiny_envelope.cpp`). No verb or reply change; grammar stays
+  redacted at every depth (long words like `token` anywhere in a name;
+  short ones like `key`, `auth`, `session` only as a whole word, so
+  `api_key` is hidden and `monkey` is not), and a payload that is not a
+  JSON object shows its shape only (`tiny_envelope.cpp`). No verb or reply change; grammar stays
   v24. `tests/host/envelope_host_test.sh` covers the forms and the
   redaction.
 - **firmware (FNK0104S)** — the status light gains an attention layer under

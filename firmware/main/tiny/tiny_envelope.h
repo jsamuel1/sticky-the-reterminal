@@ -26,8 +26,12 @@ extern "C" {
 // terminated when cap > 0) and returns out.
 char *tiny_envelope_describe(const cJSON *payload, char *out, size_t cap);
 
-// True when a key names a credential (token, secret, password, key, auth,
-// bearer, cookie, session; case-insensitive substring).
+// True when a key names a credential. Long words match anywhere in the name
+// (token, secret, password, passwd, bearer, cookie, credential,
+// authorization, apikey); short ones only as a whole word, split on
+// _ - . / space and camelCase (key, auth, session, sig, pin), so
+// "api_key" and "sessionId" are secret but "monkey" and "author" are not.
+// Case-insensitive.
 int tiny_envelope_key_is_secret(const char *key);
 
 #ifdef __cplusplus
