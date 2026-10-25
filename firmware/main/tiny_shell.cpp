@@ -789,15 +789,15 @@ static esp_err_t rotation_route(const char *id) {
 // the same roster on every render, so index→slug is stable between paint and
 // tap (single-writer: switches repaint immediately).
 static esp_err_t render_universe(void) {
-    const char *cur = tiny_agent_current();
-    char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
-    const int n = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
+    // One snapshot: the ACTIVE mark and the rows come from the same state.
+    tiny_agent_roster_t ro;
+    tiny_agent_roster_snapshot(&ro);
     // A device REPAINT (row tap, u:open): no priority field, rendered as the
     // typed universe page, so tiny_display keeps the alert only while the
     // universe page on glass committed with it. A render_ui universe PUSH
     // never comes through here: tiny_display renders it under the push's own
     // claim, with the push's priority.
-    char *cs = tiny_universe_card_json(cur, roster, n, NULL);
+    char *cs = tiny_universe_card_json(ro.active, ro.slugs, ro.n, NULL);
     if (!cs) return ESP_ERR_NO_MEM;
     esp_err_t r = tiny_display_render_universe_page(cs);
     free(cs);
@@ -808,7 +808,10 @@ esp_err_t tiny_shell_universe_route(const char *id) {
     if (!id) return ESP_ERR_INVALID_ARG;
     if (strcmp(id, "u:open") == 0) return render_universe();
     if (strcmp(id, "u:clear") == 0) {
-        tiny_agent_set(NULL);
+        // A refused save changed nothing: say so, do not repaint an ACTIVE
+        // row the state does not hold.
+        const esp_err_t r = tiny_agent_set(NULL);
+        if (r != ESP_OK) return r;
         return render_universe();  // repaint = ack (ACTIVE moves to row 0)
     }
     if (strncmp(id, "u:i:", 4) == 0) {

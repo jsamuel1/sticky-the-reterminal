@@ -549,14 +549,18 @@ static SemaphoreHandle_t s_region_mux = NULL;
 static uint32_t s_card_gen = 0;
 
 // What a render_card_at() commit owns besides the card itself. `page` types
-// the glass (see GlassPage); `merge_tinys` is a universe push's slug array,
-// persisted into the roster AT the commit — after the panel took the page
-// and before its rows become touchable — so a push that fails or is
-// overtaken merges nothing, and a row tap never resolves against a roster
-// older than the page it is tapping.
+// the glass (see GlassPage). `roster_next` is a universe push's merged
+// roster and `roster_base` the snapshot it was built from: committed into
+// tiny_agent as ONE write AT the commit — after the panel took the page and
+// before anything else of the commit (replay cache, stream displacement, tap
+// regions, light) is published. A refused write (NVS failure, or the roster
+// changed since the page was built) fails the whole commit and rolls the
+// glass back, so the rows a human can see and tap are always rows a reboot
+// keeps; a push that fails or is overtaken merges nothing.
 struct PageCommit {
     GlassPage page = GlassPage::Other;
-    const cJSON *merge_tinys = nullptr;
+    const tiny_agent_roster_t *roster_base = nullptr;
+    const tiny_agent_roster_t *roster_next = nullptr;
 };
 static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch,
                                 const PageCommit &pc = PageCommit());
@@ -2716,30 +2720,45 @@ static esp_err_t render_universe_at(const cJSON *spec, uint32_t claimed_epoch);
 // rules, applied to a copy) and renders under this request's epoch through
 // render_card_at: no second, fresh claim for the nested composite, and no
 // point between claim and commit where the render lock is released, so the
-// page can never paint over a newer request. The slugs are persisted only at
-// that commit (PageCommit::merge_tinys) — a refused, overtaken or failed
-// push merges nothing. The push's priority is written INTO the composite
+// page can never paint over a newer request. The merged roster is committed
+// as one write at that commit (PageCommit::roster_next) — a refused,
+// overtaken or failed push merges nothing, and a refused write fails the
+// push. The push's priority is written INTO the composite
 // ("alert"/"normal"), so the replay cache and a retry carry it. Caller holds
 // the render lock.
+// Roster copies for the one universe push in flight: written only under the
+// render lock (a universe composite is never itself a universe spec, so this
+// cannot nest), kept off the relay task's stack (~1.2 KB).
+EXT_RAM_BSS_ATTR static tiny_agent_roster_t s_universe_base;
+EXT_RAM_BSS_ATTR static tiny_agent_roster_t s_universe_next;
 static esp_err_t render_universe_at(const cJSON *spec, uint32_t claimed_epoch) {
     const uint32_t claim = claimed_epoch ? claimed_epoch
                            : s_rerendering ? s_render_epoch
                                            : ++s_render_epoch;
     const char *prio = tiny_universe_push_priority(spec);
     const cJSON *arr = cJSON_GetObjectItem(spec, "tinys");
-    tiny_agent_roster_t roster;
-    tiny_agent_roster_snapshot(&roster);
+    tiny_agent_roster_t &base = s_universe_base;
+    tiny_agent_roster_t &next = s_universe_next;
+    tiny_agent_roster_snapshot(&base);
+    next = base;
     const cJSON *e = nullptr;
     cJSON_ArrayForEach(e, arr)
         if (cJSON_IsString(e))
-            tiny_agent_roster_preview_add(&roster, e->valuestring);
-    char *cs = tiny_universe_card_json(tiny_agent_current(), roster.slugs,
-                                       roster.n, prio);
+            tiny_agent_roster_preview_add(&next, e->valuestring);
+    // Only a roster the push actually changes is written: pushing slugs the
+    // roster already holds (or none) costs no flash write.
+    bool merges = next.n != base.n;
+    for (int i = 0; !merges && i < next.n; ++i)
+        merges = strcmp(next.slugs[i], base.slugs[i]) != 0;
+    char *cs = tiny_universe_card_json(base.active, next.slugs, next.n, prio);
     if (!cs) return ESP_ERR_NO_MEM;   // nothing merged, painted or cached
     TINY_DISPLAY_SEAM("universe-claimed");   // render lock held: others wait
     PageCommit pc;
     pc.page = GlassPage::Universe;
-    pc.merge_tinys = cJSON_IsArray(arr) ? arr : nullptr;
+    if (merges) {
+        pc.roster_base = &base;
+        pc.roster_next = &next;
+    }
     const esp_err_t err = render_card_at(cs, claim, pc);
     free(cs);
     return err;
@@ -3083,17 +3102,23 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch,
                   : sticky_display_refresh_monochrome();
     }
     if (err == ESP_OK) s_pushed_rot = static_cast<int>(s_rot);
+    // A universe push's merged roster is committed now that its page is on
+    // the panel, and BEFORE anything else of this commit is published. A
+    // refused write fails the commit: the rollback below restores the old
+    // frame, cache, regions and light, so glass, taps and a reboot all agree
+    // on the roster that was already there.
+    if (err == ESP_OK && pc.roster_next) {
+        err = tiny_agent_roster_commit(pc.roster_base, pc.roster_next);
+        if (err != ESP_OK)
+            ESP_LOGW(TAG, "universe roster not saved (%s) - page rolled back",
+                     esp_err_to_name(err));
+    }
     // Buttons become touchable ONLY once the human can see them. Publishing at
     // draw time made taps in the ~2s refresh window resolve against a layout
     // that was not on the glass yet.
     if (err == ESP_OK) {
         pending.publish();
         displace.commit();
-        // A universe push's slugs join the roster now that its page is on
-        // glass, before its rows become touchable below.
-        const cJSON *e = nullptr;
-        cJSON_ArrayForEach(e, pc.merge_tinys)
-            if (cJSON_IsString(e)) tiny_agent_roster_add(e->valuestring);
         publish_regions(cid_s, type_s, is_alert, pc.page);
     } else {
         frame.restore();
@@ -3109,7 +3134,7 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch,
         // an earlier successful DMA strip from this failed request cannot stay
         // visible under the old card identity/touch regions.
         repair_restored_frame("card rollback");
-        ESP_LOGW(TAG, "refresh failed (%s) — keeping previous tap regions",
+        ESP_LOGW(TAG, "commit failed (%s) — keeping previous tap regions",
                  esp_err_to_name(err));
     }
     display_unlock();

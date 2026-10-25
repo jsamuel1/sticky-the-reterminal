@@ -89,12 +89,23 @@ are folded into `## [Unreleased]` when a version is cut
   (`tiny_display_glass_is_gallery`). A universe push is now one request with
   one render claim and one parse: tiny_display renders the composite from
   the tree it already parsed, under that claim, from a preview of the merged
-  roster, and persists the pushed slugs only once the page is on glass. An
+  roster. The merged roster is then saved as ONE write, after the panel took
+  the page and before anything of the commit is published; if that write is
+  refused (NVS open/set/commit failure, or another task changed the roster
+  after the page was built from it) the push fails and the page is rolled
+  back, so a row on glass is always a row a reboot keeps. An
   overtaken push (a stream finale whose claim a newer card beat), a failed
   panel commit or any allocation failure on the way paints nothing, merges
   no slug and leaves the light alone; the composite builder refuses to
-  return a half-built page. `agent_host_test.sh` proves the roster preview
-  equals the real add and writes nothing.
+  return a half-built page. tiny_agent now stores its whole state (active
+  slug + roster) as one NVS blob and adopts a change in RAM only after NVS
+  committed it, for `agent <slug>`, `agent add/rm`, the universe row tap and
+  `u:clear` alike (a refused `u:clear` no longer repaints an ACTIVE row it
+  did not save); the old per-key store is read once and migrated on the
+  first save. `agent_host_test.sh` proves the roster preview equals the real
+  add and writes nothing, and runs every mutation against injected NVS
+  open/set/commit failures across process restarts (fresh, reboot, legacy
+  store, unreadable blob).
   Verified hardware facts (WS2812B LED2, GPIO42, +5 V rail) are in
   `docs/hardware.md`.
 - **firmware** — a render that a newer card overtook now returns

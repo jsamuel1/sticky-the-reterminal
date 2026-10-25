@@ -227,8 +227,9 @@ extern "C" esp_err_t sticky_sdcard_ensure(void) {
 extern "C" int tiny_askq_count(void) { return 0; }
 static char g_agent[TINY_AGENT_SLUG_MAX + 1] = "";
 extern "C" const char *tiny_agent_current(void) { return g_agent; }
-// Roster as the universe push merges it (tiny_agent's own rules are its host
-// test's business; here only "what the page lists" matters).
+// Roster as the universe push commits it (tiny_agent's own rules and its NVS
+// atomicity are agent_host_test.sh's business; here: what the page lists,
+// and what the renderer does when the one roster write is refused).
 static std::vector<std::string> g_roster = {"tiny"};
 extern "C" int tiny_agent_roster(char out[][TINY_AGENT_SLUG_MAX + 1], int max) {
     int n = 0;
@@ -238,21 +239,40 @@ extern "C" int tiny_agent_roster(char out[][TINY_AGENT_SLUG_MAX + 1], int max) {
     }
     return n;
 }
-extern "C" esp_err_t tiny_agent_roster_add(const char *slug) {
-    for (const auto &r : g_roster) if (r == slug) return ESP_OK;
-    g_roster.push_back(slug);
-    return ESP_OK;
+extern "C" void tiny_agent_roster_snapshot(tiny_agent_roster_t *out) {
+    memset(out, 0, sizeof *out);
+    strlcpy(out->active, g_agent, sizeof out->active);
+    out->n = tiny_agent_roster(out->slugs, TINY_AGENT_ROSTER_MAX);
 }
 // Preview = the stub's add rule on a copy (tiny_agent's own preview/add
 // equivalence is agent_host_test.sh's business).
-extern "C" void tiny_agent_roster_snapshot(tiny_agent_roster_t *out) {
-    out->n = tiny_agent_roster(out->slugs, TINY_AGENT_ROSTER_MAX);
-}
 extern "C" esp_err_t tiny_agent_roster_preview_add(tiny_agent_roster_t *r,
                                                    const char *slug) {
     for (int i = 0; i < r->n; ++i) if (!strcmp(r->slugs[i], slug)) return ESP_OK;
     if (r->n < TINY_AGENT_ROSTER_MAX)
         strlcpy(r->slugs[r->n++], slug, TINY_AGENT_SLUG_MAX + 1);
+    return ESP_OK;
+}
+// The one roster write a universe commit makes. g_roster_commit_fail makes
+// the next one return that error (an NVS refusal) and change nothing; the
+// base check is the real one's compare-and-set.
+static int g_roster_commits = 0;
+static esp_err_t g_roster_commit_fail = ESP_OK;
+extern "C" esp_err_t tiny_agent_roster_commit(const tiny_agent_roster_t *base,
+                                              const tiny_agent_roster_t *next) {
+    ++g_roster_commits;
+    if (g_roster_commit_fail != ESP_OK) {
+        const esp_err_t e = g_roster_commit_fail;
+        g_roster_commit_fail = ESP_OK;
+        return e;
+    }
+    tiny_agent_roster_t live;
+    tiny_agent_roster_snapshot(&live);
+    bool same = live.n == base->n && !strcmp(live.active, base->active);
+    for (int i = 0; same && i < live.n; ++i)
+        same = !strcmp(live.slugs[i], base->slugs[i]);
+    if (!same) return ESP_ERR_INVALID_STATE;
+    g_roster.assign(next->slugs, next->slugs + next->n);
     return ESP_OK;
 }
 
@@ -913,6 +933,92 @@ int main(int argc, char **argv) {
                     ESP_FAIL, 0, false);
                 CHECK(g_roster.size() == roster0,
                       "universe push, panel fails: no slug merged");
+            }
+            // ---- universe push: the roster write is part of the commit ------
+            // The merged roster is ONE write, made after the panel took the
+            // page and before anything is published. A refused write (NVS, or
+            // a roster that changed under the page) must fail the push and
+            // leave everything as it was: roster, glass, identity, tap
+            // regions, card_gen, replay cache and light — so no row a human
+            // can tap is one a reboot would lose.
+            {
+                auto census = [] {
+                    tiny_button_region_t regs[48];
+                    const int nr = tiny_display_button_regions(regs, 48);
+                    std::vector<std::string> v;
+                    for (int i = 0; i < nr; ++i)
+                        v.push_back(std::string(regs[i].id) + "=" + regs[i].label);
+                    return v;
+                };
+                const char *push =
+                    R"J({"type":"universe","priority":"alert","tinys":["p1","p2","p3"]})J";
+                for (const esp_err_t why : {ESP_FAIL, ESP_ERR_INVALID_STATE}) {
+                    const auto roster0 = g_roster;
+                    const uint32_t frame0 = fnv1a(g_buf.data(), g_buf.size());
+                    const auto regs0 = census();
+                    const uint32_t gen0 = tiny_display_card_gen();
+                    const std::string id0 = tiny_display_current_card_id();
+                    const int refreshes = g_full_refreshes;
+                    const int commits = g_roster_commits;
+                    if (why == ESP_FAIL) {
+                        g_roster_commit_fail = ESP_FAIL;   // NVS refuses
+                    } else {
+                        // Another task edits the roster after the page was
+                        // built from it: the page's rows are stale.
+                        arm_seam("universe-claimed", [] { g_roster.push_back("racer"); });
+                    }
+                    const auto roster_at_commit = why == ESP_FAIL ? roster0 : [&] {
+                        auto r = roster0; r.push_back("racer"); return r; }();
+                    calls = g_led_alert_calls;
+                    const esp_err_t r = tiny_display_render_card(push);
+                    CHECK(r == why, "universe persist %x: returned %x", why, r);
+                    CHECK(g_roster_commits == commits + 1,
+                          "universe persist %x: %d roster writes, want one batch",
+                          why, g_roster_commits - commits);
+                    CHECK(g_full_refreshes == refreshes + 1,
+                          "universe persist %x: panel took the page first", why);
+                    CHECK(g_roster == roster_at_commit,
+                          "universe persist %x: roster changed (%zu rows)", why,
+                          g_roster.size());
+                    CHECK(fnv1a(g_buf.data(), g_buf.size()) == frame0 &&
+                              census() == regs0 && tiny_display_card_gen() == gen0 &&
+                              id0 == tiny_display_current_card_id(),
+                          "universe persist %x: glass, regions or identity moved", why);
+                    CHECK(g_led_alert_calls == calls && !g_led_alert,
+                          "universe persist %x: touched the light", why);
+                    CHECK(tiny_display_rerender() == ESP_OK &&
+                              id0 == tiny_display_current_card_id() && !g_led_alert &&
+                              g_roster == roster_at_commit,
+                          "universe persist %x: replay is the previous card", why);
+                    g_roster = roster0;
+                }
+                // Retry with NVS healthy: all three slugs in one write, the
+                // page committed alert, and every row it shows is in the roster.
+                const auto roster0 = g_roster;
+                const int commits = g_roster_commits;
+                calls = g_led_alert_calls;
+                expect("universe multi-slug push", tiny_display_render_card(push),
+                       ESP_OK, 1, true);
+                CHECK(g_roster_commits == commits + 1 &&
+                          g_roster.size() == roster0.size() + 3 &&
+                          g_roster[g_roster.size() - 3] == "p1" &&
+                          g_roster.back() == "p3",
+                      "universe multi-slug push: one write, all slugs");
+                bool rows_ok = true;
+                for (const auto &reg : census())
+                    if (!strncmp(reg.c_str(), "u:i:", 4)) {
+                        const int i = atoi(reg.c_str() + 4);
+                        rows_ok = rows_ok && i >= 0 && i < (int)g_roster.size() &&
+                                  reg.find("=@" + g_roster[i]) != std::string::npos;
+                    }
+                CHECK(rows_ok, "universe multi-slug push: every row names its roster slug");
+                // Nothing new to merge: no write at all.
+                expect("universe push, slugs already in roster",
+                       tiny_display_render_card(push), ESP_OK, 1, true);
+                CHECK(g_roster_commits == commits + 1,
+                      "universe push of known slugs writes nothing");
+                expect("normal after multi-slug", tiny_display_render_card(normal),
+                       ESP_OK, 1, false);
             }
             unserve();
 

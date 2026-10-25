@@ -47,9 +47,9 @@ static inline char *tiny_universe_card_json(
         ok = cJSON_AddStringToObject(card, "priority", priority) != NULL;
     // The title strip carries WHO IS ANSWERING — page identity + the owner
     // rule ("never mistake a persona's words for your own tiny's") in one.
-    char title[80];
-    snprintf(title, sizeof title, "universe%s%s",
-             cur[0] ? " - @" : "", cur[0] ? cur : "");
+    char title[80];   // "universe - @" + a slug (<= TINY_AGENT_SLUG_MAX)
+    snprintf(title, sizeof title, "universe%s%.*s",
+             cur[0] ? " - @" : "", TINY_AGENT_SLUG_MAX, cur[0] ? cur : "");
     if (ok) ok = cJSON_AddStringToObject(card, "title", title) != NULL;
     cJSON *parts = ok ? cJSON_AddArrayToObject(card, "parts") : NULL;
     cJSON *head = parts ? cJSON_CreateObject() : NULL;
