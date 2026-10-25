@@ -162,7 +162,11 @@ title, parsed now so senders can declare intent before the notification
 model lands. On colour glass the title and its rule also turn red. On the
 FNK0104S my status light also turns magenta while that card is on glass,
 and goes back off (or green for waiting DMs) when the next card replaces it
-— see [Hardware → status light](hardware.md#fnk0104s-status-light).
+— see [Hardware → status light](hardware.md#fnk0104s-status-light). That
+includes `image`, `gallery` and `universe` cards, which have no title to
+prefix: the light is their only alert sign. Paging an alert gallery, or
+tapping a row on an alert universe page, keeps it magenta; a commit that
+fails to reach the glass leaves the light as it was.
 
 ### accent *(colour boards, grammar v16)*
 

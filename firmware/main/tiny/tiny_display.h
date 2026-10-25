@@ -12,6 +12,15 @@
 extern "C" {
 #endif
 esp_err_t tiny_display_init(void);
+// A render (card, page flip, stream finale) that a NEWER request overtook
+// before it could commit returns this, having changed nothing: no paint, no
+// tap regions, no replay cache, no gallery store, no photo archive, no status
+// light. It is not a failure of the request's content — a newer card simply
+// owns the glass — so callers must not paint an error or fallback card over it.
+#define TINY_DISPLAY_SUPERSEDED ((esp_err_t)0x7D01)
+// esp_err_to_name() for a display result: names TINY_DISPLAY_SUPERSEDED
+// ("SUPERSEDED"), which IDF's table does not know, and defers otherwise.
+const char *tiny_display_err_name(esp_err_t err);
 esp_err_t tiny_display_render_card(const char *card_json);   // parse+draw+refresh
 esp_err_t tiny_display_splash(const char *version, const char *state);
 esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len, bool partial);
@@ -20,7 +29,8 @@ esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len, bool partial);
 // PSRAM over https. Shared by the image card and tiny_stream. No lock taken.
 esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size_t *out_len);
 // Gallery (grammar v10): dir=-1/+1 pages the stored set (wraps), 0 reopens.
-// ESP_ERR_INVALID_STATE when no set has been sent yet.
+// ESP_ERR_INVALID_STATE when no set has been sent yet; TINY_DISPLAY_SUPERSEDED
+// when a newer card reached the glass while this page was fetching.
 esp_err_t tiny_display_gallery_nav(int dir);
 int tiny_display_gallery_count(void);
 // Screenshot support: copy of the LAST RENDERED framebuffer, one byte per

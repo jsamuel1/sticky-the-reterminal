@@ -24,7 +24,7 @@ use_device invoke → prompt: "status"
 
 | Verb | Arguments | What happens | The receipt says |
 |---|---|---|---|
-| `render_ui` | [card spec](cards.md) JSON | paints a card; buttons become touch regions | `rendered card_id=<id>` — what the panel *committed* |
+| `render_ui` | [card spec](cards.md) JSON | paints a card; buttons become touch regions | `rendered card_id=<id>` — what the panel *committed*; `superseded: newer card_id=<id> on glass` when a newer card committed while this one fetched/waited (nothing of it was painted or stored) |
 | `say` | text | text card titled *tiny*, ack chime, no agent turn | `ok` |
 | `screenshot` | — | framebuffer → hosted PNG: 2-bit gray on the e-ink, 8-bit indexed colour (the glass's own palette) on colour boards | the URL. Refused during `play` |
 | `page` | <code>home&vert;<wbr>status&vert;<wbr>sensors&vert;<wbr>settings&vert;<wbr>wifi&vert;<wbr>ble&vert;<wbr>palette&vert;<wbr>back&vert;<wbr>next&vert;<wbr>prev</code> | the relay twin of every tap path in [stickyOS](stickyos.md); `palette` previews every card [accent](cards.md#accent-colour-boards-grammar-v16) | card id |

@@ -11,7 +11,9 @@
 //                  tiny_led_ask(THINKING) for a text ask, IDLE on return,
 //                  tiny_led_error() when the askfail card is painted
 //   tiny_display -> tiny_led_alert() each time a card commits (true only for
-//                  a priority:"alert" card; every other commit clears it)
+//                  a priority:"alert" card — image/gallery/universe too —
+//                  or a gallery/universe repaint of one; every other
+//                  commit clears it, a failed commit changes nothing)
 //   tiny_node   -> tiny_led_unread() when the heartbeat's unread count moves
 //   tiny_lock   -> tiny_led_sync() on every lock change (locked = dark)
 //   sticky_power_generic -> tiny_led_prepare_sleep() before deep sleep

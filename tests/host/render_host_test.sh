@@ -10,6 +10,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 OUT=/tmp/render_test
+# Scratch SD card for the gallery/photo store cases (render_shim.h).
+rm -rf /tmp/render_test_sd
 cc -std=c11 -O1 -w -I third_party/cjson -c third_party/cjson/cJSON.c -o /tmp/render_cjson.o
 for f in qrcodegen esp_qrcode_main esp_qrcode_wrapper; do
     cc -std=c11 -O1 -w -I render_shim -I third_party/qrcodegen \

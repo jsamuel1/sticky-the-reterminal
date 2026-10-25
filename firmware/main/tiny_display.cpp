@@ -24,6 +24,14 @@
 #include "tiny/tiny_shell.h"
 #include "tiny/tiny_agent.h"
 #include "tiny/tiny_led.h"  // FNK0104S status light: alert layer (no-op elsewhere)
+#include "tiny/tiny_card_priority.h"
+#include "tiny/tiny_universe_card.h"  // universe page spec (shared with tiny_shell)
+
+// Test rendezvous point: a place where the renderer holds NO lock (the render
+// host test defines it to park a request there). A no-op on the device.
+#ifndef TINY_DISPLAY_SEAM
+#define TINY_DISPLAY_SEAM(point) ((void)0)
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -528,11 +536,17 @@ static SemaphoreHandle_t s_region_mux = NULL;
 // re-checks at lift: if the card changed under the finger, the tap is dropped
 // rather than applied to a button the human never saw (audit TOUCH P0-1).
 static uint32_t s_card_gen = 0;
-// The card being committed is a priority:"alert" card. Set by the main card
-// renderer just before publish_regions; every commit consumes it, so an image,
-// gallery, splash or blit commit (which never set it) reads false and turns
-// the status light's alert layer off.
-static bool s_commit_alert = false;
+// Status-light alert ownership. Every commit tells the light whether the card
+// it put on glass is a priority:"alert" card (publish_regions' `alert`). The
+// two pages the DEVICE composes for itself — the gallery's page flips and the
+// universe roster's row-tap repaints — carry no priority of their own, so the
+// card id that last committed WITH alert is kept here: a repaint of that same
+// device page keeps the alert, and the next commit of any other card clears
+// it. A failed or superseded commit changes neither the light nor this owner.
+// Written only by publish_regions and read only by alert_inherited(), both
+// with the display lock held inside the render transaction, so a repaint's
+// alert is decided against the card on glass at ITS commit.
+static char s_alert_owner[24] = "";
 
 static void regions_lock(void) {
     if (!s_region_mux) s_region_mux = xSemaphoreCreateMutex();
@@ -543,12 +557,22 @@ static void regions_unlock(void) {
     if (s_region_mux) xSemaphoreGive(s_region_mux);
 }
 
+// Caller holds the display lock. True when `page` (a device-composed repaint
+// of the gallery or universe page) is what last committed, and committed alert.
+static bool alert_inherited(const char *page) {
+    regions_lock();
+    const bool on = strcmp(s_alert_owner, page) == 0;
+    regions_unlock();
+    return on;
+}
+
 // Publish the staged table + card_id + card type as the live one. Called once,
 // after the refresh returns — until then the OLD card is what the human can
 // touch. The type is committed HERE, with the identity, so no glass commit
 // (card, image, gallery, raw blit, splash) can publish a new card_id while the
 // gesture router still classifies swipes by the previous card's type.
-static void publish_regions(const char *card_id, const char *card_type) {
+static void publish_regions(const char *card_id, const char *card_type,
+                            bool alert = false) {
     // Layout stages regions in LOGICAL coordinates; they are published in
     // PHYSICAL (panel) coordinates so the touch task — which reads raw GT911
     // panel coordinates — needs no idea that the UI is rotated, and so a tap
@@ -571,8 +595,7 @@ static void publish_regions(const char *card_id, const char *card_type) {
     for (int i = 0; i < s_region_count; ++i)
         strlcpy(s_regions[i].card_id, s_card_id, sizeof s_regions[i].card_id);
     ++s_card_gen;
-    const bool alert = s_commit_alert;
-    s_commit_alert = false;
+    strlcpy(s_alert_owner, alert ? s_card_id : "", sizeof s_alert_owner);
     regions_unlock();
     // Same moment the card becomes touchable: the light says "alert" exactly
     // while that card is what the human sees.
@@ -2177,7 +2200,7 @@ static void photos_sd_save(const char *url, const uint8_t *buf, size_t len) {
 }
 
 static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch,
-                                   const char *card_id) {
+                                   const char *card_id, bool alert) {
     Canvas *c = sticky_display_canvas();
     const cJSON *ju = cJSON_GetObjectItem(root, "url");
     if (!c || !cJSON_IsString(ju)) return ESP_ERR_INVALID_ARG;
@@ -2191,11 +2214,15 @@ static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch,
     if (err != ESP_OK) return err;
     if (render_epoch != s_render_epoch) {
         heap_caps_free(buf);
-        return ESP_ERR_INVALID_STATE;
+        return TINY_DISPLAY_SUPERSEDED;
     }
     // Archive only what PAINTED: a failed panel commit leaves no photo on the
     // glass, so it must not leave one in the archive (or poison the same-URL
-    // dedupe so a successful retry is never archived).
+    // dedupe so a successful retry is never archived). Paint AND archive run
+    // inside this request's render transaction (render lock re-taken above,
+    // held until the caller returns): a newer image can fetch meanwhile but
+    // cannot paint — and so cannot archive — until this one has archived, so
+    // NNNNN.raw order and s_photo_last_url always follow glass order.
     display_lock();
     CanvasFrameSnapshot frame(c);
     err = frame.capture();
@@ -2209,12 +2236,13 @@ static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch,
                                 : sticky_display_refresh_monochrome();
     reset_staged_regions();                  // an image has no buttons
     if (err == ESP_OK) {
-        publish_regions(card_id, "image");
+        publish_regions(card_id, "image", alert);
     } else {
         frame.restore();
         repair_restored_frame("image rollback");
     }
     display_unlock();
+    TINY_DISPLAY_SEAM("image-painted");   // render lock held: newer paints wait
     if (err == ESP_OK) photos_sd_save(ju->valuestring, buf, len);
     heap_caps_free(buf);
     return err;
@@ -2410,7 +2438,8 @@ extern "C" int tiny_display_gallery_count(void) {
 //   new_urls != nullptr : a NEW set (claim-owned copy); old cache/SD frames
 //                         belong to the old index space and are never read.
 static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
-                                     const char (*new_urls)[256], int new_count) {
+                                     const char (*new_urls)[256], int new_count,
+                                     int prio) {
     const bool new_set = new_urls != nullptr;
     const int count = new_set ? new_count : s_gal_count;
     if (count <= 0 || idx < 0 || idx >= count) return ESP_ERR_INVALID_STATE;
@@ -2436,7 +2465,7 @@ static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
         if (err != ESP_OK) return err;  // no RAM, no disk, no net: honest miss
         if (render_epoch != s_render_epoch) {
             heap_caps_free(buf);        // overtaken: touch nothing shared
-            return ESP_ERR_INVALID_STATE;
+            return TINY_DISPLAY_SUPERSEDED;
         }
         from_net = true;
     }
@@ -2468,10 +2497,14 @@ static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
     stage_region(0, 0, 88, 88, "home", "home");
     stage_region(0, 100, 120, s_ph - 100, "prev", "g:prev");
     stage_region(s_pw - 120, 100, 120, s_ph - 100, "next", "g:next");
+    // Status light: a sender's gallery card states its priority (prio 1/0);
+    // a device page flip / reopen (prio -1) keeps the alert only when the
+    // gallery it pages is still what is on glass at THIS commit.
+    const bool alert = prio == 1 || (prio < 0 && alert_inherited("gallery"));
     err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
     if (err == ESP_OK) {
-        publish_regions("gallery", "gallery");
+        publish_regions("gallery", "gallery", alert);
     } else {
         reset_staged_regions();
         frame.restore();
@@ -2513,12 +2546,12 @@ static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
 // dir: -1/+1 page (wraps), 0 = reopen current. Fetches OUTSIDE the display
 // lock like every other network path. Empty set → INVALID_STATE (callers
 // show the friendly card; this layer never invents one).
-static esp_err_t gallery_nav_locked(int dir, uint32_t render_epoch) {
+static esp_err_t gallery_nav_locked(int dir, uint32_t render_epoch, int prio) {
     gal_lazy_load();
     if (s_gal_count <= 0) return ESP_ERR_INVALID_STATE;
     int idx = (s_gal_index + dir) % s_gal_count;
     if (idx < 0) idx += s_gal_count;
-    return gallery_show_locked(idx, render_epoch, nullptr, 0);
+    return gallery_show_locked(idx, render_epoch, nullptr, 0, prio);
 }
 
 extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
@@ -2528,7 +2561,7 @@ extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
     // the replay cache only once the page is on glass.
     StreamDisplacement displace;
     if (s_stream_on && !s_stream_rendering) displace.begin(render_epoch);
-    const esp_err_t err = gallery_nav_locked(dir, render_epoch);
+    const esp_err_t err = gallery_nav_locked(dir, render_epoch, -1);
     if (err == ESP_OK) {
         card_cache_mark_native("gallery");
         displace.commit();
@@ -2536,7 +2569,8 @@ extern "C" esp_err_t tiny_display_gallery_nav(int dir) {
     return err;
 }
 
-static esp_err_t render_gallery_card(cJSON *root, uint32_t render_epoch) {
+static esp_err_t render_gallery_card(cJSON *root, uint32_t render_epoch,
+                                     bool alert) {
     const cJSON *ja = cJSON_GetObjectItem(root, "urls");
     if (!cJSON_IsArray(ja)) return ESP_ERR_INVALID_ARG;
     // Claim-owned copy of the requested set: the committed s_gal_urls keep
@@ -2565,12 +2599,12 @@ static esp_err_t render_gallery_card(cJSON *root, uint32_t render_epoch) {
     // save — replaying index:0 here is exactly how a rotation flap both
     // lost the owner's page and poisoned the saved one (0.25.9 field bug).
     if (s_rerendering && same_set) {
-        err = gallery_nav_locked(0, render_epoch);
+        err = gallery_nav_locked(0, render_epoch, alert ? 1 : 0);
     } else {
         const cJSON *ji = cJSON_GetObjectItem(root, "index");
         int idx = cJSON_IsNumber(ji) ? (int)ji->valuedouble : 0;
         if (idx < 0 || idx >= n) idx = 0;
-        err = gallery_show_locked(idx, render_epoch, urls, n);
+        err = gallery_show_locked(idx, render_epoch, urls, n, alert ? 1 : 0);
     }
     heap_caps_free(urls);
     return err;
@@ -2630,6 +2664,42 @@ struct PendingCardCache {
 
 static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch);
 
+// render_ui {"type":"universe","tinys":[…]?,"priority"?} — one request,
+// one claim. The pushed slugs merge into the roster, then the roster page
+// (tiny/tiny_universe_card.h, the same builder tiny_shell's repaints use)
+// renders under THIS request's epoch through render_card_at: no second,
+// fresh claim for the nested composite, and no point between claim and
+// commit where the render lock is released, so the page can never paint
+// over a newer request and the push cannot lend its priority to another.
+// The push's priority is written INTO the composite ("alert"/"normal"), so
+// the replay cache and a retry carry it. Caller holds the render lock.
+static esp_err_t render_universe_at(const char *spec_json,
+                                    uint32_t claimed_epoch) {
+    const uint32_t claim = claimed_epoch ? claimed_epoch
+                           : s_rerendering ? s_render_epoch
+                                           : ++s_render_epoch;
+    cJSON *o = cJSON_Parse(spec_json);
+    const char *prio = tiny_universe_push_priority(o);
+    if (o) {
+        const cJSON *arr = cJSON_GetObjectItem(o, "tinys");
+        const cJSON *e = nullptr;
+        cJSON_ArrayForEach(e, arr)
+            if (cJSON_IsString(e)) tiny_agent_roster_add(e->valuestring);
+        cJSON_Delete(o);
+    }
+    char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
+    const int n = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
+    char *cs = tiny_universe_card_json(tiny_agent_current(), roster, n, prio);
+    if (!cs) return ESP_ERR_NO_MEM;
+    TINY_DISPLAY_SEAM("universe-claimed");   // render lock held: others wait
+    const esp_err_t err = render_card_at(cs, claim);
+    free(cs);
+    return err;
+}
+extern "C" const char *tiny_display_err_name(esp_err_t err) {
+    return err == TINY_DISPLAY_SUPERSEDED ? "SUPERSEDED" : esp_err_to_name(err);
+}
+
 extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
     return render_card_at(card_json, 0);
 }
@@ -2645,7 +2715,7 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     RenderGuard guard;
     if (claimed_epoch && claimed_epoch != s_render_epoch) {
         ESP_LOGW(TAG, "claimed render overtaken before start - dropped");
-        return ESP_ERR_INVALID_STATE;
+        return TINY_DISPLAY_SUPERSEDED;   // nothing parsed, merged or painted
     }
 
     cJSON *root = cJSON_Parse(card_json);
@@ -2658,6 +2728,24 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
             stream_finish();
         return ESP_ERR_INVALID_ARG;
     }
+    {
+        // v11: the universe page owns its own layout (roster lives in
+        // tiny_agent, not in the spec). Routed BEFORE this request claims
+        // anything: render_universe_at() claims the one epoch this request
+        // gets (or carries the caller's) into the composite's render. The
+        // nested page never mints a fresh claim of its own, and render
+        // ownership is held from claim to commit, so it cannot paint over a
+        // newer request.
+        const cJSON *jt = cJSON_GetObjectItem(root, "type");
+        if (cJSON_IsString(jt) && strcmp(jt->valuestring, "universe") == 0) {
+            cJSON_Delete(root);
+            return render_universe_at(card_json, claimed_epoch);
+        }
+    }
+    // "priority" (T1): 1 alert, 0 present-but-not-alert, -1 absent. Read
+    // before the special-card exits below — "any card may declare" it, and
+    // the status light follows it for image and gallery commits too.
+    const int prio = tiny_card_priority(root);
     const uint32_t render_epoch = claimed_epoch ? claimed_epoch
                                   : s_rerendering ? s_render_epoch
                                                   : ++s_render_epoch;
@@ -2699,16 +2787,8 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     // same sha16 = same pixels).
     {
         const cJSON *jt = cJSON_GetObjectItem(root, "type");
-        if (cJSON_IsString(jt) && strcmp(jt->valuestring, "universe") == 0) {
-            // v11: the universe page owns its own layout (roster lives in
-            // tiny_agent, not in the spec) — merge any pushed slugs, then
-            // the shell renders a normal composite through this function
-            // (which stages its own stream displacement and cache).
-            cJSON_Delete(root);
-            return tiny_shell_universe_push(card_json);
-        }
         if (cJSON_IsString(jt) && strcmp(jt->valuestring, "gallery") == 0) {
-            esp_err_t gerr = render_gallery_card(root, render_epoch);
+            esp_err_t gerr = render_gallery_card(root, render_epoch, prio == 1);
             if (gerr == ESP_OK) { pending.publish(); displace.commit(); }
             cJSON_Delete(root);
             return gerr;
@@ -2720,7 +2800,8 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
             const char *image_id =
                 cJSON_IsString(jc) && jc->valuestring[0] ? jc->valuestring
                                                          : "image";
-            esp_err_t ierr = render_image_card(root, render_epoch, image_id);
+            esp_err_t ierr = render_image_card(root, render_epoch, image_id,
+                                               prio == 1);
             if (ierr == ESP_OK) { pending.publish(); displace.commit(); }
             cJSON_Delete(root);
             return ierr;
@@ -2752,16 +2833,10 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     // "normal" (default). Parsed NOW so senders can start declaring it and no
     // future firmware breaks them; today's whole behavior is a "! " title
     // prefix — visible, honest, and nothing a normal card could mistake for
-    // its own. The focus/queue semantics arrive with the notification model.
-    cJSON *prio = cJSON_GetObjectItem(root, "priority");
-    const bool is_alert =
-        cJSON_IsString(prio) && strcmp(prio->valuestring, "alert") == 0;
+    // its own — plus, on the FNK0104S, the status light. The alert decision is
+    // taken below, under the display lock this card commits with.
+    bool is_alert = false;
     char titled[160];
-    if (is_alert) {
-        snprintf(titled, sizeof titled, "! %s", title_s);
-        title_s = titled;
-    }
-
     // One writer at a time: relay, voice/button, orientation and serial tasks
     // share render state under RenderGuard. The shorter panel lock below owns
     // only canvas drawing and physical commit.
@@ -2774,6 +2849,17 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     char geo_scroll_card[sizeof s_scroll_card];
     strlcpy(geo_scroll_card, s_scroll_card, sizeof geo_scroll_card);
     display_lock();
+    // A universe PUSH states its priority on the composite ("alert" or
+    // "normal"); a universe REPAINT (row tap, u:open) states none and keeps
+    // the alert of the universe page on glass — decided here, under the lock
+    // its commit holds, never sampled before it.
+    is_alert = prio == 1 ||
+               (prio < 0 && strcmp(cid_s, "universe") == 0 &&
+                alert_inherited("universe"));
+    if (is_alert) {
+        snprintf(titled, sizeof titled, "! %s", title_s);
+        title_s = titled;
+    }
     const int glass_w = c->width(), glass_h = c->height();
     const uint8_t glass_accent = s_accent;
     const int glass_btn_scale = s_btn_scale;
@@ -2931,8 +3017,7 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     if (err == ESP_OK) {
         pending.publish();
         displace.commit();
-        s_commit_alert = is_alert;
-        publish_regions(cid_s, type_s);
+        publish_regions(cid_s, type_s, is_alert);
     } else {
         frame.restore();
         s_w = glass_w; s_h = glass_h;
@@ -3521,6 +3606,7 @@ extern "C" esp_err_t tiny_display_stream_end(const char *final_card_json) {
         s_stream_end_pending = true;
         const uint32_t claim = ++s_render_epoch;
         render_unlock();
+        TINY_DISPLAY_SEAM("finale-claimed");   // no lock: a newer card may land
         err = render_card_at(final_card_json, claim);
         ESP_LOGI(TAG, "stream end (card) -> %s", esp_err_to_name(err));
         return err;

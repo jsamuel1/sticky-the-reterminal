@@ -1677,6 +1677,13 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
             snprintf(out, sizeof out, "rendered card_id=%s",
                      tiny_display_current_card_id());
             reply(envelope_id, out);
+        } else if (r == TINY_DISPLAY_SUPERSEDED) {
+            // A newer card reached the glass while this one was fetching or
+            // waiting for the panel: nothing of this spec was painted.
+            char out[96];
+            snprintf(out, sizeof out, "superseded: newer card_id=%s on glass",
+                     tiny_display_current_card_id());
+            reply(envelope_id, out);
         } else {
             reply(envelope_id, esp_err_to_name(r));
         }
@@ -2507,7 +2514,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         else { reply(envelope_id, "page: home|status|sensors|settings|wifi|ble|gallery|universe|onboard|palette|back|next|prev"); return; }
         char out[96];
         snprintf(out, sizeof out, "page %s -> %s (card_id=%s)", what,
-                 esp_err_to_name(r), tiny_display_current_card_id());
+                 tiny_display_err_name(r), tiny_display_current_card_id());
         reply(envelope_id, out);
     } else if (strncmp(prompt, "miccheck", 8) == 0) {
         // miccheck [seconds] - record and report RMS/peak instead of

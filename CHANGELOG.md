@@ -72,9 +72,32 @@ are folded into `## [Unreleased]` when a version is cut
   reply change, so no grammar bump; the reTerminal and AMOLED-1.8 images
   still carry no LED code. `led_host_test.sh` pins precedence, expiry back
   to the attention colour and pairwise-distinct colours at 8/255;
-  `render_host_test.sh` asserts one alert-layer update per committed card.
+  `render_host_test.sh` asserts one alert-layer update per committed card,
+  and for `image`, `gallery` and `universe` cards (which leave the text
+  pipeline before it reads `priority`, and so used to clear the light):
+  alert on, kept across gallery page flips / universe repaints / rerender,
+  cleared by the next normal card, unchanged by a failed fetch or refresh.
+  The status light is decided at each commit, under the display lock: a
+  universe push writes its priority into the roster composite
+  (`tiny/tiny_universe_card.h`, shared with the shell's row-tap repaint and
+  the host test), and a gallery page flip or universe repaint keeps the
+  alert only while that same page is on glass. A universe push is now one
+  request with one render claim: tiny_display merges its slugs and renders
+  the composite under that claim instead of re-entering the public renderer
+  for a second one, so an overtaken push (a stream finale whose claim a
+  newer card beat) paints nothing and merges no slug.
   Verified hardware facts (WS2812B LED2, GPIO42, +5 V rail) are in
   `docs/hardware.md`.
+- **firmware** — a render that a newer card overtook now returns
+  `TINY_DISPLAY_SUPERSEDED` instead of `ESP_ERR_INVALID_STATE`. That code
+  also meant "empty gallery", so a page flip overtaken mid-fetch used to
+  paint the "No photos here yet" card over the newer card; the touch, UP/DOWN
+  and `page gallery` paths now leave a superseded flip alone. `render_ui`
+  answers `superseded: newer card_id=<id> on glass` and `page` names
+  `SUPERSEDED`. Photo-archive order still follows paint order (archive runs
+  inside the painting request's render transaction); the render host test
+  now pins it with two images, pause-after-paint, and the adjacent-resend
+  dedupe.
 
 - **firmware 0.31.1, grammar v24** — colour boards: more internal RAM for
   the voice upload's TLS session (`tiny_upload` refuses below 60 KB free;

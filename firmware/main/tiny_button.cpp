@@ -134,7 +134,10 @@ static void nav_task(void *) {
                 // the glass, UP/DOWN are the page-flip — checked before the
                 // scroll rule because a raw frame never overflows.
                 if (!strcmp(tiny_display_current_card_id(), "gallery")) {
-                    if (tiny_display_gallery_nav(-1) != ESP_OK)
+                    // SUPERSEDED: a newer card took the glass mid-flip —
+                    // not a refusal of this press.
+                    const esp_err_t gr = tiny_display_gallery_nav(-1);
+                    if (gr != ESP_OK && gr != TINY_DISPLAY_SUPERSEDED)
                         sticky_buzzer_beep_double();
                     break;
                 }
@@ -144,7 +147,8 @@ static void nav_task(void *) {
                 break;
             case Nav::kDown:
                 if (!strcmp(tiny_display_current_card_id(), "gallery")) {
-                    if (tiny_display_gallery_nav(+1) != ESP_OK)
+                    const esp_err_t gr = tiny_display_gallery_nav(+1);
+                    if (gr != ESP_OK && gr != TINY_DISPLAY_SUPERSEDED)
                         sticky_buzzer_beep_double();
                     break;
                 }

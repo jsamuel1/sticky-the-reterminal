@@ -125,8 +125,16 @@ What it shows, strongest first:
 | off | otherwise |
 
 The last two are steady: magenta clears when the next card commits, green
-when the heartbeat reports zero. The reTerminal and AMOLED-1.8 have no such
-light and carry none of this code.
+when the heartbeat reports zero. Image, gallery and universe cards honour
+`priority` like any other card; gallery page flips and universe row taps
+repaint the same page and keep its magenta. The reTerminal and AMOLED-1.8
+have no such light and carry none of this code.
+
+Not yet verified on the physical FNK0104S: the colours as seen, every
+transition above, touch while the light is lit, and whether 3.3 V data
+latches reliably into the 5 V-powered WS2812B (VIH 0.7·VDD ≈ 3.5 V; no level
+shifter). The host tests prove what the firmware tells the driver, not what
+the LED emits.
 
 ## What this body cannot do
 

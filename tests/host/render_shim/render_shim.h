@@ -30,3 +30,12 @@ static inline size_t strlcpy(char *d, const char *s, size_t n) {
 
 #define RTC_DATA_ATTR
 #define EXT_RAM_BSS_ATTR
+
+// The gallery / photo stores write under STICKY_SD_MOUNT_POINT: a scratch
+// directory the harness empties before each run (render_host_test.sh).
+#define STICKY_SD_MOUNT_POINT "/tmp/render_test_sd"
+
+// Rendezvous seams (tiny_display.cpp TINY_DISPLAY_SEAM): render_cases.cpp
+// arms one hook for one named point and it runs once there.
+void render_shim_seam(const char *point);
+#define TINY_DISPLAY_SEAM(point) render_shim_seam(point)

@@ -28,6 +28,7 @@
 #include "tiny/tiny_ble.h"
 #include "tiny/tiny_button.h"
 #include "tiny/tiny_agent.h"
+#include "tiny/tiny_universe_card.h"  // the page spec (shared with tiny_display)
 
 #include "nvs.h"
 
@@ -791,61 +792,11 @@ static esp_err_t render_universe(void) {
     const char *cur = tiny_agent_current();
     char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
     const int n = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
-
-    cJSON *card = cJSON_CreateObject();
-    if (!card) return ESP_ERR_NO_MEM;
-    cJSON_AddStringToObject(card, "type", "composite");
-    cJSON_AddStringToObject(card, "card_id", "universe");
-    // The title strip carries WHO IS ANSWERING — page identity + the owner
-    // rule ("never mistake a persona's words for your own tiny's") in one.
-    char title[80];
-    snprintf(title, sizeof title, "universe%s%s",
-             cur[0] ? " - @" : "", cur[0] ? cur : "");
-    cJSON_AddStringToObject(card, "title", title);
-    cJSON *parts = cJSON_AddArrayToObject(card, "parts");
-    cJSON *head = cJSON_CreateObject();
-    cJSON_AddStringToObject(head, "type", "text");
-    cJSON_AddStringToObject(head, "body",
-        "Who answers your asks. Tap a row to switch - it sticks until you "
-        "switch back.");
-    cJSON_AddItemToArray(parts, head);
-
-    cJSON *mn = cJSON_CreateObject();
-    cJSON_AddStringToObject(mn, "type", "menu");
-    cJSON *items = cJSON_AddArrayToObject(mn, "items");
-    {   // row 0, always: the way home. Never needs typing (tiny_agent law:
-        // the roster may drop entries, this row may not).
-        cJSON *it = cJSON_CreateObject();
-        cJSON_AddStringToObject(it, "label", "tiny (yours)");
-        cJSON_AddStringToObject(it, "note",
-                                cur[0] ? "tap to switch back" : "ACTIVE");
-        cJSON_AddStringToObject(it, "id", "u:clear");
-        cJSON_AddItemToArray(items, it);
-    }
-    for (int i = 0; i < n; ++i) {
-        cJSON *it = cJSON_CreateObject();
-        char lab[TINY_AGENT_SLUG_MAX + 2], id[16];
-        snprintf(lab, sizeof lab, "@%s", roster[i]);
-        snprintf(id, sizeof id, "u:i:%d", i);
-        const bool active = cur[0] && strcmp(cur, roster[i]) == 0;
-        cJSON_AddStringToObject(it, "label", lab);
-        cJSON_AddStringToObject(it, "note",
-                                active ? "ACTIVE" : "public tiny");
-        cJSON_AddStringToObject(it, "id", id);
-        cJSON_AddItemToArray(items, it);
-    }
-    {   // plain home row — universe is reachable from settings AND relay,
-        // so the way out must live on the card itself (D-UX: no dead ends).
-        cJSON *it = cJSON_CreateObject();
-        cJSON_AddStringToObject(it, "label", "home");
-        cJSON_AddStringToObject(it, "note", "leave this page");
-        cJSON_AddStringToObject(it, "id", "home");
-        cJSON_AddItemToArray(items, it);
-    }
-    cJSON_AddItemToArray(parts, mn);
-
-    char *cs = cJSON_PrintUnformatted(card);
-    cJSON_Delete(card);
+    // A device REPAINT (row tap, u:open): no priority field, so tiny_display
+    // keeps the alert only while the universe page on glass committed with
+    // it. A render_ui universe PUSH never comes through here: tiny_display
+    // renders it under the push's own claim, with the push's priority.
+    char *cs = tiny_universe_card_json(cur, roster, n, NULL);
     if (!cs) return ESP_ERR_NO_MEM;
     esp_err_t r = tiny_display_render_card(cs);
     free(cs);
@@ -873,21 +824,6 @@ esp_err_t tiny_shell_universe_route(const char *id) {
         return render_universe();
     }
     return ESP_ERR_INVALID_ARG;
-}
-
-// Relay/iOS roster push + page open: render_ui {"type":"universe",
-// "tinys":["slug",…]?}. Slugs merge into the roster (invalid ones are
-// skipped, honestly logged by tiny_agent), then the page renders.
-esp_err_t tiny_shell_universe_push(const char *spec_json) {
-    cJSON *o = spec_json ? cJSON_Parse(spec_json) : NULL;
-    if (o) {
-        const cJSON *arr = cJSON_GetObjectItem(o, "tinys");
-        const cJSON *e = NULL;
-        cJSON_ArrayForEach(e, arr)
-            if (cJSON_IsString(e)) tiny_agent_roster_add(e->valuestring);
-        cJSON_Delete(o);
-    }
-    return render_universe();
 }
 
 
