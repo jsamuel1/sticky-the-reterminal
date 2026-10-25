@@ -143,7 +143,10 @@ release, newest first.
   transaction; concurrent auto-rotate and card renders cannot race the cached
   JSON or expose an angle before its panel refresh. Network image/gallery
   fetches stay outside the panel lock and use a generation fence, so a stale
-  response cannot overwrite a newer card. Wake-baseline cards are built with
+  response cannot overwrite a newer card. Raw one-bit blits now claim that
+  same generation and retire a live text stream only after panel success;
+  image/gallery commits also clear stale text-scroll geometry. Wake-baseline
+  cards are built with
   cJSON, so quotes, backslashes and control bytes in the persisted goodbye
   body cannot break the hidden redraw. `tests/host/orient_host_test.sh` checks each axis against
   the shipped Canvas, and the render goldens gain 18 `amoled18-90` frames

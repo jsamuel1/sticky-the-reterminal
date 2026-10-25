@@ -791,11 +791,26 @@ int main(int argc, char **argv) {
                 g_release_http = true;
                 g_http_ready.notify_all();
             };
+            // Panel-native commits own no card-layout scroll window. Start
+            // with a genuinely overflowing text card, then prove an image
+            // clears every stale scroll claim when it reaches the glass.
+            std::string long_card =
+                R"J({"type":"text","card_id":"long-before-image","title":"long","body":")J";
+            for (int i = 0; i < 80; ++i) long_card += "overflowing line\\n";
+            long_card += R"J("})J";
+            CHECK(tiny_display_render_card(long_card.c_str()) == ESP_OK &&
+                      tiny_display_can_scroll(),
+                  "panel native: long text establishes scroll state");
             serve_http(gray4, true);
             CHECK(tiny_display_render_card(
                       R"J({"type":"image","card_id":"stream","url":"https://h/id.raw"})J") == ESP_OK &&
                       !strcmp(tiny_display_current_card_id(), "stream"),
                   "image identity: requested card_id is published on success");
+            int native_offset = -1, native_content = -1, native_view = -1;
+            tiny_display_scroll_state(&native_offset, &native_content, &native_view);
+            CHECK(!tiny_display_can_scroll() && native_offset == 0 &&
+                      native_content == 0 && native_view == 0,
+                  "panel native: image clears stale scroll geometry");
             CHECK(tiny_display_render_card(
                       R"J({"type":"image","url":"https://h/id2.raw"})J") == ESP_OK &&
                       !strcmp(tiny_display_current_card_id(), "image"),
@@ -889,6 +904,41 @@ int main(int argc, char **argv) {
                   "cache oom: rotation never replays the previous card");
             CHECK(!tiny_display_can_scroll(),
                   "cache oom: no replay means no scroll over stale spec");
+
+            // ---- raw blit is a display transaction -------------------------
+            // A raw frame is newer than an in-flight media fetch and must
+            // invalidate that fetch's epoch. It also replaces a text stream
+            // only after its own panel refresh succeeds.
+            std::vector<uint8_t> raw_blit(mono, 0x00);
+            serve_http(gray4, false);
+            std::atomic<int> before_blit{ESP_OK};
+            std::thread old_media([&] {
+                before_blit = tiny_display_render_card(
+                    R"J({"type":"image","card_id":"before-blit","url":"https://h/old.raw"})J");
+            });
+            CHECK(wait_http_blocked(), "blit epoch: older image fetch held");
+            CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "blit"),
+                  "blit epoch: newer raw frame commits");
+            release_http();
+            old_media.join();
+            stop_http();
+            CHECK(before_blit == ESP_ERR_INVALID_STATE &&
+                      !strcmp(tiny_display_current_card_id(), "blit"),
+                  "blit epoch: older media response cannot overwrite raw frame");
+
+            CHECK(tiny_display_stream_begin("tiny", "ansB", nullptr) == ESP_OK,
+                  "blit stream: begin");
+            tiny_display_stream_append("raw replacement waits for glass");
+            g_fail_next_full = true;
+            CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_FAIL &&
+                      tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansB"),
+                  "blit stream: failed raw refresh keeps text stream live");
+            CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_OK &&
+                      !tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "blit"),
+                  "blit stream: committed raw frame retires text stream");
 
             // ---- structured stream finale over HTTPS ------------------------
             // Successful image finale: requested identity, stream retired.

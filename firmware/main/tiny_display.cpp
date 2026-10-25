@@ -2479,6 +2479,18 @@ static void card_cache_set(char *owned_json, bool panel_native) {
     s_card_cache = owned_json;
     s_card_cache_panel_native = owned_json ? panel_native : false;
     free(old);
+    // Panel-native bytes have no card-layout window. Clear every scroll field
+    // even when the replay-copy allocation failed, because these values claim
+    // what is on glass rather than what remains replayable.
+    if (panel_native || !owned_json) {
+        s_scroll = 0;
+        s_content_h = 0;
+        s_body_top = 0;
+        s_body_bot = 0;
+        s_view_top = 0;
+        s_view_bot = 1 << 28;
+        s_scroll_card[0] = 0;
+    }
 }
 
 // A panel-native commit that did not arrive as a card spec (gallery page flip,
@@ -2492,8 +2504,6 @@ static void card_cache_mark_native(const char *type) {
     char *copy = (char *)malloc(n);
     if (copy) memcpy(copy, spec, n);
     card_cache_set(copy, true);   // NULL -> replay cleared, never stale
-    s_scroll = 0;
-    s_content_h = 0;
 }
 
 struct PendingCardCache {
@@ -2863,7 +2873,10 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     if (!c || !buf) return ESP_ERR_INVALID_ARG;
     const size_t expected = (size_t)s_pw * s_ph / 8;
     if (len < expected) return ESP_ERR_INVALID_SIZE;
-    RenderGuard guard;   // replay state below changes with the glass
+    RenderGuard guard;   // replay/stream state changes with the glass
+    const uint32_t render_epoch = ++s_render_epoch;
+    StreamDisplacement displace;
+    if (s_stream_on && !s_stream_rendering) displace.begin(render_epoch);
     display_lock();
     // Server bytes are canvas-space at the panel's native landscape origin —
     // same law as the image card. Without this, a portrait canvas (IMU
@@ -2883,11 +2896,15 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     esp_err_t err = partial ? sticky_display_refresh_partial()
                             : sticky_display_refresh_monochrome();
     s_staged_count = 0;  // a raw blit has no known buttons
-    if (err == ESP_OK) publish_regions("blit");
+    if (err == ESP_OK) {
+        // Claim logical ownership before publishing the new glass identity:
+        // an older HTTPS render now observes a stale epoch, and any live text
+        // stream retires only after this raw frame physically committed.
+        card_cache_mark_native("blit");
+        displace.commit();
+        publish_regions("blit");
+    }
     display_unlock();
-    // Raw frame on glass: a rotation keeps it rather than replaying the card
-    // it covered.
-    if (err == ESP_OK) card_cache_mark_native("blit");
     return err;
 }
 
