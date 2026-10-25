@@ -12,6 +12,7 @@
 //     dark AMOLED), land in $RENDER_OUT for the PR / card evidence.
 //
 // Usage: render_test <golden-file> [--update]
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
