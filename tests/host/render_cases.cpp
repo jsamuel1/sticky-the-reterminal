@@ -877,6 +877,13 @@ int main(int argc, char **argv) {
                       sticky_display_canvas()->rotation() == CanvasRotation::Landscape,
                   "panel native: image keeps policy angle but commits landscape frame");
             const uint32_t image_frame_hash = frame_hash();
+            g_fail_alloc_size = g_buf.size();
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"snapshot-oom","title":"x","body":"y"})J") == ESP_ERR_NO_MEM &&
+                      !strcmp(tiny_display_current_card_id(), "stream") &&
+                      frame_hash() == image_frame_hash,
+                  "panel native: rollback-snapshot OOM refuses before drawing");
+            g_fail_alloc_size = 0;
             g_fail_next_full = true;
             CHECK(tiny_display_render_card(
                       R"J({"type":"text","card_id":"failed-over-image","title":"x","body":"y"})J") == ESP_FAIL &&
