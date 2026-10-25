@@ -9,7 +9,7 @@ set(TINY_SHARED_SRCS
   "tiny_display.cpp" "tiny_touch.cpp" "tiny_config.cpp" "tiny_wifi.cpp" "tiny_node.cpp" "tiny_provision.cpp" "tiny_shell.cpp" "tiny_ble.cpp" "tiny_beacon.cpp"
   "tiny_audio.cpp" "tiny_upload.cpp" "tiny_ota.cpp" "tiny_button.cpp" "tiny_screenshot.cpp"
   "tiny_sensors.cpp"
-  "tiny_time.cpp" "tiny_orient.cpp" "tiny_stream.cpp" "tiny_askq.cpp" "tiny_bootmark.cpp" "tiny_heapmark.cpp" "tiny_agent.cpp" "tiny_onboard.cpp" "tiny_pair.cpp"
+  "tiny_time.cpp" "tiny_orient.cpp" "tiny_stream.cpp" "tiny_askq.cpp" "tiny_bootmark.cpp" "tiny_heapmark.cpp" "tiny_envelope.cpp" "tiny_agent.cpp" "tiny_onboard.cpp" "tiny_pair.cpp"
   # further tiny/* modules register here as milestones land (M3+)
 )
 
