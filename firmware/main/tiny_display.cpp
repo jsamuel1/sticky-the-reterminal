@@ -2671,41 +2671,40 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     char geo_scroll_card[sizeof s_scroll_card];
     strlcpy(geo_scroll_card, s_scroll_card, sizeof geo_scroll_card);
     display_lock();
-    // The Canvas bytes are also uncommitted until panel refresh succeeds.
-    // Snapshot both planes before drawing: otherwise a later partial ack can
-    // push pixels from a failed replacement while card_id/regions still name
-    // the prior card. Refuse before mutation if rollback storage is unavailable.
-    const size_t glass_gray_len = c->stride() * c->physical_height();
-    uint8_t *glass_gray = static_cast<uint8_t *>(
-        heap_caps_malloc(glass_gray_len, MALLOC_CAP_SPIRAM));
-    if (!glass_gray) glass_gray = static_cast<uint8_t *>(malloc(glass_gray_len));
+    const CanvasRotation glass_rot = c->rotation();
+    const int glass_w = c->width(), glass_h = c->height();
+    const uint8_t glass_pen = c->pen();
+    const uint8_t glass_accent = s_accent;
+    const int glass_btn_scale = s_btn_scale;
+    // Draw-only wake-baseline construction intentionally leaves its newly
+    // rendered bytes in Canvas for the caller to snapshot; it never commits
+    // and therefore needs no rollback allocation. Real commits use PSRAM only:
+    // a 368x448 colour frame needs ~123 KiB across both planes and must never
+    // consume the internal heap needed by TLS, DMA, and FreeRTOS.
+    const size_t glass_gray_len = s_draw_only
+        ? 0 : c->stride() * c->physical_height();
+    uint8_t *glass_gray = glass_gray_len
+        ? static_cast<uint8_t *>(heap_caps_malloc(glass_gray_len,
+                                                   MALLOC_CAP_SPIRAM))
+        : nullptr;
     const uint8_t *canvas_accent = c->accent_data();
-    const size_t glass_accent_len = canvas_accent
+    const size_t glass_accent_len = !s_draw_only && canvas_accent
         ? c->accent_stride() * c->physical_height() : 0;
-    uint8_t *glass_accent_bytes = nullptr;
-    if (glass_accent_len) {
-        glass_accent_bytes = static_cast<uint8_t *>(
-            heap_caps_malloc(glass_accent_len, MALLOC_CAP_SPIRAM));
-        if (!glass_accent_bytes)
-            glass_accent_bytes = static_cast<uint8_t *>(malloc(glass_accent_len));
-    }
-    if (!glass_gray || (glass_accent_len && !glass_accent_bytes)) {
-        free(glass_gray);
-        free(glass_accent_bytes);
+    uint8_t *glass_accent_bytes = glass_accent_len
+        ? static_cast<uint8_t *>(heap_caps_malloc(glass_accent_len,
+                                                   MALLOC_CAP_SPIRAM))
+        : nullptr;
+    if ((!s_draw_only && !glass_gray) ||
+        (glass_accent_len && !glass_accent_bytes)) {
+        heap_caps_free(glass_gray);
+        heap_caps_free(glass_accent_bytes);
         display_unlock();
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
-    memcpy(glass_gray, c->data(), glass_gray_len);
+    if (glass_gray_len) memcpy(glass_gray, c->data(), glass_gray_len);
     if (glass_accent_len)
         memcpy(glass_accent_bytes, canvas_accent, glass_accent_len);
-    // Canvas rotation and layout/style metadata are glass-derived state too.
-    // This matters when a panel-native image is landscape while s_rot already
-    // holds the portrait orientation intended for the next drawn card.
-    const CanvasRotation glass_rot = c->rotation();
-    const int glass_w = c->width(), glass_h = c->height();
-    const uint8_t glass_accent = s_accent;
-    const int glass_btn_scale = s_btn_scale;
 
     // Rotation is applied here, once per render: the layout helpers below all
     // read s_w/s_h, and the canvas turns every pixel they draw.
@@ -2823,8 +2822,6 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     // capture itself wants the newly drawn bytes, so discard—not restore—the
     // transaction snapshot.
     if (s_draw_only) {
-        free(glass_gray);
-        free(glass_accent_bytes);
         display_unlock();
         cJSON_Delete(root);
         return ESP_OK;
@@ -2860,6 +2857,7 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
         if (glass_accent_len)
             memcpy(c->accent_data(), glass_accent_bytes, glass_accent_len);
         c->set_rotation(glass_rot);
+        c->set_pen(glass_pen);
         s_w = glass_w; s_h = glass_h;
         s_accent = glass_accent;
         s_btn_scale = glass_btn_scale;
@@ -2870,8 +2868,8 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
         ESP_LOGW(TAG, "refresh failed (%s) — keeping previous tap regions",
                  esp_err_to_name(err));
     }
-    free(glass_gray);
-    free(glass_accent_bytes);
+    heap_caps_free(glass_gray);
+    heap_caps_free(glass_accent_bytes);
     display_unlock();
 
     ESP_LOGI(TAG, "card rendered type=%s title=\"%s\" id=\"%s\" buttons=%d -> %s",
