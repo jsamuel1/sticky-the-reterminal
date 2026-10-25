@@ -138,7 +138,17 @@ release, newest first.
   locked `voice`/mic refusals and the locked sleep card say "hold UP+DOWN 1s
   or send unlock" only on the reTerminal and "send unlock (no on-device
   chord)" on the colour boards (`tiny_lock_unlock_hint()`); the onboarding
-  tour teaches BOOT and swipes there instead of UP/DOWN. `tests/host/orient_host_test.sh` checks each axis against
+  tour teaches BOOT and swipes there instead of UP/DOWN. Display cache,
+  rotation, scroll and wake state now commit under one recursive render
+  transaction; concurrent auto-rotate and card renders cannot race the cached
+  JSON or expose an angle before its panel refresh. Network image/gallery
+  fetches stay outside the panel lock and use a generation fence, so a stale
+  response cannot overwrite a newer card. Raw one-bit blits now claim that
+  same generation and retire a live text stream only after panel success;
+  image/gallery commits also clear stale text-scroll geometry. Wake-baseline
+  cards are built with
+  cJSON, so quotes, backslashes and control bytes in the persisted goodbye
+  body cannot break the hidden redraw. `tests/host/orient_host_test.sh` checks each axis against
   the shipped Canvas, and the render goldens gain 18 `amoled18-90` frames
   (448×368).
 

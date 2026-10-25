@@ -12,15 +12,21 @@
 //     dark AMOLED), land in $RENDER_OUT for the PR / card evidence.
 //
 // Usage: render_test <golden-file> [--update]
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <vector>
 #include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 #include <zlib.h>
 
+#include "esp_http_client.h"
 #include "canvas.h"
 #include "lcd_palette.h"
 #include "tiny/tiny_display.h"
@@ -32,16 +38,132 @@ static std::vector<uint8_t> g_acc;   // accent plane (colour boards only)
 
 static bool g_fail_next_full = false;
 static int g_full_refreshes = 0;
+static std::mutex g_panel_mutex;
+static std::condition_variable g_panel_ready;
+static bool g_block_next_full = false;
+static bool g_panel_blocked = false;
+static bool g_release_panel = false;
+static bool g_probe_rotation = false;
+static bool g_rotation_probed = false;
+static int g_rotation_during_block = -1;
+static std::mutex g_attempt_mutex;
+static std::condition_variable g_attempt_ready;
+static int g_render_attempts = 0;
+static std::mutex g_http_mutex;
+static std::condition_variable g_http_ready;
+static bool g_hold_http = false;
+static bool g_http_blocked = false;
+static bool g_release_http = false;
+static std::vector<uint8_t> g_http_body;
+static size_t g_http_offset = 0;
+static constexpr uintptr_t kHttpHandle = 1;
+static std::string g_http_last_url;
+static int g_http_fetches = 0;
+// Wake baseline: the bytes the driver was handed as the "previous" plane.
+static uint32_t g_baseline_hash = 0;
+static int g_baseline_calls = 0;
+
+void render_test_render_mutex_attempt() {
+    std::lock_guard<std::mutex> lock(g_attempt_mutex);
+    ++g_render_attempts;
+    g_attempt_ready.notify_all();
+}
+
+static bool wait_for_attempts(int count) {
+    std::unique_lock<std::mutex> lock(g_attempt_mutex);
+    return g_attempt_ready.wait_for(lock, std::chrono::seconds(2),
+                                    [&] { return g_render_attempts >= count; });
+}
+
+esp_http_client_handle_t render_test_http_init(const esp_http_client_config_t *config) {
+    std::lock_guard<std::mutex> lock(g_http_mutex);
+    g_http_offset = 0;
+    if (g_hold_http) {
+        g_http_last_url = config && config->url ? config->url : "";
+        ++g_http_fetches;
+    }
+    return g_hold_http ? reinterpret_cast<void *>(kHttpHandle) : nullptr;
+}
+
+esp_err_t render_test_http_open(esp_http_client_handle_t handle, int) {
+    if (handle != reinterpret_cast<void *>(kHttpHandle)) return ESP_FAIL;
+    std::unique_lock<std::mutex> lock(g_http_mutex);
+    g_http_blocked = true;
+    g_http_ready.notify_all();
+    g_http_ready.wait(lock, [] { return g_release_http; });
+    g_http_blocked = false;
+    return ESP_OK;
+}
+
+int64_t render_test_http_fetch_headers(esp_http_client_handle_t handle) {
+    return handle == reinterpret_cast<void *>(kHttpHandle)
+               ? static_cast<int64_t>(g_http_body.size())
+               : -1;
+}
+
+int render_test_http_status(esp_http_client_handle_t handle) {
+    return handle == reinterpret_cast<void *>(kHttpHandle) ? 200 : 0;
+}
+
+int render_test_http_read(esp_http_client_handle_t handle, char *out,
+                          size_t length) {
+    if (handle != reinterpret_cast<void *>(kHttpHandle)) return -1;
+    std::lock_guard<std::mutex> lock(g_http_mutex);
+    const size_t left = g_http_body.size() - g_http_offset;
+    const size_t n = std::min(left, length);
+    if (!n) return 0;
+    memcpy(out, g_http_body.data() + g_http_offset, n);
+    g_http_offset += n;
+    return static_cast<int>(n);
+}
+
+esp_err_t render_test_http_cleanup(esp_http_client_handle_t) { return ESP_OK; }
+
+// Allocation failure injection (render_shim/esp_heap_caps.h): every request
+// of exactly g_fail_alloc_size bytes fails while armed.
+static std::atomic<size_t> g_fail_alloc_size{0};
+void *render_test_malloc(size_t n) {
+    if (n && n == g_fail_alloc_size.load()) return nullptr;
+    return malloc(n);
+}
+
 Canvas *sticky_display_canvas() { return g_canvas; }
 esp_err_t sticky_display_init() { return 0; }
 esp_err_t sticky_display_refresh() { return 0; }
 esp_err_t sticky_display_refresh_partial() { return 0; }
-esp_err_t sticky_display_refresh_partial_baseline(const uint8_t *) { return 0; }
+static uint32_t fnv1a(const uint8_t *p, size_t n);
+esp_err_t sticky_display_refresh_partial_baseline(const uint8_t *prev) {
+    ++g_baseline_calls;
+    g_baseline_hash = prev ? fnv1a(prev, g_buf.size()) : 0;
+    return 0;
+}
 esp_err_t sticky_display_refresh_monochrome() {
     ++g_full_refreshes;
     if (g_fail_next_full) {
         g_fail_next_full = false;
         return ESP_FAIL;
+    }
+    std::unique_lock<std::mutex> lock(g_panel_mutex);
+    if (g_block_next_full) {
+        g_block_next_full = false;
+        g_panel_blocked = true;
+        g_panel_ready.notify_all();
+        while (!g_release_panel) {
+            g_panel_ready.wait(lock, [] {
+                return g_release_panel || g_probe_rotation;
+            });
+            if (g_probe_rotation) {
+                g_probe_rotation = false;
+                lock.unlock();
+                const int rotation = tiny_display_rotation();
+                lock.lock();
+                g_rotation_during_block = rotation;
+                g_rotation_probed = true;
+                g_panel_ready.notify_all();
+            }
+        }
+        g_panel_blocked = false;
+        g_release_panel = false;
     }
     return ESP_OK;
 }
@@ -76,11 +198,15 @@ extern "C" esp_err_t tiny_config_gallery_load(void *, size_t, uint8_t *, uint8_t
 extern "C" bool tiny_lock_is_locked(void) { return false; }
 static int g_unread = 0;
 extern "C" int tiny_node_unread(void) { return g_unread; }
-extern "C" esp_err_t tiny_shell_home(void) { return 0; }
-extern "C" esp_err_t tiny_shell_key(const char *) { return 0; }
-extern "C" esp_err_t tiny_shell_nav_back(void) { return 0; }
+// Shell entry points the gesture router dispatches to: recorded so a test can
+// prove WHICH routing policy a swipe took (keyboard vs ordinary card).
+static int g_shell_home_calls = 0, g_shell_back_calls = 0, g_shell_cycle_calls = 0;
+static std::string g_shell_last_key;
+extern "C" esp_err_t tiny_shell_home(void) { ++g_shell_home_calls; return 0; }
+extern "C" esp_err_t tiny_shell_key(const char *k) { g_shell_last_key = k ? k : ""; return 0; }
+extern "C" esp_err_t tiny_shell_nav_back(void) { ++g_shell_back_calls; return 0; }
 extern "C" bool tiny_shell_at_root(void) { return true; }
-extern "C" esp_err_t tiny_shell_cycle(int) { return 0; }
+extern "C" esp_err_t tiny_shell_cycle(int) { ++g_shell_cycle_calls; return 0; }
 extern "C" esp_err_t tiny_shell_universe_push(const char *) { return 0; }
 // A fixed clock so the glance cluster has its widest realistic content.
 extern "C" bool tiny_time_is_synced(void) { return true; }
@@ -284,6 +410,39 @@ int main(int argc, char **argv) {
         }
 
         if (!strcmp(sz.tag, "amoled18-90")) {
+            // Wake-baseline body is persisted RTC text and can contain quotes,
+            // backslashes and controls. The hidden redraw must carry THAT body
+            // (not the consumed, cleared RTC slot) through JSON escaping: the
+            // baseline handed to the driver must equal an explicitly escaped
+            // goodbye card, and two different bodies must differ.
+            const char *wake_body_a = "agent said \"wait\" \\ then\ncontinued";
+            const char *wake_card_a =
+                R"J({"type":"text","title":"zzz","card_id":"sleep","body":"agent said \"wait\" \\ then\ncontinued","footer":"deep sleep - the panel keeps this image at 0 mA"})J";
+            auto wake_baseline_for = [&](const char *body) -> uint32_t {
+                tiny_display_note_sleep_card(body);
+                const int calls = g_baseline_calls;
+                CHECK(tiny_display_arm_wake_baseline() == ESP_OK,
+                      "wake baseline: RTC body renders successfully");
+                CHECK(tiny_display_render_card(
+                          R"J({"type":"text","card_id":"wake-after","title":"awake","body":"ready"})J") == ESP_OK,
+                      "wake baseline: next card consumes baseline");
+                CHECK(g_baseline_calls == calls + 1,
+                      "wake baseline: wake commit uses the diff-partial path");
+                CHECK(!strcmp(tiny_display_current_card_id(), "wake-after"),
+                      "wake baseline: next glass commit is the wake card");
+                return g_baseline_hash;
+            };
+            const uint32_t base_a = wake_baseline_for(wake_body_a);
+            const uint32_t base_b = wake_baseline_for("a different goodbye");
+            CHECK(base_a != base_b,
+                  "wake baseline: body reaches the baseline (bodies differ)");
+            CHECK(tiny_display_render_card(wake_card_a) == ESP_OK,
+                  "wake baseline: explicit escaped goodbye card renders");
+            CHECK(fnv1a(g_buf.data(), g_buf.size()) == base_a,
+                  "wake baseline: equals explicitly escaped goodbye card");
+            CHECK(tiny_display_arm_wake_baseline() == ESP_ERR_INVALID_STATE,
+                  "wake baseline: RTC note is one-shot");
+
             // A failed panel commit must not publish the requested angle as
             // current. tiny_orient compares against this state before calling
             // again; retaining the failed target would suppress every
@@ -304,6 +463,673 @@ int main(int argc, char **argv) {
                   "rotation: successful retry commits target angle");
             CHECK(g_full_refreshes == refreshes + 2,
                   "rotation: retry reaches panel again");
+
+            // Hold one card at the panel boundary, then queue auto-rotation,
+            // a newer card, and a state reader in that order. The complete
+            // cache -> canvas -> panel transaction must stay serialized. The
+            // old partial lock let rotation set s_rerendering before waiting;
+            // the newer card then skipped its cache update, so a later
+            // rerender resurrected the stale card (and the reader observed a
+            // not-yet-committed angle).
+            CHECK(tiny_display_set_rotation(0) == ESP_OK,
+                  "serialization: start at rotation 0");
+            {
+                std::lock_guard<std::mutex> lock(g_panel_mutex);
+                g_block_next_full = true;
+            }
+            std::atomic<int> held_result{ESP_FAIL};
+            std::thread held([&] {
+                held_result = tiny_display_render_card(
+                    R"J({"type":"text","card_id":"race-held","title":"held","body":"first"})J");
+            });
+            {
+                std::unique_lock<std::mutex> lock(g_panel_mutex);
+                CHECK(g_panel_ready.wait_for(lock, std::chrono::seconds(2),
+                                             [] { return g_panel_blocked; }),
+                      "serialization: first render reached blocked panel");
+            }
+            // Baseline is snapshotted only after `held` owns the render lock
+            // and is parked at the panel, so earlier acquisitions (init,
+            // prior cases, held's own) cannot offset it: each ++attempts
+            // below counts exactly one new waiter.
+            int attempts;
+            {
+                std::lock_guard<std::mutex> lock(g_attempt_mutex);
+                attempts = g_render_attempts;
+            }
+            std::atomic<int> rotate_result{ESP_FAIL};
+            std::thread rotate([&] { rotate_result = tiny_display_set_rotation(90); });
+            CHECK(wait_for_attempts(++attempts),
+                  "serialization: rotation waits before state mutation");
+            {
+                std::unique_lock<std::mutex> lock(g_panel_mutex);
+                g_probe_rotation = true;
+                g_panel_ready.notify_all();
+                CHECK(g_panel_ready.wait_for(lock, std::chrono::seconds(2),
+                                             [] { return g_rotation_probed; }),
+                      "serialization: blocked render samples logical angle");
+                CHECK(g_rotation_during_block == 0,
+                      "serialization: angle stays old until panel commit");
+            }
+            std::atomic<int> newer_result{ESP_FAIL};
+            std::thread newer([&] {
+                newer_result = tiny_display_render_card(
+                    R"J({"type":"text","card_id":"race-new","title":"new","body":"second"})J");
+            });
+            CHECK(wait_for_attempts(++attempts),
+                  "serialization: newer card waits before cache mutation");
+            std::atomic<bool> read_done{false};
+            std::atomic<int> observed{-1};
+            std::thread reader([&] {
+                observed = tiny_display_rotation();
+                read_done = true;
+            });
+            CHECK(wait_for_attempts(++attempts),
+                  "serialization: rotation read joins transaction lock");
+            CHECK(!read_done.load(),
+                  "serialization: reader cannot expose uncommitted rotation");
+            {
+                std::lock_guard<std::mutex> lock(g_panel_mutex);
+                g_release_panel = true;
+                g_panel_ready.notify_all();
+            }
+            held.join();
+            rotate.join();
+            newer.join();
+            reader.join();
+            CHECK(held_result == ESP_OK && rotate_result == ESP_OK &&
+                      newer_result == ESP_OK,
+                  "serialization: overlapped render/rotate/render all commit");
+            CHECK(observed == 90 && tiny_display_rotation() == 90,
+                  "serialization: reader sees committed 90-degree angle");
+            CHECK(!strcmp(tiny_display_current_card_id(), "race-new"),
+                  "serialization: newer card is on glass");
+            CHECK(tiny_display_rerender() == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "race-new"),
+                  "serialization: rerender keeps newer cached card");
+
+            // Network bytes are fetched with no render/panel lock held. A newer
+            // card must commit while the image request is blocked, then the
+            // stale image response must be discarded without replacing glass
+            // identity or replay cache.
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_http_body.assign(static_cast<size_t>(sz.w) * sz.h / 4, 0x55);
+                g_hold_http = true;
+                g_http_blocked = false;
+                g_release_http = false;
+            }
+            std::atomic<int> image_result{ESP_OK};
+            std::thread image([&] {
+                image_result = tiny_display_render_card(
+                    R"J({"type":"image","card_id":"race-image","url":"https://example.invalid/frame.raw"})J");
+            });
+            {
+                std::unique_lock<std::mutex> lock(g_http_mutex);
+                CHECK(g_http_ready.wait_for(lock, std::chrono::seconds(2),
+                                            [] { return g_http_blocked; }),
+                      "serialization: image fetch reaches held HTTPS");
+            }
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"race-overtake","title":"newest","body":"wins"})J") == ESP_OK,
+                  "serialization: newer card overtakes held image fetch");
+            CHECK(!strcmp(tiny_display_current_card_id(), "race-overtake"),
+                  "serialization: overtaking card commits to glass");
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_release_http = true;
+                g_http_ready.notify_all();
+            }
+            image.join();
+            CHECK(image_result == ESP_ERR_INVALID_STATE,
+                  "serialization: stale image response is refused");
+            CHECK(!strcmp(tiny_display_current_card_id(), "race-overtake"),
+                  "serialization: stale image cannot overwrite glass");
+            CHECK(tiny_display_rerender() == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "race-overtake"),
+                  "serialization: stale image cannot replace replay cache");
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_hold_http = false;
+                g_release_http = false;
+                g_http_body.clear();
+            }
+
+            // ---- auto-rotation during an active stream ----------------------
+            // Rotation must redraw the live answer (buffered words + caret) in
+            // the new layout and keep the stream alive, not replay the cached
+            // begin frame as an outsider card that ends the stream.
+            auto frame_hash = [&]() {
+                uint32_t h = fnv1a(g_buf.data(), g_buf.size());
+                if (!g_acc.empty()) h ^= fnv1a(g_acc.data(), g_acc.size()) * 31u;
+                return h;
+            };
+            auto rotated_stream_hash = [&](const char *words) -> uint32_t {
+                CHECK(tiny_display_set_rotation(90) == ESP_OK,
+                      "stream: start at rotation 90");
+                CHECK(tiny_display_stream_begin("tiny", "ans", nullptr) == ESP_OK,
+                      "stream: begin");
+                if (words) tiny_display_stream_append(words);
+                CHECK(tiny_display_set_rotation(0) == ESP_OK,
+                      "stream: rotation during stream commits");
+                CHECK(tiny_display_stream_active(),
+                      "stream: rotation does not end the active stream");
+                CHECK(!strcmp(tiny_display_current_card_id(), "ans"),
+                      "stream: rotated frame is the stream card");
+                const uint32_t h = frame_hash();
+                CHECK(tiny_display_stream_end(nullptr) == ESP_OK,
+                      "stream: owner can still end its stream after rotation");
+                CHECK(!tiny_display_stream_active(), "stream: ended");
+                return h;
+            };
+            const uint32_t with_words = rotated_stream_hash("rotated words arrive");
+            const uint32_t without_words = rotated_stream_hash(nullptr);
+            CHECK(with_words != without_words,
+                  "stream: rotation redraws buffered words, not the begin frame");
+
+            // Threaded: while auto-rotation's stream redraw is parked at the
+            // panel, the ask engine's append must wait for render ownership
+            // instead of writing the buffer the redraw is reading.
+            CHECK(tiny_display_set_rotation(90) == ESP_OK,
+                  "stream race: start at rotation 90");
+            CHECK(tiny_display_stream_begin("tiny", "ans2", nullptr) == ESP_OK,
+                  "stream race: begin");
+            tiny_display_stream_append("first words");
+            {
+                std::lock_guard<std::mutex> lock(g_panel_mutex);
+                g_block_next_full = true;
+            }
+            std::atomic<int> srot_result{ESP_FAIL};
+            std::thread srot([&] { srot_result = tiny_display_set_rotation(0); });
+            {
+                std::unique_lock<std::mutex> lock(g_panel_mutex);
+                CHECK(g_panel_ready.wait_for(lock, std::chrono::seconds(2),
+                                             [] { return g_panel_blocked; }),
+                      "stream race: rotation redraw reached blocked panel");
+            }
+            int sattempts;
+            {
+                std::lock_guard<std::mutex> lock(g_attempt_mutex);
+                sattempts = g_render_attempts;
+            }
+            std::atomic<bool> append_done{false};
+            std::thread sappend([&] {
+                tiny_display_stream_append(" then more");
+                append_done = true;
+            });
+            CHECK(wait_for_attempts(++sattempts),
+                  "stream race: append waits for render ownership");
+            CHECK(!append_done.load(),
+                  "stream race: append cannot mutate buffer mid-redraw");
+            {
+                std::lock_guard<std::mutex> lock(g_panel_mutex);
+                g_release_panel = true;
+                g_panel_ready.notify_all();
+            }
+            srot.join();
+            sappend.join();
+            CHECK(srot_result == ESP_OK && tiny_display_stream_active(),
+                  "stream race: rotation commits, stream survives");
+            CHECK(tiny_display_stream_end(nullptr) == ESP_OK,
+                  "stream race: stream ends normally");
+
+            // ---- gallery: staged commit -------------------------------------
+            // 1-bit frames take the monochrome refresh, which can fail/block.
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_http_body.assign(static_cast<size_t>(sz.w) * sz.h / 8, 0xAA);
+                g_hold_http = true;
+                g_release_http = true;   // serve immediately unless re-held
+                g_http_fetches = 0;
+            }
+            auto fetches = [] {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                return g_http_fetches;
+            };
+            auto last_url = [] {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                return g_http_last_url;
+            };
+            const char *gal_a =
+                R"J({"type":"gallery","urls":["https://h/a0.raw","https://h/a1.raw","https://h/a2.raw"],"index":0})J";
+            CHECK(tiny_display_render_card(gal_a) == ESP_OK &&
+                      tiny_display_gallery_count() == 3 &&
+                      last_url() == "https://h/a0.raw",
+                  "gallery: committed set A opens on a0");
+
+            // New set whose panel refresh fails: set A stays the gallery.
+            g_fail_next_full = true;
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"gallery","urls":["https://h/b0.raw","https://h/b1.raw"],"index":0})J") == ESP_FAIL,
+                  "gallery: failed new-set refresh is returned");
+            CHECK(tiny_display_gallery_count() == 3,
+                  "gallery: failed new set keeps committed count");
+            CHECK(tiny_display_gallery_nav(+1) == ESP_OK &&
+                      last_url() == "https://h/a1.raw",
+                  "gallery: next after failed new set pages set A (a1)");
+
+            // Page flip whose refresh fails: logical page stays on glass page.
+            int f0 = fetches();
+            g_fail_next_full = true;
+            CHECK(tiny_display_gallery_nav(+1) == ESP_FAIL &&
+                      last_url() == "https://h/a2.raw" && fetches() == f0 + 1,
+                  "gallery: failed flip to a2 is returned");
+            f0 = fetches();
+            CHECK(tiny_display_gallery_nav(+1) == ESP_OK &&
+                      last_url() == "https://h/a2.raw" && fetches() == f0 + 1,
+                  "gallery: failed flip neither advanced page nor cached a2");
+
+            // Held new-set fetch overtaken by a newer card: set A, page a2,
+            // and its cached frame survive; the stale set is discarded.
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_release_http = false;
+                g_http_blocked = false;
+            }
+            std::atomic<int> gal_result{ESP_OK};
+            std::thread gal([&] {
+                gal_result = tiny_display_render_card(
+                    R"J({"type":"gallery","urls":["https://h/c0.raw","https://h/c1.raw"],"index":1})J");
+            });
+            {
+                std::unique_lock<std::mutex> lock(g_http_mutex);
+                CHECK(g_http_ready.wait_for(lock, std::chrono::seconds(2),
+                                            [] { return g_http_blocked; }),
+                      "gallery race: new-set fetch reaches held HTTPS");
+            }
+            CHECK(tiny_display_gallery_count() == 3,
+                  "gallery race: held fetch has not replaced the set");
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"gal-overtake","title":"newest","body":"wins"})J") == ESP_OK,
+                  "gallery race: newer card overtakes held gallery fetch");
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_release_http = true;
+                g_http_ready.notify_all();
+            }
+            gal.join();
+            CHECK(gal_result == ESP_ERR_INVALID_STATE,
+                  "gallery race: stale gallery response is refused");
+            CHECK(!strcmp(tiny_display_current_card_id(), "gal-overtake"),
+                  "gallery race: stale gallery cannot overwrite glass");
+            CHECK(tiny_display_gallery_count() == 3,
+                  "gallery race: stale set never became the gallery");
+            f0 = fetches();
+            CHECK(tiny_display_gallery_nav(0) == ESP_OK && fetches() == f0 &&
+                      !strcmp(tiny_display_current_card_id(), "gallery"),
+                  "gallery race: reopen shows cached a2 with no fetch");
+            CHECK(tiny_display_gallery_nav(-1) == ESP_OK && fetches() == f0,
+                  "gallery race: prev pages set A (cached a1), not set C");
+
+            // Panel-native gallery commits own no text scroll window: both a
+            // gallery card and a page flip over a long text card must clear
+            // every stale scroll claim once their frame is on glass.
+            auto render_long_text = [](const char *cid) {
+                std::string card = std::string(R"J({"type":"text","card_id":")J") +
+                                   cid + R"J(","title":"long","body":")J";
+                for (int i = 0; i < 80; ++i) card += "overflowing line\\n";
+                card += R"J("})J";
+                return tiny_display_render_card(card.c_str()) == ESP_OK &&
+                       tiny_display_can_scroll();
+            };
+            auto scroll_cleared = [] {
+                int off = -1, content = -1, view = -1;
+                tiny_display_scroll_state(&off, &content, &view);
+                return !tiny_display_can_scroll() && off == 0 && content == 0 &&
+                       view == 0 &&
+                       tiny_display_scroll(40) == ESP_ERR_INVALID_STATE;
+            };
+            CHECK(render_long_text("long-before-gallery") &&
+                      tiny_display_scroll(40) == ESP_OK,
+                  "gallery scroll: long text scrolls");
+            CHECK(tiny_display_render_card(gal_a) == ESP_OK && scroll_cleared(),
+                  "gallery scroll: gallery card clears stale scroll geometry");
+            CHECK(render_long_text("long-before-flip"),
+                  "gallery scroll: long text again");
+            CHECK(tiny_display_gallery_nav(0) == ESP_OK && scroll_cleared(),
+                  "gallery scroll: page flip clears stale scroll geometry");
+            {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_hold_http = false;
+                g_release_http = false;
+                g_http_body.clear();
+            }
+
+            // ---- image identity ---------------------------------------------
+            // A painted image publishes the card_id it was SENT with (the
+            // stream player sends "stream"); "image" only when none is named.
+            const size_t gray4 = static_cast<size_t>(sz.w) * sz.h / 4;
+            const size_t mono = static_cast<size_t>(sz.w) * sz.h / 8;
+            auto serve_http = [&](size_t bytes, bool release) {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_http_body.assign(bytes, 0x55);
+                g_hold_http = true;
+                g_http_blocked = false;
+                g_release_http = release;
+            };
+            auto stop_http = [&] {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_hold_http = false;
+                g_release_http = false;
+                g_http_body.clear();
+            };
+            auto wait_http_blocked = [&] {
+                std::unique_lock<std::mutex> lock(g_http_mutex);
+                return g_http_ready.wait_for(lock, std::chrono::seconds(2),
+                                             [] { return g_http_blocked; });
+            };
+            auto release_http = [&] {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_release_http = true;
+                g_http_ready.notify_all();
+            };
+            // Panel-native commits own no card-layout scroll window. Start
+            // with a genuinely overflowing text card, then prove an image
+            // clears every stale scroll claim when it reaches the glass.
+            std::string long_card =
+                R"J({"type":"text","card_id":"long-before-image","title":"long","body":")J";
+            for (int i = 0; i < 80; ++i) long_card += "overflowing line\\n";
+            long_card += R"J("})J";
+            CHECK(tiny_display_render_card(long_card.c_str()) == ESP_OK &&
+                      tiny_display_can_scroll(),
+                  "panel native: long text establishes scroll state");
+            serve_http(gray4, true);
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"image","card_id":"stream","url":"https://h/id.raw"})J") == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "stream"),
+                  "image identity: requested card_id is published on success");
+            int native_offset = -1, native_content = -1, native_view = -1;
+            tiny_display_scroll_state(&native_offset, &native_content, &native_view);
+            CHECK(!tiny_display_can_scroll() && native_offset == 0 &&
+                      native_content == 0 && native_view == 0,
+                  "panel native: image clears stale scroll geometry");
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"image","url":"https://h/id2.raw"})J") == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "image"),
+                  "image identity: unnamed image falls back to \"image\"");
+            stop_http();
+
+            // ---- replacement during a stream is a glass transaction ---------
+            // A replacing card that never lands (malformed, failed refresh,
+            // failed fetch) leaves the stream frame on glass, so it must
+            // leave the stream alive with its words; one that lands ends it.
+            CHECK(tiny_display_set_rotation(0) == ESP_OK,
+                  "stream replace: start at rotation 0");
+            CHECK(tiny_display_stream_begin("tiny", "ansR", nullptr) == ESP_OK,
+                  "stream replace: begin");
+            tiny_display_stream_append("kept words");
+            CHECK(tiny_display_render_card("{\"type\":\"text\",") == ESP_ERR_INVALID_ARG,
+                  "stream replace: malformed outsider refused");
+            CHECK(tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansR"),
+                  "stream replace: malformed outsider leaves stream live");
+            g_fail_next_full = true;
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"rep-fail","title":"x","body":"y"})J") == ESP_FAIL,
+                  "stream replace: failed outsider refresh returned");
+            CHECK(tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansR"),
+                  "stream replace: failed outsider commit leaves stream live");
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"image","card_id":"rep-img","url":"https://h/none.raw"})J") != ESP_OK,
+                  "stream replace: failed outsider fetch returned");
+            CHECK(tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansR"),
+                  "stream replace: failed outsider fetch leaves stream live");
+            // The live stream still owns rotation: its words, not a frame.
+            CHECK(tiny_display_set_rotation(90) == ESP_OK &&
+                      tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansR"),
+                  "stream replace: surviving stream redraws on rotation");
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"rep-ok","title":"x","body":"y"})J") == ESP_OK,
+                  "stream replace: landing outsider commits");
+            CHECK(!tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "rep-ok"),
+                  "stream replace: landed outsider ends stream");
+
+            // Owner ends the answer while an outsider is still fetching. The
+            // end defers behind it; when the outsider then fails at the panel
+            // the stream's closing frame is painted and the stream is over.
+            CHECK(tiny_display_stream_begin("tiny", "ansD", nullptr) == ESP_OK,
+                  "stream defer: begin");
+            tiny_display_stream_append("answer");
+            serve_http(mono, false);
+            std::atomic<int> dimg{ESP_OK};
+            std::thread dthr([&] {
+                dimg = tiny_display_render_card(
+                    R"J({"type":"image","card_id":"d-img","url":"https://h/d.raw"})J");
+            });
+            CHECK(wait_http_blocked(), "stream defer: outsider fetch held");
+            CHECK(tiny_display_stream_end(nullptr) == ESP_OK,
+                  "stream defer: owner end returns while outsider in flight");
+            CHECK(tiny_display_stream_active(),
+                  "stream defer: stream still owns glass during outsider fetch");
+            g_fail_next_full = true;
+            release_http();
+            dthr.join();
+            stop_http();
+            CHECK(dimg == ESP_FAIL, "stream defer: outsider panel failure returned");
+            CHECK(!tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansD"),
+                  "stream defer: closing frame painted after outsider fails");
+
+            // ---- cache allocation failure -----------------------------------
+            // The new card lands but no replay copy could be made: replay is
+            // CLEARED, so rotation cannot resurrect the previous card.
+            const char *oom_a =
+                R"J({"type":"text","card_id":"oom-a","title":"a","body":"first"})J";
+            const char *oom_b =
+                R"J({"type":"text","card_id":"oom-b","title":"b","body":"second card, cache-less"})J";
+            CHECK(tiny_display_render_card(oom_a) == ESP_OK,
+                  "cache oom: previous card cached");
+            g_fail_alloc_size = strlen(oom_b) + 1;
+            CHECK(tiny_display_render_card(oom_b) == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "oom-b"),
+                  "cache oom: new card commits without a replay copy");
+            g_fail_alloc_size = 0;
+            CHECK(tiny_display_rerender() == ESP_ERR_INVALID_STATE &&
+                      !strcmp(tiny_display_current_card_id(), "oom-b"),
+                  "cache oom: rerender refuses instead of resurrecting oom-a");
+            CHECK(tiny_display_set_rotation(0) == ESP_OK &&
+                      strcmp(tiny_display_current_card_id(), "oom-a") != 0,
+                  "cache oom: rotation never replays the previous card");
+            CHECK(!tiny_display_can_scroll(),
+                  "cache oom: no replay means no scroll over stale spec");
+
+            // ---- raw blit is a display transaction -------------------------
+            // A raw frame is newer than an in-flight media fetch and must
+            // invalidate that fetch's epoch. It also replaces a text stream
+            // only after its own panel refresh succeeds.
+            std::vector<uint8_t> raw_blit(mono, 0x00);
+            serve_http(gray4, false);
+            std::atomic<int> before_blit{ESP_OK};
+            std::thread old_media([&] {
+                before_blit = tiny_display_render_card(
+                    R"J({"type":"image","card_id":"before-blit","url":"https://h/old.raw"})J");
+            });
+            CHECK(wait_http_blocked(), "blit epoch: older image fetch held");
+            CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "blit"),
+                  "blit epoch: newer raw frame commits");
+            release_http();
+            old_media.join();
+            stop_http();
+            CHECK(before_blit == ESP_ERR_INVALID_STATE &&
+                      !strcmp(tiny_display_current_card_id(), "blit"),
+                  "blit epoch: older media response cannot overwrite raw frame");
+
+            CHECK(tiny_display_stream_begin("tiny", "ansB", nullptr) == ESP_OK,
+                  "blit stream: begin");
+            tiny_display_stream_append("raw replacement waits for glass");
+            g_fail_next_full = true;
+            CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_FAIL &&
+                      tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansB"),
+                  "blit stream: failed raw refresh keeps text stream live");
+            CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_OK &&
+                      !tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "blit"),
+                  "blit stream: committed raw frame retires text stream");
+            {
+                std::string card =
+                    R"J({"type":"text","card_id":"long-before-blit","title":"long","body":")J";
+                for (int i = 0; i < 80; ++i) card += "overflowing line\\n";
+                card += R"J("})J";
+                CHECK(tiny_display_render_card(card.c_str()) == ESP_OK &&
+                          tiny_display_can_scroll(),
+                      "blit scroll: long text scrolls");
+                CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_OK,
+                      "blit scroll: raw frame commits");
+                int off = -1, content = -1, view = -1;
+                tiny_display_scroll_state(&off, &content, &view);
+                CHECK(!tiny_display_can_scroll() && off == 0 && content == 0 &&
+                          view == 0 &&
+                          tiny_display_scroll(40) == ESP_ERR_INVALID_STATE,
+                      "blit scroll: raw frame clears stale scroll geometry");
+            }
+
+            // ---- raw blit commits card TYPE with identity -------------------
+            // Gesture policy follows what is on glass. After a keyboard, a
+            // committed raw frame must route swipes as an ordinary card
+            // (home / back / page flip); a FAILED raw frame leaves the
+            // keyboard on glass, so keyboard policy must survive it.
+            {
+                struct Routed { std::string key; int home, back, cycle; esp_err_t r; };
+                // Swipe in the canvas's CURRENT logical frame, delivered in
+                // panel coordinates exactly like the touch task does.
+                auto swipe = [&](double fx0, double fy0, double fx1, double fy1) {
+                    Canvas *cv = sticky_display_canvas();
+                    const int W = cv->width(), H = cv->height();
+                    int px0, py0, px1, py1;
+                    cv->to_physical((int)(fx0 * W), (int)(fy0 * H), px0, py0);
+                    cv->to_physical((int)(fx1 * W), (int)(fy1 * H), px1, py1);
+                    g_shell_last_key.clear();
+                    const int h0 = g_shell_home_calls, b0 = g_shell_back_calls,
+                              c0 = g_shell_cycle_calls;
+                    const esp_err_t r = tiny_display_scroll_gesture(px0, py0, px1, py1);
+                    return Routed{g_shell_last_key, g_shell_home_calls - h0,
+                                  g_shell_back_calls - b0,
+                                  g_shell_cycle_calls - c0, r};
+                };
+                // bottom band up, left band right, mid-content leftward flip
+                auto bottom_up = [&] { return swipe(0.5, 0.98, 0.5, 0.40); };
+                auto left_back = [&] { return swipe(0.02, 0.5, 0.70, 0.5); };
+                auto page_flip = [&] { return swipe(0.75, 0.5, 0.25, 0.5); };
+                const char *kb_card =
+                    R"J({"type":"keyboard","card_id":"kb-blit","title":"pw","value":"abc"})J";
+                auto expect_keyboard_policy = [&](const char *tag) {
+                    Routed u = bottom_up();
+                    CHECK(u.key == "k:cancel" && u.home == 0,
+                          "%s: bottom-up is keyboard cancel (key=%s home=%d)", tag,
+                          u.key.c_str(), u.home);
+                    Routed b = left_back();
+                    CHECK(b.r == ESP_ERR_NOT_ALLOWED && b.back == 0,
+                          "%s: left-band back refused over draft (r=%d back=%d)",
+                          tag, b.r, b.back);
+                    Routed p = page_flip();
+                    CHECK(p.r == ESP_ERR_NOT_SUPPORTED && p.cycle == 0,
+                          "%s: page flip silenced over draft (r=%d cycle=%d)",
+                          tag, p.r, p.cycle);
+                };
+                CHECK(tiny_display_render_card(kb_card) == ESP_OK,
+                      "kb->blit: keyboard commits");
+                // Rotated glass: a failed raw frame (pinned landscape while
+                // drawing) must hand the keyboard's touch frame back.
+                CHECK(tiny_display_set_rotation(90) == ESP_OK &&
+                          tiny_display_rotation() == 90 &&
+                          !strcmp(tiny_display_current_card_id(), "kb-blit"),
+                      "kb->blit: keyboard re-renders at 90 deg");
+                expect_keyboard_policy("kb->blit baseline");
+
+                g_fail_next_full = true;
+                CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_FAIL &&
+                          !strcmp(tiny_display_current_card_id(), "kb-blit"),
+                      "kb->blit: failed raw frame keeps keyboard on glass");
+                // Same logical frame as the keyboard: the failed blit must
+                // hand the canvas rotation back (no test-side fix-up).
+                CHECK(static_cast<int>(sticky_display_canvas()->rotation()) * 90 ==
+                          tiny_display_rotation(),
+                      "kb->blit: failed raw frame restores the touch frame");
+                expect_keyboard_policy("kb->failed blit");
+
+                CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_OK &&
+                          !strcmp(tiny_display_current_card_id(), "blit"),
+                      "kb->blit: raw frame commits");
+                Routed u = bottom_up();
+                CHECK(u.key.empty() && u.home == 1 && u.r == ESP_OK,
+                      "kb->blit: bottom-up goes home, not keyboard cancel (key=%s home=%d)",
+                      u.key.c_str(), u.home);
+                Routed b = left_back();
+                CHECK(b.r == ESP_OK && b.back == 1,
+                      "kb->blit: left-band back navigates (r=%d back=%d)", b.r, b.back);
+                Routed p = page_flip();
+                CHECK(p.r == ESP_OK && p.cycle == 1,
+                      "kb->blit: horizontal swipe flips the page (r=%d cycle=%d)",
+                      p.r, p.cycle);
+                CHECK(tiny_display_set_rotation(0) == ESP_OK,
+                      "kb->blit: rotation back to 0 for later cases");
+            }
+
+            // ---- structured stream finale over HTTPS ------------------------
+            // Successful image finale: requested identity, stream retired.
+            CHECK(tiny_display_stream_begin("tiny", "ansF", nullptr) == ESP_OK,
+                  "finale: begin");
+            serve_http(gray4, true);
+            CHECK(tiny_display_stream_end(
+                      R"J({"type":"image","card_id":"fin-img","url":"https://h/f.raw"})J") == ESP_OK,
+                  "finale: image finale paints");
+            CHECK(!tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "fin-img"),
+                  "finale: image finale owns glass with its card_id");
+            stop_http();
+
+            // Held finale fetch: stream_end holds NO render ownership across
+            // HTTPS, so a newer card commits meanwhile; the stale finale is
+            // then refused and cannot overwrite it.
+            CHECK(tiny_display_stream_begin("tiny", "ansH", nullptr) == ESP_OK,
+                  "finale race: begin");
+            tiny_display_stream_append("words before the card");
+            serve_http(gray4, false);
+            std::atomic<int> fin{ESP_OK};
+            std::thread fthr([&] {
+                fin = tiny_display_stream_end(
+                    R"J({"type":"image","card_id":"fin-stale","url":"https://h/s.raw"})J");
+            });
+            CHECK(wait_http_blocked(), "finale race: final image fetch held");
+            std::atomic<int> newer_fin{ESP_FAIL};
+            std::atomic<bool> newer_done{false};
+            std::thread nthr([&] {
+                newer_fin = tiny_display_render_card(
+                    R"J({"type":"text","card_id":"after-fin","title":"n","body":"newest"})J");
+                newer_done = true;
+            });
+            for (int i = 0; i < 200 && !newer_done.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            CHECK(newer_done.load() && newer_fin == ESP_OK,
+                  "finale race: newer card commits during held finale fetch");
+            CHECK(!strcmp(tiny_display_current_card_id(), "after-fin") &&
+                      !tiny_display_stream_active(),
+                  "finale race: newer card owns glass, stream retired");
+            release_http();
+            fthr.join();
+            nthr.join();
+            stop_http();
+            CHECK(fin == ESP_ERR_INVALID_STATE,
+                  "finale race: stale finale refused");
+            CHECK(!strcmp(tiny_display_current_card_id(), "after-fin") &&
+                      tiny_display_rerender() == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "after-fin"),
+                  "finale race: stale finale overwrote neither glass nor replay");
+
+            // Malformed finale still ends the answer (as its text frame).
+            CHECK(tiny_display_stream_begin("tiny", "ansX", nullptr) == ESP_OK,
+                  "finale malformed: begin");
+            CHECK(tiny_display_stream_end("{\"type\":") == ESP_ERR_INVALID_ARG,
+                  "finale malformed: refusal returned");
+            CHECK(!tiny_display_stream_active() &&
+                      !strcmp(tiny_display_current_card_id(), "ansX"),
+                  "finale malformed: closing text frame painted, stream over");
         }
     }
 
