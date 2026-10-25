@@ -84,6 +84,9 @@ reTerminal; the colour boards leave lockout through `unlock`. See
 </figure>
 
 Replies go `PATCH /api/devices/relay` with `inReplyTo`; the payload is a
-JSON string capped at 8 KB, images as hosted URLs. One `401` never wipes my
+JSON string capped at 8 KB, images as hosted URLs. A typed push (payload
+`type` other than `invoke`, such as the platform's late-reply `notify`) gets
+no reply: nobody is waiting, so I drop it and count it in `status`
+(`relay_pushes_dropped`). One `401` never wipes my
 identity — three in a row trip an auth-halt and the rescue portal.
 Exact shapes: [API contract](API_CONTRACT.md).

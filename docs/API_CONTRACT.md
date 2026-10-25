@@ -23,8 +23,8 @@ Third person; contracts don't do voices. Base URL from config (`api`, default
 | route | when | body (besides `deviceId`,`token`) | reply |
 |---|---|---|---|
 | `POST /api/devices/heartbeat` | every 30 s, ~60 s idle | `capabilities[]` = exactly what dispatches; `wantUnread:"1"` opt-in | `{ok}`; `unread` rides the beat when asked |
-| `PUT /api/devices/relay` | poll: 5 s active, 60 s after two quiet minutes | `max:5` | `{messages:[{id, payload:"<string>"}]}` — execute in order; unknown verb → help text |
-| `PATCH /api/devices/relay` | one per envelope | `inReplyTo`, `payload:"<string ≤ 8000 B>"` → `{result[, images:[{url,format}]]}` | ack |
+| `PUT /api/devices/relay` | poll: 5 s active, 60 s after two quiet minutes | `max:5` | `{messages:[{id, payload:"<string>"}]}` — execute in order; unknown verb → help text. Delivered once: an envelope a poll returned is never returned again, PATCHed or not |
+| `PATCH /api/devices/relay` | one per invoke envelope; none for a typed push (`type` ≠ `invoke`, e.g. late-reply `notify`), since v26 | `inReplyTo`, `payload:"<string ≤ 8000 B>"` → `{result[, images:[{url,format}]]}` | ack |
 | `POST /api/media` | screenshot, voice WAV | `data:<base64>`, `contentType` | `{url}` on **plugin.tiny.technology** — a different host, which matters for OTA pinning |
 | `POST /api/devices/ask` | `ask`, `voice`, AI button | `text` **or** `audioUrl`; `tiny:"<slug>"` when an agent is chosen | `{text, card?}` — the owner's **full** agent turn. Node runtime, not Edge (25 s first-byte 504'd long turns) |
 | `POST /api/devices/transcript` | after every ask | `text`, `label:"sticky-ask"`, `audioUrl`, `durationS` | durable record |

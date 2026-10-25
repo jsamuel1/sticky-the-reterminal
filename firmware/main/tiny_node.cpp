@@ -856,6 +856,9 @@ static bool cadence_idle(void);
 // Defined here (not with the cadence statics below) because build_status
 // reads it; ACTIVE_WINDOW_US rides along for the same reason.
 static int s_idle_at_envelope_s = 0;
+// Typed platform pushes dropped by poll_relay (status v26).
+static uint32_t s_relay_pushes_dropped = 0;
+static char s_relay_last_push_type[24] = "";
 #define ACTIVE_WINDOW_US (2 * 60 * 1000000LL)
 
 // ---------- status: ONE source of truth ----------
@@ -956,6 +959,12 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     cJSON_AddStringToObject(s, "cadence_at_poll",
                             s_idle_at_envelope_s > ACTIVE_WINDOW_US / 1000000
                                 ? "idle-60s" : "active-5s");
+    // v26: typed platform pushes (late-reply "notify" etc.) dropped unanswered
+    // since boot, and the last one's type. A climbing count names a flood
+    // without a serial cable.
+    cJSON_AddNumberToObject(s, "relay_pushes_dropped", (double)s_relay_pushes_dropped);
+    if (s_relay_last_push_type[0])
+        cJSON_AddStringToObject(s, "relay_last_push", s_relay_last_push_type);
     // P0-BOUNCE flight recorder: the stage the PREVIOUS boot reached (9 =
     // clean through validity mark; anything less names where it died).
     cJSON_AddNumberToObject(s, "boot_mark_prev", tiny_bootmark_prev());
@@ -2821,17 +2830,23 @@ static void poll_relay(char *resp, int cap) {
     cJSON_ArrayForEach(m, msgs) {
         const cJSON *id = cJSON_GetObjectItem(m, "id");
         if (!cJSON_IsString(id)) continue;
-        // payload arrives as a SERIALIZED JSON STRING (the sender does
-        // JSON.stringify) — Nicla's json.loads(msg["payload"]) is the
-        // reference. Tolerate a nested object too, in case that changes.
         const cJSON *payload = cJSON_GetObjectItem(m, "payload");
-        cJSON *inner = NULL;
-        const cJSON *prompt = NULL;
-        if (cJSON_IsString(payload)) {
-            inner = cJSON_Parse(payload->valuestring);
-            if (inner) prompt = cJSON_GetObjectItem(inner, "prompt");
-        } else if (cJSON_IsObject(payload)) {
-            prompt = cJSON_GetObjectItem(payload, "prompt");
+        char *prompt = NULL;
+        char ptype[24];
+        const tiny_envelope_kind_t kind =
+            tiny_envelope_classify(payload, &prompt, ptype, sizeof ptype);
+        if (kind == TINY_ENVELOPE_PUSH) {
+            // A typed platform push (the late-reply "notify" fanned out to
+            // every enrolled device, for one) has no sender waiting on a
+            // reply. Answering each with a ~3 s TLS PATCH let a burst of them
+            // hold every real verb behind it for minutes, and snapping the
+            // cadence kept a flooded board awake. So: no PATCH, no activity
+            // snap. Delivery is delivered-once, so nothing stays queued.
+            s_relay_pushes_dropped++;
+            strlcpy(s_relay_last_push_type, ptype, sizeof s_relay_last_push_type);
+            ESP_LOGI(TAG, "envelope %s: %s push dropped (no reply owed, %lu so far)",
+                     id->valuestring, ptype, (unsigned long)s_relay_pushes_dropped);
+            continue;
         }
         // Observer effect: the status verb rides an envelope,
         // and this very line snaps the cadence to active — so build_status()
@@ -2841,9 +2856,10 @@ static void poll_relay(char *resp, int cap) {
         s_idle_at_envelope_s =
             (int)((esp_timer_get_time() - s_last_activity_us) / 1000000);
         note_activity();  // an envelope is a conversation: stay in 5s cadence
-        if (cJSON_IsString(prompt))
-            dispatch(id->valuestring, prompt->valuestring);
-        else {
+        if (kind == TINY_ENVELOPE_INVOKE) {
+            dispatch(id->valuestring, prompt);
+            free(prompt);
+        } else {
             // Name what arrived: the reply alone cannot identify a client that
             // floods the queue with prompt-less messages. Values under
             // credential-looking keys are redacted (tiny_envelope.cpp).
@@ -2860,7 +2876,6 @@ static void poll_relay(char *resp, int cap) {
                      id->valuestring, keys, why);
             reply(id->valuestring, "unparseable envelope (no prompt) - never silence");
         }
-        if (inner) cJSON_Delete(inner);
     }
     cJSON_Delete(root);
 }

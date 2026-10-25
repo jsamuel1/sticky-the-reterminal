@@ -57,6 +57,32 @@ for needle in ("nothing staged", "OTA staged"):
     check(f"replies containing {needle!r} covered", n_tab >= n_src, True)
 
 
+# --- status timeout diagnosis ------------------------------------------------
+NOW = 1_000_000
+r = op.status_timeout_reason({"name": "tiny-eba6", "online": True, "last_seen": NOW - 20}, 180, NOW)
+check("heartbeating board with silent relay = backlogged", "relay backlogged" in r, True)
+r = op.status_timeout_reason({"name": "tiny-eba6", "online": False, "last_seen": NOW - 900}, 180, NOW)
+check("stale board = asleep/offline", ("backlogged" in r, "asleep or offline" in r), (False, True))
+r = op.status_timeout_reason({"name": "tiny-eba6", "online": True}, 60, NOW)
+check("no last_seen is not called a backlog", "backlogged" in r, False)
+
+
+class SilentApi:
+    """Online, heartbeating board whose relay never answers."""
+    waits = []
+
+    def __init__(self, token):
+        pass
+
+    def resolve(self, dev):
+        return {"id": "4e6ed293-0000", "name": "tiny-eba6", "online": True,
+                "last_seen": int(__import__("time").time()) - 10}
+
+    def status(self, dev_id, wait_s=180):
+        type(self).waits.append(wait_s)
+        return None
+
+
 # --- offline configured board + same-commit override ------------------------
 class OfflineApi:
     def __init__(self, token):
@@ -134,6 +160,28 @@ with tempfile.TemporaryDirectory() as td:
                      "--device", "4e6ed293-0000", "--board-override"])
     check("same-commit override exits success after guard", code, 0)
     check("same-commit override sends OTA probe", OverrideApi.sent, True)
+
+    # A silent relay on a live board fails naming the backlog, and
+    # --status-wait reaches the pre-status probe.
+    op.Api = SilentApi
+    import contextlib
+    import io
+    buf = io.StringIO()
+    old = sys.argv
+    sys.argv = ["ota_push.py", "--board", "fnk0104s", "--sha", sha,
+                "--image", os.path.join(td, "own.bin"), "--device", "4e6ed293-0000",
+                "--status-wait", "7"]
+    try:
+        with contextlib.redirect_stdout(buf):
+            op.main()
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    finally:
+        sys.argv = old
+    check("silent relay exits non-zero", bool(code), True)
+    check("--status-wait reaches the probe", SilentApi.waits, [7])
+    check("silent relay error names the backlog", "relay backlogged" in buf.getvalue(), True)
 
 if fails:
     print(f"ota_push cases: {fails} failed")

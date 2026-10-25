@@ -85,6 +85,69 @@ int main() {
     // ...and benign fields keep their values in the preview.
     describe_json(R"({"payload":{"type":"t","monkey":"banana","apiKey":"SEKRIT6"}})", d, sizeof d);
     expect(strstr(d, "banana") && !strstr(d, "SEKRIT"), "benign kept, apiKey redacted", d);
+
+    // ---- classify: which envelopes run, which are dropped, which are answered ----
+    struct Case {
+        const char *msg;
+        tiny_envelope_kind_t want;
+        const char *prompt;  // INVOKE: expected prompt
+        const char *type;    // PUSH: expected type
+        const char *what;
+    };
+    const Case cases[] = {
+        // The 2026-10-25 flood, verbatim shape: a late-reply notify push.
+        {R"({"payload":"{\"type\":\"notify\",\"title\":\"\ud83d\udcbb ip-10-0-3-99 finished\",\"body\":\"x\",\"tag\":\"t\",\"url\":\"/u\"}"})",
+         TINY_ENVELOPE_PUSH, nullptr, "notify", "notify push (string payload) dropped"},
+        {R"({"payload":{"type":"notify","title":"hi"}})", TINY_ENVELOPE_PUSH, nullptr,
+         "notify", "notify push (object payload) dropped"},
+        // A push never runs, even when it carries a prompt.
+        {R"({"payload":"{\"type\":\"notify\",\"prompt\":\"sleep\"}"})", TINY_ENVELOPE_PUSH,
+         nullptr, "notify", "push with a prompt is not run"},
+        {R"({"payload":"{\"type\":\"device_task_result\"}"})", TINY_ENVELOPE_PUSH, nullptr,
+         "device_task_r", "other push type, type truncated to buffer"},
+        // Invokes: the sender's real shape, and older senders without a type.
+        {R"({"payload":"{\"type\":\"invoke\",\"prompt\":\"status\"}"})", TINY_ENVELOPE_INVOKE,
+         "status", nullptr, "invoke string payload"},
+        {R"({"payload":{"prompt":"say hi"}})", TINY_ENVELOPE_INVOKE, "say hi", nullptr,
+         "untyped object payload with prompt"},
+        // Somebody may be waiting: these are answered, never dropped.
+        {R"({"payload":"{\"type\":\"invoke\"}"})", TINY_ENVELOPE_REJECT, nullptr, nullptr,
+         "invoke without prompt answered"},
+        {R"({"payload":{"type":"invoke","prompt":7}})", TINY_ENVELOPE_REJECT, nullptr, nullptr,
+         "non-string prompt answered"},
+        {R"({"payload":{"type":5,"prompt":"status"}})", TINY_ENVELOPE_REJECT, nullptr, nullptr,
+         "non-string type answered, not run"},
+        {R"({"payload":"not json"})", TINY_ENVELOPE_REJECT, nullptr, nullptr,
+         "unparseable string answered"},
+        {R"({"payload":"[1]"})", TINY_ENVELOPE_REJECT, nullptr, nullptr, "array answered"},
+        {R"({"payload":null})", TINY_ENVELOPE_REJECT, nullptr, nullptr, "null answered"},
+        {R"({"id":"a"})", TINY_ENVELOPE_REJECT, nullptr, nullptr, "missing payload answered"},
+    };
+    for (const Case &c : cases) {
+        cJSON *m = cJSON_Parse(c.msg);
+        assert(m);
+        char *prompt = reinterpret_cast<char *>(1);
+        char type[14];
+        memset(type, 'X', sizeof type);
+        const tiny_envelope_kind_t k =
+            tiny_envelope_classify(cJSON_GetObjectItem(m, "payload"), &prompt, type, sizeof type);
+        bool ok = k == c.want;
+        if (c.want == TINY_ENVELOPE_INVOKE) ok = ok && prompt && !strcmp(prompt, c.prompt);
+        else ok = ok && prompt == nullptr;
+        if (c.want == TINY_ENVELOPE_PUSH) ok = ok && !strcmp(type, c.type);
+        else ok = ok && type[0] == 0;
+        expect(ok, c.what, k == TINY_ENVELOPE_PUSH ? type : prompt ? prompt : "(none)");
+        if (k == TINY_ENVELOPE_INVOKE) free(prompt);
+        cJSON_Delete(m);
+    }
+    // NULL out-params are allowed.
+    {
+        cJSON *m = cJSON_Parse(R"({"payload":{"type":"notify"}})");
+        expect(tiny_envelope_classify(cJSON_GetObjectItem(m, "payload"), nullptr, nullptr, 0) ==
+                   TINY_ENVELOPE_PUSH,
+               "classify with NULL out-params", "");
+        cJSON_Delete(m);
+    }
     puts("envelope host test: ALL GREEN");
     return 0;
 }
