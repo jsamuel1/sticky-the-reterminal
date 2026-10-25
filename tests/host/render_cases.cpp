@@ -12,6 +12,7 @@
 //     dark AMOLED), land in $RENDER_OUT for the PR / card evidence.
 //
 // Usage: render_test <golden-file> [--update]
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -19,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -28,10 +30,14 @@
 #include <zlib.h>
 
 #include "esp_http_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"   // render_test_recursive_held
 #include "canvas.h"
 #include "lcd_palette.h"
 #include "tiny/tiny_display.h"
 #include "tiny/tiny_rotation.h"
+#include "tiny/tiny_universe_card.h"
+#include <sys/stat.h>
 
 // ---- the panel: a host Canvas the renderer draws into -----------------------
 static Canvas *g_canvas = nullptr;
@@ -69,6 +75,26 @@ void render_test_render_mutex_attempt() {
     std::lock_guard<std::mutex> lock(g_attempt_mutex);
     ++g_render_attempts;
     g_attempt_ready.notify_all();
+}
+
+// Rendezvous seams (TINY_DISPLAY_SEAM in tiny_display.cpp): a test arms one
+// hook for one named point; it runs once there.
+static std::mutex g_seam_mutex;
+static std::string g_seam_point;
+static std::function<void()> g_seam_hook;
+void render_shim_seam(const char *point) {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(g_seam_mutex);
+        if (!g_seam_hook || g_seam_point != point) return;
+        hook.swap(g_seam_hook);
+    }
+    hook();
+}
+static void arm_seam(const char *point, std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(g_seam_mutex);
+    g_seam_point = point;
+    g_seam_hook = std::move(hook);
 }
 
 static bool wait_for_attempts(int count) {
@@ -191,10 +217,113 @@ int sticky_display_brightness() { return -1; }
 esp_err_t sticky_battery_read(BatteryReading &) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t sticky_buzzer_beep() { return 0; }
 esp_err_t sticky_buzzer_beep_double() { return 0; }
-extern "C" esp_err_t sticky_sdcard_ensure(void) { return ESP_ERR_NOT_FOUND; }
+// SD card: absent unless a case inserts it; then the stores write under the
+// scratch STICKY_SD_MOUNT_POINT (render_shim.h, emptied by the harness).
+static bool g_sd_present = false;
+extern "C" esp_err_t sticky_sdcard_ensure(void) {
+    if (!g_sd_present) return ESP_ERR_NOT_FOUND;
+    mkdir(STICKY_SD_MOUNT_POINT, 0775);
+    return ESP_OK;
+}
 extern "C" int tiny_askq_count(void) { return 0; }
 static char g_agent[TINY_AGENT_SLUG_MAX + 1] = "";
 extern "C" const char *tiny_agent_current(void) { return g_agent; }
+// Roster as the universe push commits it (tiny_agent's own rules and its NVS
+// atomicity are agent_host_test.sh's business; here: what the page lists,
+// and what the renderer does when the one roster write is refused).
+static std::vector<std::string> g_roster = {"tiny"};
+extern "C" int tiny_agent_roster(char out[][TINY_AGENT_SLUG_MAX + 1], int max) {
+    int n = 0;
+    for (const auto &r : g_roster) {
+        if (n >= max) break;
+        strlcpy(out[n++], r.c_str(), TINY_AGENT_SLUG_MAX + 1);
+    }
+    return n;
+}
+extern "C" void tiny_agent_roster_snapshot(tiny_agent_roster_t *out) {
+    memset(out, 0, sizeof *out);
+    strlcpy(out->active, g_agent, sizeof out->active);
+    out->n = tiny_agent_roster(out->slugs, TINY_AGENT_ROSTER_MAX);
+}
+// Preview = the stub's add rule on a copy (tiny_agent's own preview/add
+// equivalence is agent_host_test.sh's business). The stub refuses what the
+// real one refuses for the cases the renderer tests send — empty, >64
+// chars, space/quote/backslash/control — so a refusal reaches the renderer.
+extern "C" esp_err_t tiny_agent_roster_preview_add(tiny_agent_roster_t *r,
+                                                   const char *slug) {
+    if (!r || !slug) return ESP_ERR_INVALID_ARG;
+    const size_t len = strlen(slug);
+    if (len > TINY_AGENT_SLUG_MAX) return ESP_ERR_INVALID_SIZE;
+    if (!len) return ESP_ERR_INVALID_ARG;
+    for (size_t i = 0; i < len; ++i)
+        if (slug[i] == '"' || slug[i] == '\\' || (unsigned char)slug[i] < 0x21)
+            return ESP_ERR_INVALID_ARG;
+    for (int i = 0; i < r->n; ++i) if (!strcmp(r->slugs[i], slug)) return ESP_OK;
+    if (r->n >= TINY_AGENT_ROSTER_MAX) {   // full: drop row 1, keep the seed
+        memmove(&r->slugs[1], &r->slugs[2], sizeof r->slugs[0] * (r->n - 2));
+        --r->n;
+    }
+    strlcpy(r->slugs[r->n++], slug, TINY_AGENT_SLUG_MAX + 1);
+    return ESP_OK;
+}
+extern "C" bool tiny_agent_roster_has(const tiny_agent_roster_t *r,
+                                      const char *slug) {
+    for (int i = 0; r && slug && i < r->n; ++i)
+        if (!strcmp(r->slugs[i], slug)) return true;
+    return false;
+}
+extern "C" const char *tiny_agent_err_name(esp_err_t err) {
+    return esp_err_to_name(err);
+}
+// The one roster write a universe commit makes. g_roster_commit_fail makes
+// the next one return that error (an NVS refusal) and change nothing; the
+// base check is the real one's compare-and-set.
+static int g_roster_commits = 0;
+static esp_err_t g_roster_commit_fail = ESP_OK;
+extern "C" esp_err_t tiny_agent_roster_commit(const tiny_agent_roster_t *base,
+                                              const tiny_agent_roster_t *next) {
+    ++g_roster_commits;
+    if (g_roster_commit_fail != ESP_OK) {
+        const esp_err_t e = g_roster_commit_fail;
+        g_roster_commit_fail = ESP_OK;
+        return e;
+    }
+    tiny_agent_roster_t live;
+    tiny_agent_roster_snapshot(&live);
+    bool same = live.n == base->n && !strcmp(live.active, base->active);
+    for (int i = 0; same && i < live.n; ++i)
+        same = !strcmp(live.slugs[i], base->slugs[i]);
+    if (!same) return ESP_ERR_INVALID_STATE;
+    g_roster.assign(next->slugs, next->slugs + next->n);
+    return ESP_OK;
+}
+
+// cJSON allocation failure injection (cJSON_InitHooks): while armed, the
+// g_cjson_fail_at-th cJSON allocation after arming returns NULL. cJSON is
+// the device's own allocator path for every parse, build and print.
+static std::atomic<long> g_cjson_allocs{0};
+static std::atomic<long> g_cjson_fail_at{0};
+static std::atomic<bool> g_cjson_failed{false};
+static void *cjson_test_malloc(size_t n) {
+    const long k = ++g_cjson_allocs;
+    if (g_cjson_fail_at > 0 && k == g_cjson_fail_at) {
+        g_cjson_failed = true;
+        return nullptr;
+    }
+    return malloc(n);
+}
+static void cjson_test_free(void *p) { free(p); }
+static void cjson_fail_arm(long at) {
+    g_cjson_allocs = 0;
+    g_cjson_failed = false;
+    g_cjson_fail_at = at;
+    cJSON_Hooks h{cjson_test_malloc, cjson_test_free};
+    cJSON_InitHooks(&h);
+}
+static void cjson_fail_disarm() {
+    g_cjson_fail_at = 0;
+    cJSON_InitHooks(nullptr);
+}
 extern "C" esp_err_t tiny_config_gallery_save(const void *, size_t, uint8_t, uint8_t) { return 0; }
 extern "C" esp_err_t tiny_config_gallery_save_index(uint8_t) { return 0; }
 extern "C" esp_err_t tiny_config_gallery_load(void *, size_t, uint8_t *, uint8_t *) { return ESP_ERR_NOT_FOUND; }
@@ -210,7 +339,6 @@ extern "C" esp_err_t tiny_shell_key(const char *k) { g_shell_last_key = k ? k : 
 extern "C" esp_err_t tiny_shell_nav_back(void) { ++g_shell_back_calls; return 0; }
 extern "C" bool tiny_shell_at_root(void) { return true; }
 extern "C" esp_err_t tiny_shell_cycle(int) { ++g_shell_cycle_calls; return 0; }
-extern "C" esp_err_t tiny_shell_universe_push(const char *) { return 0; }
 // A fixed clock so the glance cluster has its widest realistic content.
 extern "C" bool tiny_time_is_synced(void) { return true; }
 extern "C" void tiny_time_utc_string(char *out, size_t cap) {
@@ -574,6 +702,636 @@ int main(int argc, char **argv) {
                       "boot preset: a non-quarter angle is refused");
             }
             CHECK(tiny_display_set_rotation(0) == ESP_OK, "manual rotation: back to 0");
+
+            // ---- status light vs image / gallery / universe -----------------
+            // Those three leave the text pipeline before its title prefix, so
+            // priority must still reach their commits, survive the device's own
+            // repaints of the same page, clear on the next other commit, and a
+            // FAILED commit must change nothing. 1-bit frames take the
+            // monochrome refresh, where g_fail_next_full can refuse them.
+            const size_t mono = static_cast<size_t>(sz.w) * sz.h / 8;
+            auto serve = [&](uint8_t fill) {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_http_body.assign(mono, fill);
+                g_hold_http = true;
+                g_http_blocked = false;
+                g_release_http = true;
+            };
+            auto unserve = [&] {
+                std::lock_guard<std::mutex> lock(g_http_mutex);
+                g_hold_http = false;
+                g_release_http = false;
+                g_http_body.clear();
+            };
+            int calls = g_led_alert_calls;
+            auto expect = [&](const char *what, esp_err_t r, esp_err_t want_r,
+                              int commits, bool lit) {
+                CHECK(r == want_r, "led/%s: returned %d, want %d", what, r, want_r);
+                CHECK(g_led_alert_calls == calls + commits,
+                      "led/%s: %d alert-layer updates, want %d", what,
+                      g_led_alert_calls - calls, commits);
+                CHECK(g_led_alert == lit, "led/%s: alert %d, want %d", what,
+                      g_led_alert, lit);
+                calls = g_led_alert_calls;
+            };
+            const char *normal =
+                R"J({"type":"text","card_id":"n1","title":"plain","body":"nothing urgent"})J";
+            auto repaint_universe = [] {   // what tiny_shell's row tap renders
+                char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
+                const int n = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
+                char *cs = tiny_universe_card_json(g_agent, roster, n, nullptr);
+                const esp_err_t r = tiny_display_render_universe_page(cs);
+                free(cs);
+                return r;
+            };
+            serve(0xF0);
+            expect("image alert", tiny_display_render_card(
+                R"J({"type":"image","card_id":"img","url":"https://x/a.raw","priority":"alert"})J"),
+                ESP_OK, 1, true);
+            // Panel-native replay keeps the pixels on glass: no commit at all.
+            expect("image alert rerender", tiny_display_rerender(), ESP_OK, 0, true);
+            g_fail_next_full = true;
+            expect("image normal, panel fails", tiny_display_render_card(
+                R"J({"type":"image","card_id":"img2","url":"https://x/b.raw"})J"),
+                ESP_FAIL, 0, true);
+            unserve();
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"image","card_id":"img2","url":"https://x/b.raw"})J") != ESP_OK &&
+                      g_led_alert_calls == calls && g_led_alert,
+                  "led/image normal, fetch fails: light unchanged");
+            serve(0xF0);
+            expect("image normal", tiny_display_render_card(
+                R"J({"type":"image","card_id":"img2","url":"https://x/b.raw"})J"),
+                ESP_OK, 1, false);
+
+            expect("gallery alert", tiny_display_render_card(
+                R"J({"type":"gallery","urls":["https://x/1.raw","https://x/2.raw"],"priority":"alert"})J"),
+                ESP_OK, 1, true);
+            expect("gallery alert next page", tiny_display_gallery_nav(+1), ESP_OK, 1, true);
+            g_fail_next_full = true;
+            expect("gallery alert page, panel fails", tiny_display_gallery_nav(-1),
+                   ESP_FAIL, 0, true);
+            expect("normal card replaces gallery", tiny_display_render_card(normal),
+                   ESP_OK, 1, false);
+            expect("gallery reopened after replace", tiny_display_gallery_nav(0),
+                   ESP_OK, 1, false);
+            expect("gallery normal", tiny_display_render_card(
+                R"J({"type":"gallery","urls":["https://x/3.raw","https://x/4.raw"]})J"),
+                ESP_OK, 1, false);
+            expect("gallery normal next page", tiny_display_gallery_nav(+1), ESP_OK, 1, false);
+
+            expect("universe alert push", tiny_display_render_card(
+                R"J({"type":"universe","priority":"alert","tinys":["bonk"]})J"),
+                ESP_OK, 1, true);
+            CHECK(!strcmp(tiny_display_current_card_id(), "universe") &&
+                      g_roster.size() == 2 && g_roster[1] == "bonk",
+                  "led/universe: page on glass (%s), pushed slug merged",
+                  tiny_display_current_card_id());
+            expect("universe alert row-tap repaint", repaint_universe(), ESP_OK, 1, true);
+            expect("universe alert rerender", tiny_display_rerender(), ESP_OK, 1, true);
+            g_fail_next_full = true;
+            expect("universe repaint, panel fails", repaint_universe(), ESP_FAIL, 0, true);
+            expect("normal universe push over alert page", tiny_display_render_card(
+                R"J({"type":"universe"})J"), ESP_OK, 1, false);
+            expect("repaint after normal push", repaint_universe(), ESP_OK, 1, false);
+            expect("alert universe again", tiny_display_render_card(
+                R"J({"type":"universe","priority":"alert"})J"), ESP_OK, 1, true);
+            expect("normal card replaces universe", tiny_display_render_card(normal),
+                   ESP_OK, 1, false);
+            expect("universe repaint after replace", repaint_universe(), ESP_OK, 1, false);
+
+            // ---- page ownership is typed, not a card_id ---------------------
+            // A sender may legally name any card "gallery" or "universe". Such
+            // a card is not the device's page: a later page flip / reopen or
+            // roster repaint must not inherit its alert, it must not drive the
+            // UP/DOWN page-flip rule, and the real pages still inherit from
+            // themselves.
+            expect("gallery store page, alert", tiny_display_render_card(
+                R"J({"type":"gallery","urls":["https://x/5.raw","https://x/6.raw"],"priority":"alert"})J"),
+                ESP_OK, 1, true);
+            CHECK(tiny_display_glass_is_gallery(),
+                  "typed page: the gallery store's page is the gallery");
+            expect("text card NAMED gallery, alert", tiny_display_render_card(
+                R"J({"type":"text","card_id":"gallery","title":"x","priority":"alert","body":"y"})J"),
+                ESP_OK, 1, true);
+            CHECK(!tiny_display_glass_is_gallery() &&
+                      !strcmp(tiny_display_current_card_id(), "gallery"),
+                  "typed page: a card named gallery is not the gallery page");
+            expect("gallery reopened after a card named gallery",
+                   tiny_display_gallery_nav(0), ESP_OK, 1, false);
+            CHECK(tiny_display_glass_is_gallery(), "typed page: reopened gallery");
+            expect("image card NAMED gallery, alert", tiny_display_render_card(
+                R"J({"type":"image","card_id":"gallery","url":"https://x/c.raw","priority":"alert"})J"),
+                ESP_OK, 1, true);
+            CHECK(!tiny_display_glass_is_gallery(),
+                  "typed page: an image named gallery is not the gallery page");
+            expect("gallery flip after an image named gallery",
+                   tiny_display_gallery_nav(+1), ESP_OK, 1, false);
+
+            expect("text card NAMED universe, alert", tiny_display_render_card(
+                R"J({"type":"text","card_id":"universe","title":"x","priority":"alert","body":"y"})J"),
+                ESP_OK, 1, true);
+            expect("universe repaint after a card named universe", repaint_universe(),
+                   ESP_OK, 1, false);
+            expect("composite NAMED universe, alert", tiny_display_render_card(
+                R"J({"type":"composite","card_id":"universe","title":"x","priority":"alert","parts":[{"type":"text","body":"y"}]})J"),
+                ESP_OK, 1, true);
+            expect("universe repaint after a composite named universe",
+                   repaint_universe(), ESP_OK, 1, false);
+            // The universe page's own JSON, but SENT (no priority) over the
+            // device's alert universe page: a sender's card, so normal.
+            expect("alert universe page for the sender case", tiny_display_render_card(
+                R"J({"type":"universe","priority":"alert"})J"), ESP_OK, 1, true);
+            {
+                char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
+                const int n = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
+                char *cs = tiny_universe_card_json(g_agent, roster, n, nullptr);
+                expect("sender re-sends the page JSON with no priority",
+                       tiny_display_render_card(cs), ESP_OK, 1, false);
+                free(cs);
+            }
+            // The real pages still inherit from themselves, including after a
+            // replay of the cached universe page.
+            expect("alert universe page again", tiny_display_render_card(
+                R"J({"type":"universe","priority":"alert"})J"), ESP_OK, 1, true);
+            expect("universe page rerender keeps alert", tiny_display_rerender(),
+                   ESP_OK, 1, true);
+            expect("universe repaint after rerender keeps alert", repaint_universe(),
+                   ESP_OK, 1, true);
+            expect("normal card ends it", tiny_display_render_card(normal),
+                   ESP_OK, 1, false);
+
+            // ---- universe push: every allocation failure fails closed --------
+            // One parse, one build, one render. Fail each cJSON allocation the
+            // push makes, in turn (parse, preview build, print, the nested
+            // render's parse). A failure must change NOTHING — no roster
+            // merge, no paint, no cache, no tap regions, no status light —
+            // and the first k that succeeds must be the whole push: alert
+            // light on, slug merged. Never a "successful" normal page.
+            {
+                const char *push =
+                    R"J({"type":"universe","priority":"alert","tinys":["oom-slug"]})J";
+                const uint32_t frame0 = fnv1a(g_buf.data(), g_buf.size());
+                const size_t roster0 = g_roster.size();
+                bool succeeded = false;
+                int failures = 0;
+                for (long k = 1; k < 400 && !succeeded; ++k) {
+                    const int refreshes = g_full_refreshes;
+                    const uint32_t gen0 = tiny_display_card_gen();
+                    calls = g_led_alert_calls;
+                    cjson_fail_arm(k);
+                    const esp_err_t r = tiny_display_render_card(push);
+                    const bool injected = g_cjson_failed.load();
+                    cjson_fail_disarm();
+                    if (!injected) {
+                        CHECK(r == ESP_OK, "universe oom: no failure at k=%ld yet %d", k, r);
+                        succeeded = true;
+                    } else if (r == ESP_OK) {
+                        // cJSON may survive a failed allocation it can retry
+                        // around; then the push must still be all there.
+                        succeeded = true;
+                    }
+                    if (succeeded) {
+                        CHECK(g_led_alert && g_led_alert_calls == calls + 1 &&
+                                  !strcmp(tiny_display_current_card_id(), "universe") &&
+                                  g_roster.size() == roster0 + 1 &&
+                                  g_roster.back() == "oom-slug",
+                              "universe oom: k=%ld success is the whole alert push", k);
+                        // Whole page too: the glass and the tap regions must
+                        // equal a reference render of the complete composite
+                        // (built with no injection) — a half-built page would
+                        // drop a row, or point a row index at the wrong slug.
+                        auto census = [] {
+                            tiny_button_region_t regs[48];
+                            const int nr = tiny_display_button_regions(regs, 48);
+                            std::vector<std::string> v;
+                            for (int i = 0; i < nr; ++i)
+                                v.push_back(std::string(regs[i].id) + "=" + regs[i].label);
+                            return v;
+                        };
+                        const uint32_t got_frame = fnv1a(g_buf.data(), g_buf.size());
+                        const auto got = census();
+                        char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
+                        const int rn = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
+                        char *ref = tiny_universe_card_json(g_agent, roster, rn, "alert");
+                        CHECK(ref && tiny_display_render_card(ref) == ESP_OK,
+                              "universe oom: reference page renders");
+                        free(ref);
+                        CHECK(got_frame == fnv1a(g_buf.data(), g_buf.size()) &&
+                                  got == census() && got.size() >= 2,
+                              "universe oom: k=%ld page is the complete composite "
+                              "(%zu regions)", k, got.size());
+                        break;
+                    }
+                    ++failures;
+                    CHECK(g_roster.size() == roster0,
+                          "universe oom: k=%ld (%d) merged a slug", k, r);
+                    CHECK(g_full_refreshes == refreshes &&
+                              tiny_display_card_gen() == gen0 &&
+                              fnv1a(g_buf.data(), g_buf.size()) == frame0,
+                          "universe oom: k=%ld (%d) reached the glass", k, r);
+                    CHECK(g_led_alert_calls == calls && !g_led_alert,
+                          "universe oom: k=%ld (%d) touched the light", k, r);
+                    CHECK(!strcmp(tiny_display_current_card_id(), "n1"),
+                          "universe oom: k=%ld (%d) changed glass identity", k, r);
+                }
+                CHECK(succeeded && failures >= 4,
+                      "universe oom: swept %d failing allocations then succeeded",
+                      failures);
+                calls = g_led_alert_calls;
+                CHECK(tiny_display_rerender() == ESP_OK && g_led_alert &&
+                          !strcmp(tiny_display_current_card_id(), "universe"),
+                      "universe oom: replay is the committed alert push");
+                calls = g_led_alert_calls;
+                expect("normal after oom sweep", tiny_display_render_card(normal),
+                       ESP_OK, 1, false);
+            }
+            // A push whose panel commit fails merges nothing either.
+            {
+                const size_t roster0 = g_roster.size();
+                g_fail_next_full = true;
+                expect("universe push, panel fails", tiny_display_render_card(
+                    R"J({"type":"universe","priority":"alert","tinys":["panel-fail-slug"]})J"),
+                    ESP_FAIL, 0, false);
+                CHECK(g_roster.size() == roster0,
+                      "universe push, panel fails: no slug merged");
+            }
+            // ---- universe push: the roster write is part of the commit ------
+            // The merged roster is ONE write, made after the panel took the
+            // page and before anything is published. A refused write (NVS, or
+            // a roster that changed under the page) must fail the push and
+            // leave everything as it was: roster, glass, identity, tap
+            // regions, card_gen, replay cache and light — so no row a human
+            // can tap is one a reboot would lose.
+            {
+                auto census = [] {
+                    tiny_button_region_t regs[48];
+                    const int nr = tiny_display_button_regions(regs, 48);
+                    std::vector<std::string> v;
+                    for (int i = 0; i < nr; ++i)
+                        v.push_back(std::string(regs[i].id) + "=" + regs[i].label);
+                    return v;
+                };
+                const char *push =
+                    R"J({"type":"universe","priority":"alert","tinys":["p1","p2","p3"]})J";
+                for (const esp_err_t why : {ESP_FAIL, ESP_ERR_INVALID_STATE}) {
+                    const auto roster0 = g_roster;
+                    const uint32_t frame0 = fnv1a(g_buf.data(), g_buf.size());
+                    const auto regs0 = census();
+                    const uint32_t gen0 = tiny_display_card_gen();
+                    const std::string id0 = tiny_display_current_card_id();
+                    const int refreshes = g_full_refreshes;
+                    const int commits = g_roster_commits;
+                    if (why == ESP_FAIL) {
+                        g_roster_commit_fail = ESP_FAIL;   // NVS refuses
+                    } else {
+                        // Another task edits the roster after the page was
+                        // built from it: the page's rows are stale.
+                        arm_seam("universe-claimed", [] { g_roster.push_back("racer"); });
+                    }
+                    const auto roster_at_commit = why == ESP_FAIL ? roster0 : [&] {
+                        auto r = roster0; r.push_back("racer"); return r; }();
+                    calls = g_led_alert_calls;
+                    const esp_err_t r = tiny_display_render_card(push);
+                    CHECK(r == why, "universe persist %x: returned %x", why, r);
+                    CHECK(g_roster_commits == commits + 1,
+                          "universe persist %x: %d roster writes, want one batch",
+                          why, g_roster_commits - commits);
+                    CHECK(g_full_refreshes == refreshes + 1,
+                          "universe persist %x: panel took the page first", why);
+                    CHECK(g_roster == roster_at_commit,
+                          "universe persist %x: roster changed (%zu rows)", why,
+                          g_roster.size());
+                    CHECK(fnv1a(g_buf.data(), g_buf.size()) == frame0 &&
+                              census() == regs0 && tiny_display_card_gen() == gen0 &&
+                              id0 == tiny_display_current_card_id(),
+                          "universe persist %x: glass, regions or identity moved", why);
+                    CHECK(g_led_alert_calls == calls && !g_led_alert,
+                          "universe persist %x: touched the light", why);
+                    CHECK(tiny_display_rerender() == ESP_OK &&
+                              id0 == tiny_display_current_card_id() && !g_led_alert &&
+                              g_roster == roster_at_commit,
+                          "universe persist %x: replay is the previous card", why);
+                    g_roster = roster0;
+                }
+                // Retry with NVS healthy: all three slugs in one write, the
+                // page committed alert, and every row it shows is in the roster.
+                const auto roster0 = g_roster;
+                const int commits = g_roster_commits;
+                calls = g_led_alert_calls;
+                expect("universe multi-slug push", tiny_display_render_card(push),
+                       ESP_OK, 1, true);
+                CHECK(g_roster_commits == commits + 1 &&
+                          g_roster.size() == roster0.size() + 3 &&
+                          g_roster[g_roster.size() - 3] == "p1" &&
+                          g_roster.back() == "p3",
+                      "universe multi-slug push: one write, all slugs");
+                bool rows_ok = true;
+                for (const auto &reg : census())
+                    if (!strncmp(reg.c_str(), "u:i:", 4)) {
+                        const int i = atoi(reg.c_str() + 4);
+                        rows_ok = rows_ok && i >= 0 && i < (int)g_roster.size() &&
+                                  reg.find("=@" + g_roster[i]) != std::string::npos;
+                    }
+                CHECK(rows_ok, "universe multi-slug push: every row names its roster slug");
+                // Nothing new to merge: no write at all.
+                expect("universe push, slugs already in roster",
+                       tiny_display_render_card(push), ESP_OK, 1, true);
+                CHECK(g_roster_commits == commits + 1,
+                      "universe push of known slugs writes nothing");
+                expect("normal after multi-slug", tiny_display_render_card(normal),
+                       ESP_OK, 1, false);
+            }
+            // ---- universe push: one bad element refuses the whole push -------
+            // Validated before the push claims anything: a refused push merges
+            // no slug, writes nothing, paints nothing, caches nothing, touches
+            // no tap region or light, and is no newer request (an image still
+            // fetching keeps its turn). Absent "tinys" is the page; malformed
+            // "tinys" is an error.
+            {
+                auto census = [] {
+                    tiny_button_region_t regs[48];
+                    const int nr = tiny_display_button_regions(regs, 48);
+                    std::vector<std::string> v;
+                    for (int i = 0; i < nr; ++i)
+                        v.push_back(std::string(regs[i].id) + "=" + regs[i].label);
+                    return v;
+                };
+                const std::string long_slug(TINY_AGENT_SLUG_MAX + 1, 'a');
+                const std::string over_full = [] {
+                    std::string s = R"J({"type":"universe","tinys":[)J";
+                    for (int i = 0; i < TINY_AGENT_ROSTER_MAX; ++i)
+                        s += std::string(i ? "," : "") + "\"fill" + std::to_string(i) + "\"";
+                    return s + "]}";
+                }();
+                struct Bad { const char *what; std::string spec; esp_err_t want; };
+                const Bad bads[] = {
+                    {"mixed valid/invalid",
+                     R"J({"type":"universe","priority":"alert","tinys":["good-u","Bad Slug"]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"invalid first",
+                     R"J({"type":"universe","tinys":["a\"b","good-u"]})J", ESP_ERR_INVALID_ARG},
+                    {"overlong",
+                     R"J({"type":"universe","tinys":["good-u",")J" + long_slug + R"J("]})J",
+                     ESP_ERR_INVALID_SIZE},
+                    {"empty slug", R"J({"type":"universe","tinys":["good-u",""]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"non-string number", R"J({"type":"universe","tinys":["good-u",7]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"non-string null", R"J({"type":"universe","tinys":["good-u",null]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"non-string object", R"J({"type":"universe","tinys":[{"s":"good-u"}]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"tinys a string", R"J({"type":"universe","tinys":"good-u"})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"tinys null", R"J({"type":"universe","tinys":null})J", ESP_ERR_INVALID_ARG},
+                    {"tinys an object", R"J({"type":"universe","tinys":{"a":"good-u"}})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"more than fit", over_full, ESP_ERR_INVALID_SIZE},
+                };
+                for (const Bad &b : bads) {
+                    const auto roster0 = g_roster;
+                    const uint32_t frame0 = fnv1a(g_buf.data(), g_buf.size());
+                    const auto regs0 = census();
+                    const uint32_t gen0 = tiny_display_card_gen();
+                    const std::string id0 = tiny_display_current_card_id();
+                    const int refreshes = g_full_refreshes;
+                    const int commits = g_roster_commits;
+                    calls = g_led_alert_calls;
+                    const esp_err_t r = tiny_display_render_card(b.spec.c_str());
+                    CHECK(r == b.want, "universe bad/%s: returned %x, want %x",
+                          b.what, r, b.want);
+                    CHECK(g_roster == roster0 && g_roster_commits == commits,
+                          "universe bad/%s: roster unchanged, nothing written", b.what);
+                    CHECK(g_full_refreshes == refreshes &&
+                              fnv1a(g_buf.data(), g_buf.size()) == frame0,
+                          "universe bad/%s: glass untouched", b.what);
+                    CHECK(census() == regs0 && tiny_display_card_gen() == gen0 &&
+                              id0 == tiny_display_current_card_id(),
+                          "universe bad/%s: regions and identity unchanged", b.what);
+                    CHECK(g_led_alert_calls == calls && !g_led_alert,
+                          "universe bad/%s: light untouched", b.what);
+                    CHECK(tiny_display_rerender() == ESP_OK &&
+                              id0 == tiny_display_current_card_id(),
+                          "universe bad/%s: replay cache is the previous card", b.what);
+                    calls = g_led_alert_calls;
+                }
+                // Absent tinys: the page, no merge. Empty array: the same.
+                for (const char *spec : {R"J({"type":"universe"})J",
+                                         R"J({"type":"universe","tinys":[]})J"}) {
+                    const auto roster0 = g_roster;
+                    const int commits = g_roster_commits;
+                    CHECK(tiny_display_render_card(spec) == ESP_OK &&
+                              !strcmp(tiny_display_current_card_id(), "universe") &&
+                              g_roster == roster0 && g_roster_commits == commits,
+                          "universe %s: page, no merge, no write", spec);
+                }
+                // Duplicates of a valid slug are not "over": merged once.
+                CHECK(tiny_display_render_card(
+                          R"J({"type":"universe","tinys":["good-u","good-u"]})J") == ESP_OK &&
+                          g_roster.back() == "good-u" &&
+                          std::count(g_roster.begin(), g_roster.end(), "good-u") == 1,
+                      "universe: duplicate valid slugs merge once");
+                // A refused push is not a newer request: an image already
+                // fetching keeps its turn and commits.
+                {
+                    std::lock_guard<std::mutex> lock(g_http_mutex);
+                    g_http_body.assign(mono, 0x0F);
+                    g_hold_http = true;
+                    g_http_blocked = false;
+                    g_release_http = false;
+                }
+                std::atomic<int> img{ESP_FAIL};
+                std::thread it([&] {
+                    img = tiny_display_render_card(
+                        R"J({"type":"image","card_id":"held-img","url":"https://x/h.raw"})J");
+                });
+                {
+                    std::unique_lock<std::mutex> lock(g_http_mutex);
+                    CHECK(g_http_ready.wait_for(lock, std::chrono::seconds(2),
+                                                [] { return g_http_blocked; }),
+                          "universe bad: image fetch held");
+                }
+                CHECK(tiny_display_render_card(bads[0].spec.c_str()) == bads[0].want,
+                      "universe bad: refused while an image fetches");
+                {
+                    std::lock_guard<std::mutex> lock(g_http_mutex);
+                    g_release_http = true;
+                    g_http_ready.notify_all();
+                }
+                it.join();
+                CHECK(img == ESP_OK && !strcmp(tiny_display_current_card_id(), "held-img"),
+                      "universe bad: refused push superseded nothing (image %d)", img.load());
+                unserve();
+                calls = g_led_alert_calls;
+                expect("normal after bad pushes", tiny_display_render_card(normal),
+                       ESP_OK, 1, false);
+                // A refused universe FINALE still ends the answer, as text.
+                CHECK(tiny_display_stream_begin("tiny", "ansBad", nullptr) == ESP_OK,
+                      "universe bad finale: begin");
+                tiny_display_stream_append("words");
+                const auto roster1 = g_roster;
+                CHECK(tiny_display_stream_end(bads[0].spec.c_str()) == bads[0].want &&
+                          !tiny_display_stream_active() && g_roster == roster1,
+                      "universe bad finale: refused, answer ended, nothing merged");
+                calls = g_led_alert_calls;
+                expect("normal after bad finale", tiny_display_render_card(normal),
+                       ESP_OK, 1, false);
+            }
+            unserve();
+
+            // ---- one request, one claim: universe push ----------------------
+            // Serialized: a newer card that arrives while a universe push holds
+            // render ownership waits, then commits after it — never inside it.
+            {
+                std::atomic<int> newer{ESP_FAIL};
+                std::thread nthr;
+                int attempts;
+                {
+                    std::lock_guard<std::mutex> lock(g_attempt_mutex);
+                    attempts = g_render_attempts;
+                }
+                arm_seam("universe-claimed", [&] {
+                    nthr = std::thread([&] {
+                        newer = tiny_display_render_card(normal);
+                    });
+                    CHECK(wait_for_attempts(attempts + 1),
+                          "universe claim: newer card waits for the push");
+                });
+                calls = g_led_alert_calls;
+                const esp_err_t r = tiny_display_render_card(
+                    R"J({"type":"universe","priority":"alert"})J");
+                nthr.join();
+                CHECK(r == ESP_OK && newer == ESP_OK,
+                      "universe claim: push %d, newer %d both commit", r, newer.load());
+                CHECK(g_led_alert_calls == calls + 2 && !g_led_alert &&
+                          !strcmp(tiny_display_current_card_id(), "n1"),
+                      "universe claim: newer normal card is last on glass and light");
+                CHECK(tiny_display_rerender() == ESP_OK &&
+                          !strcmp(tiny_display_current_card_id(), "n1") && !g_led_alert,
+                      "universe claim: replay is the newer card");
+            }
+            // Overtaken: a universe FINALE claims its epoch and releases render
+            // ownership (stream_end). A newer card commits in that gap; the
+            // older universe must then be SUPERSEDED — it may not mint a fresh
+            // claim for its nested roster composite and paint over the newer.
+            for (const char *newer_card :
+                 {R"J({"type":"text","card_id":"after-u","title":"n","body":"newest"})J",
+                  R"J({"type":"universe","tinys":["newer-u"]})J"}) {
+                CHECK(tiny_display_stream_begin("tiny", "ansU", nullptr) == ESP_OK,
+                      "universe finale: begin");
+                tiny_display_stream_append("words");
+                std::atomic<int> newer{ESP_FAIL};
+                arm_seam("finale-claimed", [&] {
+                    std::thread t([&] { newer = tiny_display_render_card(newer_card); });
+                    t.join();   // the newer request fully commits in the gap
+                });
+                const int refreshes = g_full_refreshes;
+                const uint32_t gen0 = tiny_display_card_gen();
+                calls = g_led_alert_calls;
+                const esp_err_t fin = tiny_display_stream_end(
+                    R"J({"type":"universe","priority":"alert","tinys":["older-u"]})J");
+                const bool newer_is_text = strstr(newer_card, "after-u") != nullptr;
+                CHECK(newer == ESP_OK && fin == TINY_DISPLAY_SUPERSEDED,
+                      "universe finale: newer %d, older finale %d (want SUPERSEDED)",
+                      newer.load(), fin);
+                CHECK(g_full_refreshes == refreshes + 1 &&
+                          tiny_display_card_gen() == gen0 + 1 &&
+                          g_led_alert_calls == calls + 1 && !g_led_alert,
+                      "universe finale: exactly one commit (the newer, normal)");
+                CHECK(!strcmp(tiny_display_current_card_id(),
+                              newer_is_text ? "after-u" : "universe") &&
+                          !tiny_display_stream_active(),
+                      "universe finale: newer card owns glass (%s)",
+                      tiny_display_current_card_id());
+                CHECK(tiny_display_rerender() == ESP_OK && !g_led_alert &&
+                          !strcmp(tiny_display_current_card_id(),
+                                  newer_is_text ? "after-u" : "universe"),
+                      "universe finale: replay is the newer card, still normal");
+                bool older_merged = false;
+                for (const auto &r : g_roster) older_merged |= r == "older-u";
+                CHECK(!older_merged,
+                      "universe finale: superseded push merged no roster slug");
+            }
+
+            // ---- photo archive follows glass order --------------------------
+            // Image A paints and pauses after its commit, before archiving.
+            // Image B is sent then. B cannot paint (or archive) until A has
+            // archived, so 00001 = A and 00002 = B; a B resend archives
+            // nothing (adjacent dedupe names B), and an A resend is new again.
+            // Proven by admission, not by time: at the seam A must still hold
+            // render ownership (the recursive lock's per-thread level), and B
+            // must have reached its own render-lock attempt — so B is queued
+            // on the lock A holds, cannot have painted, and runs only after
+            // A's archive. Moving the archive outside A's render transaction
+            // fails the ownership check on every run, whatever the scheduler.
+            {
+                g_sd_present = true;
+                auto photo = [](int n) {
+                    char path[96];
+                    snprintf(path, sizeof path, STICKY_SD_MOUNT_POINT "/photos/%05d.raw", n);
+                    std::vector<uint8_t> out;
+                    if (FILE *f = fopen(path, "rb")) {
+                        int ch;
+                        while ((ch = fgetc(f)) != EOF) out.push_back((uint8_t)ch);
+                        fclose(f);
+                    }
+                    return out;
+                };
+                const std::vector<uint8_t> a_bytes(mono, 0xA1), b_bytes(mono, 0xB2);
+                serve(0xA1);
+                const char *img_a =
+                    R"J({"type":"image","card_id":"pa","url":"https://x/pa.raw"})J";
+                const char *img_b =
+                    R"J({"type":"image","card_id":"pb","url":"https://x/pb.raw"})J";
+                std::atomic<int> rb{ESP_FAIL};
+                std::atomic<bool> b_done{false};
+                std::thread bthr;
+                bool a_owned = false, b_queued = false, b_pending = false;
+                int b_refreshes = -1;
+                arm_seam("image-painted", [&] {
+                    a_owned = render_test_recursive_held > 0;
+                    {
+                        std::lock_guard<std::mutex> lock(g_http_mutex);
+                        g_http_body.assign(mono, 0xB2);   // A already fetched
+                    }
+                    int attempts;
+                    {
+                        std::lock_guard<std::mutex> lock(g_attempt_mutex);
+                        attempts = g_render_attempts;
+                    }
+                    const int refreshes = g_full_refreshes;
+                    bthr = std::thread([&] {
+                        rb = tiny_display_render_card(img_b);
+                        b_done = true;
+                    });
+                    b_queued = wait_for_attempts(attempts + 1);
+                    b_pending = !b_done.load();
+                    b_refreshes = g_full_refreshes - refreshes;
+                });
+                const esp_err_t ra = tiny_display_render_card(img_a);
+                bthr.join();
+                CHECK(ra == ESP_OK && rb == ESP_OK, "archive order: A %d, B %d", ra,
+                      rb.load());
+                CHECK(a_owned,
+                      "archive order: A archives inside its render transaction");
+                CHECK(b_queued && b_pending && b_refreshes == 0,
+                      "archive order: B queued on render ownership, unpainted, "
+                      "while A archives (queued %d, pending %d, refreshes %d)",
+                      b_queued, b_pending, b_refreshes);
+                CHECK(photo(1) == a_bytes && photo(2) == b_bytes && photo(3).empty(),
+                      "archive order: 00001=A (%zu B), 00002=B (%zu B), no 00003",
+                      photo(1).size(), photo(2).size());
+                CHECK(!strcmp(tiny_display_current_card_id(), "pb"),
+                      "archive order: B is on glass");
+                CHECK(tiny_display_render_card(img_b) == ESP_OK && photo(3).empty(),
+                      "archive order: B resend is deduped against the last archived");
+                serve(0xA1);
+                CHECK(tiny_display_render_card(img_a) == ESP_OK && photo(3) == a_bytes,
+                      "archive order: A again after B archives 00003");
+                unserve();
+                g_sd_present = false;
+            }
         }
 
         if (!strcmp(sz.tag, "amoled18-90")) {
@@ -781,7 +1539,7 @@ int main(int argc, char **argv) {
                 g_http_ready.notify_all();
             }
             image.join();
-            CHECK(image_result == ESP_ERR_INVALID_STATE,
+            CHECK(image_result == TINY_DISPLAY_SUPERSEDED,
                   "serialization: stale image response is refused");
             CHECK(!strcmp(tiny_display_current_card_id(), "race-overtake"),
                   "serialization: stale image cannot overwrite glass");
@@ -948,7 +1706,7 @@ int main(int argc, char **argv) {
                 g_http_ready.notify_all();
             }
             gal.join();
-            CHECK(gal_result == ESP_ERR_INVALID_STATE,
+            CHECK(gal_result == TINY_DISPLAY_SUPERSEDED,
                   "gallery race: stale gallery response is refused");
             CHECK(!strcmp(tiny_display_current_card_id(), "gal-overtake"),
                   "gallery race: stale gallery cannot overwrite glass");
@@ -1192,7 +1950,7 @@ int main(int argc, char **argv) {
             release_http();
             old_media.join();
             stop_http();
-            CHECK(before_blit == ESP_ERR_INVALID_STATE &&
+            CHECK(before_blit == TINY_DISPLAY_SUPERSEDED &&
                       !strcmp(tiny_display_current_card_id(), "blit"),
                   "blit epoch: older media response cannot overwrite raw frame");
 
@@ -1354,7 +2112,7 @@ int main(int argc, char **argv) {
             fthr.join();
             nthr.join();
             stop_http();
-            CHECK(fin == ESP_ERR_INVALID_STATE,
+            CHECK(fin == TINY_DISPLAY_SUPERSEDED,
                   "finale race: stale finale refused");
             CHECK(!strcmp(tiny_display_current_card_id(), "after-fin") &&
                       tiny_display_rerender() == ESP_OK &&

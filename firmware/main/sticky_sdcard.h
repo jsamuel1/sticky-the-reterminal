@@ -25,7 +25,11 @@
 extern "C" {
 #endif
 
+// Overridable only so the host render test can point the gallery/photo
+// stores at a scratch directory; the device always mounts /sdcard.
+#ifndef STICKY_SD_MOUNT_POINT
 #define STICKY_SD_MOUNT_POINT "/sdcard"
+#endif
 
 // One-time GPIO setup + first mount attempt if a card is present.
 // Returns ESP_OK even when no card is inserted (absence is not an error).

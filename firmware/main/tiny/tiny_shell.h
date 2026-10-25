@@ -43,9 +43,8 @@ esp_err_t tiny_shell_menu(const char *id);  // menu row ("w:<idx>" = wifi join)
 // v11 universe: "u:open" render roster page, "u:clear" back to own tiny,
 // "u:i:<n>" switch to roster index n. Repaint IS the ack.
 esp_err_t tiny_shell_universe_route(const char *id);
-// v11: render_ui {"type":"universe","tinys":[…]?} — merge slugs into the
-// roster, then render the page (called by the display dispatch).
-esp_err_t tiny_shell_universe_push(const char *spec_json);
+// (render_ui {"type":"universe",…} pushes are rendered by tiny_display
+// itself, under the push's own render claim — see tiny_universe_card.h.)
 esp_err_t tiny_shell_rescan_wifi(void);     // force a fresh scan (Rescan button)
 esp_err_t tiny_shell_silent_toggle(void);   // flip + persist + repaint settings
 // Gate 7 — open the keyboard as a DM composer targeting @login ("Reply" tap).
