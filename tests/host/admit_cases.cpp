@@ -115,12 +115,23 @@ static void race() {
 // is a teardown fence for the test, not a product property).
 static void run_consumer(std::atomic<int> &mailbox,
                          const std::atomic<int> &producers_done,
-                         int producers, std::atomic<int> &inside,
+                         int producers, const std::atomic<bool> &stop,
+                         std::atomic<int> &inside,
                          std::atomic<int> &violations,
-                         std::atomic<int> &consumed) {
+                         std::atomic<int> &consumed,
+                         std::atomic<bool> *empty_before_done = nullptr) {
+    // `stop` is deliberately not the completion predicate. Keeping it in this
+    // helper lets queue_late_producer pin the exact old predicate without a
+    // scheduler delay: its producer reserves, stop becomes true, then the
+    // consumer must remain alive solely because that producer is not done.
+    (void)stop;
     while (producers_done.load() < producers || mailbox.load()) {
         int full = 1;
-        if (!mailbox.compare_exchange_strong(full, 0)) continue;
+        if (!mailbox.compare_exchange_strong(full, 0)) {
+            if (empty_before_done && producers_done.load() < producers)
+                empty_before_done->store(true);
+            continue;
+        }
         tiny_admit::Work w(tiny_admit::AdoptReserved::Yes);
         inside.fetch_add(1);
         if (tiny_admit::sleep_claimed()) violations.fetch_add(1);
@@ -129,31 +140,43 @@ static void run_consumer(std::atomic<int> &mailbox,
     }
 }
 
-// Deterministic teardown case: the only producer reserves and publishes
-// AFTER stop is set and the consumer has had ample time to observe
-// stop=true + empty mailbox. A consumer that exits on `stop && !mailbox`
-// leaves the reservation stranded; the producer-completion fence drains it.
+// Deterministic teardown case: producer first reserves a gate slot, then waits.
+// With stop=true and an empty mailbox, the consumer must stay alive because
+// producer completion — not stop — is its fence. Once it has observed that
+// exact state, publication is released and must be drained. Restoring the old
+// `!stop || mailbox` condition exits before publication and fails both checks,
+// independent of thread scheduling.
 static void queue_late_producer() {
     reset();
     std::atomic<int> mailbox{0}, inside{0}, violations{0}, consumed{0};
     std::atomic<int> producers_done{0};
-    std::atomic<bool> stop{false};
-    std::thread consumer([&] {
-        run_consumer(mailbox, producers_done, 1, inside, violations, consumed);
-    });
+    std::atomic<bool> stop{false}, reserved{false}, publish{false};
+    std::atomic<bool> empty_before_done{false}, consumer_done{false};
     std::thread producer([&] {
-        while (!stop.load()) std::this_thread::yield();
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         if (tiny_admit::work_enter()) {
+            reserved.store(true);
+            while (!publish.load()) std::this_thread::yield();
             int empty = 0;
             if (!mailbox.compare_exchange_strong(empty, 1))
                 tiny_admit::work_exit();
         }
         producers_done.fetch_add(1);
     });
+    while (!reserved.load()) std::this_thread::yield();
     stop.store(true);
+    std::thread consumer([&] {
+        run_consumer(mailbox, producers_done, 1, stop, inside, violations,
+                     consumed, &empty_before_done);
+        consumer_done.store(true);
+    });
+    while (!empty_before_done.load() && !consumer_done.load())
+        std::this_thread::yield();
+    const bool consumer_waited = empty_before_done.load() && !consumer_done.load();
+    publish.store(true);
     producer.join();
     consumer.join();
+    CHECK("queue late producer: consumer waited for unfinished producer",
+          consumer_waited);
     CHECK("queue late producer: item published after stop is consumed",
           consumed.load() == 1 && mailbox.load() == 0);
     CHECK("queue late producer: gate idle at end",
@@ -188,8 +211,8 @@ static void queue_race() {
             producers_done.fetch_add(1);
         });
     ts.emplace_back([&] {
-        run_consumer(mailbox, producers_done, kProducers, inside, violations,
-                     consumed);
+        run_consumer(mailbox, producers_done, kProducers, stop, inside,
+                     violations, consumed);
     });
     for (int i = 0; i < 2; ++i)
         ts.emplace_back([&] {
