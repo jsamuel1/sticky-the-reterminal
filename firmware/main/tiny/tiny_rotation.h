@@ -141,6 +141,7 @@ static inline int tiny_rotation_select(int deg, bool board_has_imu,
     if (persisted) *persisted = false;
     if (!tiny_rotation_manual_offered(board_has_imu)) return 0x106;  // ESP_ERR_NOT_SUPPORTED
     if (!tiny_rotation_valid_deg(deg)) return 0x102;                 // ESP_ERR_INVALID_ARG
+    if (!apply || !save) return 0x102;  // both steps are required: no partial select
     const int err = apply(deg);
     if (err != 0) return err;
     const int serr = save(tiny_rotation_to_stored(deg));

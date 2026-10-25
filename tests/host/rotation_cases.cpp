@@ -164,6 +164,14 @@ static void rules(void) {
     g_save_err = -1;  // NVS full: rotation holds until reboot, and says so
     CHECK(tiny_rotation_select(90, false, fake_apply, fake_save, &persisted) == 0);
     CHECK(g_saved == std::vector<int>{1} && !persisted);
+
+    // Missing step: refused before anything moves (no crash, no half-select).
+    reset_fakes();
+    persisted = true;
+    CHECK(tiny_rotation_select(90, false, nullptr, fake_save, &persisted) == 0x102);
+    CHECK(g_saved.empty() && !persisted);
+    CHECK(tiny_rotation_select(90, false, fake_apply, nullptr, &persisted) == 0x102);
+    CHECK(g_applied.empty() && !persisted);
 }
 
 int main(int argc, char **argv) {
