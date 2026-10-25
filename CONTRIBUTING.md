@@ -44,7 +44,9 @@ Host tests compile shipped firmware files against the shims in `tests/host/shim`
   `TINY_GRAMMAR_VERSION`.
 - Add a changelog note: one file `changelog.d/<pr-number>-<short-name>.md`, never
   an edit to `CHANGELOG.md`. Format and commands are in `changelog.d/README.md`;
-  `changelog-d check` validates it and the `changelog` workflow checks it on the PR.
+  `changelog-d check` validates it and the `changelog` workflow checks it on the
+  PR (and on every push to `main`). Release commits land through a pull request
+  carrying `skip-changelog`; never push one straight to `main`.
   Nothing a user would notice? Ask for the `skip-changelog` label.
 - No build logs, receipts, tokens or your own WiFi in the tree. `.gitignore`
   already covers the usual places; `git status` before you push.
