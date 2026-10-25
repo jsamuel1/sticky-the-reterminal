@@ -34,6 +34,11 @@ esp_err_t tiny_config_silent_set(bool silent);
 // rotation follow-gravity: absent = true (auto)
 bool      tiny_config_rotauto_get(void);
 esp_err_t tiny_config_rotauto_set(bool on);
+// manual rotation, quarter turns 0..3 (grammar v25, boards with no IMU).
+// get: false when never written; the raw byte is returned unvalidated and
+// boot passes it through tiny_rotation_boot_deg. set refuses > 3.
+bool      tiny_config_rotation_get(uint8_t *quarters);
+esp_err_t tiny_config_rotation_set(uint8_t quarters);
 // autosleep idle budget, minutes: 5/15/30/60, absent = 30
 uint8_t   tiny_config_sleepidle_get(void);
 esp_err_t tiny_config_sleepidle_set(uint8_t minutes);

@@ -21,6 +21,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,6 +31,7 @@
 #include "canvas.h"
 #include "lcd_palette.h"
 #include "tiny/tiny_display.h"
+#include "tiny/tiny_rotation.h"
 
 // ---- the panel: a host Canvas the renderer draws into -----------------------
 static Canvas *g_canvas = nullptr;
@@ -407,6 +409,170 @@ int main(int argc, char **argv) {
                     free(idx);
                 }
             }
+        }
+
+        if (!strcmp(sz.tag, "fnk0104s")) {
+            // ---- manual rotation (v25): the board with no accelerometer ----
+            // The settings picker is the shipped tiny_rotation_picker_json;
+            // a selection goes through the shipped tiny_rotation_select with
+            // the REAL tiny_display_set_rotation as its apply step, exactly
+            // as tiny_shell's rotation_route wires it.
+            std::vector<int> saved;
+            static std::vector<int> *s_saved;
+            s_saved = &saved;
+            auto save = [](uint8_t q) -> int { s_saved->push_back(q); return 0; };
+            auto apply = [](int deg) -> int { return tiny_display_set_rotation(deg); };
+            auto render_picker = [&](int cur) {
+                char card[1024];
+                CHECK(tiny_rotation_picker_json(card, sizeof card, cur, true) > 0,
+                      "manual rotation: picker fits");
+                return tiny_display_render_card(card);
+            };
+            CHECK(tiny_rotation_manual_offered(false), "fnk has no IMU: picker offered");
+            CHECK(tiny_display_rotation() == 0 && render_picker(0) == ESP_OK,
+                  "manual rotation: picker renders at 0 deg");
+            for (int deg : {90, 180, 270, 0}) {
+                bool persisted = false;
+                saved.clear();
+                const esp_err_t r = (esp_err_t)tiny_rotation_select(
+                    deg, false, apply, save, &persisted);
+                CHECK(r == ESP_OK && persisted && saved == std::vector<int>{deg / 90},
+                      "manual rotation %d: applied then saved", deg);
+                // set_rotation replayed the picker in the new frame; the shell
+                // then repaints it so ACTIVE names the new angle.
+                CHECK(render_picker(deg) == ESP_OK, "manual rotation %d: repaint", deg);
+                Canvas *cv = sticky_display_canvas();
+                CHECK(tiny_display_rotation() == deg &&
+                          static_cast<int>(cv->rotation()) * 90 == deg &&
+                          !strcmp(tiny_display_current_card_id(), "rotation"),
+                      "manual rotation %d: glass, touch frame and card agree", deg);
+                const bool quarter = deg == 90 || deg == 270;
+                CHECK(cv->width() == (quarter ? 480 : 320) &&
+                          cv->height() == (quarter ? 320 : 480),
+                      "manual rotation %d: logical layout %dx%d", deg,
+                      cv->width(), cv->height());
+                CHECK(edge_ink(4) == 0, "manual rotation %d: ink in the edge band", deg);
+                // Every tap region sits on the panel, over drawn ink, and maps
+                // back into the layout where the row/button was drawn.
+                tiny_button_region_t regs[48];
+                const int n = tiny_display_button_regions(regs, 48);
+                int rows = 0, back_ok = 0;
+                for (int i = 0; i < n; ++i) {
+                    const auto &q = regs[i];
+                    CHECK(q.x >= 0 && q.y >= 0 && q.x + q.w <= sz.w && q.y + q.h <= sz.h,
+                          "manual rotation %d: region %s leaves the panel", deg, q.id);
+                    int ink = 0;
+                    for (int y = q.y; y < q.y + q.h; ++y)
+                        for (int x = q.x; x < q.x + q.w; ++x) ink += px(x, y) != 3;
+                    CHECK(ink > 0, "manual rotation %d: region %s over blank glass", deg, q.id);
+                    int lx, ly;
+                    cv->to_logical(q.x + q.w / 2, q.y + q.h / 2, lx, ly);
+                    int d = -1;
+                    if (tiny_rotation_parse_id(q.id, &d) == TINY_ROTATION_ID_SET) {
+                        ++rows;
+                        CHECK(ly < cv->height() - 60,
+                              "manual rotation %d: row %s is in the menu, not the bar",
+                              deg, q.id);
+                    }
+                    if (!strcmp(q.id, "rot:back") && ly > cv->height() - 70 &&
+                        lx < cv->width() / 2)
+                        ++back_ok;  // the button bar is at the LAYOUT's bottom
+                }
+                CHECK(rows >= 2, "manual rotation %d: %d orientation rows on glass", deg, rows);
+                CHECK(back_ok == 1,
+                      "manual rotation %d: Back sits bottom-left of the turned layout", deg);
+                // Short landscape glass shows two rows; the menu scrolls like
+                // the Wi-Fi list. Every orientation must be reachable.
+                {
+                    std::set<int> reach;
+                    for (int step = 0; step < 6; ++step) {
+                        tiny_button_region_t rr[48];
+                        const int m = tiny_display_button_regions(rr, 48);
+                        for (int i = 0; i < m; ++i) {
+                            int d = -1;
+                            if (tiny_rotation_parse_id(rr[i].id, &d) == TINY_ROTATION_ID_SET)
+                                reach.insert(d);
+                        }
+                        if (tiny_display_scroll_page(+1) != ESP_OK) break;
+                    }
+                    CHECK(reach.size() == 4, "manual rotation %d: %zu of 4 orientations "
+                          "reachable by scrolling", deg, reach.size());
+                    tiny_display_scroll(-(1 << 28));
+                }
+                // Gesture frame turns with the picture: "up from the bottom
+                // band" of the layout is home, whatever edge that is on glass.
+                int px0, py0, px1, py1;
+                cv->to_physical(cv->width() / 2, cv->height() - 6, px0, py0);
+                cv->to_physical(cv->width() / 2, cv->height() / 3, px1, py1);
+                const int h0 = g_shell_home_calls;
+                CHECK(tiny_display_scroll_gesture(px0, py0, px1, py1) == ESP_OK &&
+                          g_shell_home_calls == h0 + 1,
+                      "manual rotation %d: bottom-band up goes home", deg);
+                if (out_dir) {
+                    uint8_t *idx = nullptr; size_t len = 0; bool acc = false;
+                    if (tiny_display_snapshot_index8(&idx, &len, &acc) == 0) {
+                        std::vector<uint8_t> rgb(len * 3);
+                        for (size_t i = 0; i < len; ++i) {
+                            const lcd_palette::Rgb c = lcd_palette::color(
+                                lcd_palette::Theme::Light, idx[i] >> 2, idx[i] & 3);
+                            rgb[3 * i] = c.r; rgb[3 * i + 1] = c.g; rgb[3 * i + 2] = c.b;
+                        }
+                        char path[512];
+                        snprintf(path, sizeof path, "%s/fnk0104s-rotation-%d.png",
+                                 out_dir, deg);
+                        write_png(path, sz.w, sz.h, rgb.data());
+                        free(idx);
+                    }
+                }
+            }
+            // A failed panel commit: the glass still shows the old angle, so
+            // nothing is saved and the reported angle stays (retry works).
+            {
+                CHECK(tiny_rotation_select(90, false, apply, save, nullptr) == ESP_OK,
+                      "manual rotation: start at 90");
+                saved.clear();
+                bool persisted = true;
+                g_fail_next_full = true;
+                CHECK(tiny_rotation_select(180, false, apply, save, &persisted) == ESP_FAIL,
+                      "manual rotation: injected refresh failure returned");
+                CHECK(saved.empty() && !persisted && tiny_display_rotation() == 90,
+                      "manual rotation: failed commit neither saves nor reports 180");
+                CHECK(tiny_rotation_select(180, false, apply, save, &persisted) == ESP_OK &&
+                          persisted && saved == std::vector<int>{2} &&
+                          tiny_display_rotation() == 180,
+                      "manual rotation: same angle retries and commits");
+            }
+            // An IMU board is refused before anything moves.
+            {
+                saved.clear();
+                const int before = tiny_display_rotation(), refreshes = g_full_refreshes;
+                CHECK(tiny_rotation_select(270, true, apply, save, nullptr) == ESP_ERR_NOT_SUPPORTED &&
+                          saved.empty() && tiny_display_rotation() == before &&
+                          g_full_refreshes == refreshes,
+                      "manual rotation: refused on an accelerometer board, glass untouched");
+            }
+            // Reboot: the saved angle is seeded before anything is drawn, with
+            // no refresh of its own; the first card comes up in that frame.
+            {
+                CHECK(tiny_display_set_rotation(0) == ESP_OK, "manual rotation: reset");
+                tiny_display_init();
+                const int refreshes = g_full_refreshes;
+                CHECK(tiny_display_preset_rotation(tiny_rotation_boot_deg(true, 3)) == ESP_OK &&
+                          g_full_refreshes == refreshes && tiny_display_rotation() == 270 &&
+                          static_cast<int>(sticky_display_canvas()->rotation()) == 3,
+                      "boot preset: 270 seeded, nothing pushed");
+                CHECK(tiny_display_splash("t", "t") == ESP_OK && edge_ink(4) == 0,
+                      "boot preset: splash drawn in the saved frame");
+                CHECK(render_picker(270) == ESP_OK && sticky_display_canvas()->width() == 480,
+                      "boot preset: first card lays out landscape");
+                CHECK(tiny_display_preset_rotation(tiny_rotation_boot_deg(true, 9)) == ESP_OK &&
+                          tiny_display_rotation() == 0,
+                      "boot preset: invalid saved value boots 0 deg");
+                CHECK(tiny_display_preset_rotation(45) == ESP_ERR_INVALID_ARG &&
+                          tiny_display_rotation() == 0,
+                      "boot preset: a non-quarter angle is refused");
+            }
+            CHECK(tiny_display_set_rotation(0) == ESP_OK, "manual rotation: back to 0");
         }
 
         if (!strcmp(sz.tag, "amoled18-90")) {

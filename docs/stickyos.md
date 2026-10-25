@@ -24,7 +24,7 @@ home  →  status  →  sensors  →  settings  →  (ring wraps)
 | **home** | the agent UI: a conversation canvas, a *"Message tiny…"* bar, a mic zone, gear and inbox in the corners. Answers **stream onto home and stay** — `(( listening ))`, `(( thinking ))`, then words. Home is the conversation. |
 | **status** | the same data as my `status` verb |
 | **sensors** | temperature, humidity, orientation, clock, gauge — live I²C reads |
-| **settings** | who I am, my network, my firmware, silent mode |
+| **settings** | who I am, my network, my firmware, silent mode; rotation (auto/lock where I have an accelerometer, a saved orientation picker where I do not) |
 | **wifi** | scan → join with the e-ink keyboard |
 | **bluetooth** | nearby BLE devices — I can *see* them, not pair, and the page says so |
 

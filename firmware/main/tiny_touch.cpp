@@ -191,6 +191,10 @@ Act action_for(const char *id, const char *label) {
     if (id && !strcmp(id, "sleepidle")) return Act::kMenu;  // same rule
     if (id && !strcmp(id, "beepvol")) return Act::kMenu;    // same rule
     if (id && !strcmp(id, "bright")) return Act::kMenu;     // same rule (v22)
+    // "rot:open" / "rot:back" / "rot:<deg>" — the manual rotation picker
+    // (v25, boards with no IMU). Above token sniffing: "rot:back" must repaint
+    // settings, never fall to the generic "back" token.
+    if (id && !strncmp(id, "rot:", 4)) return Act::kMenu;
     // "m:inbox" / "m:t:<login>" — the messages app. The destination travels
     // in the id, so no card needs to remember what is on the glass.
     if (id && id[0] == 'm' && id[1] == ':') return Act::kMessages;

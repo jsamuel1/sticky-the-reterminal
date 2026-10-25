@@ -29,7 +29,7 @@ recovery/                factory-dump manifest + sha (the 32 MB dump itself is g
 
 Versions live in exactly one place: `firmware/main/tiny/tiny_version.h` —
 `TINY_FW_VERSION` (string, e.g. `0.27.0-u2`) and `TINY_GRAMMAR_VERSION`
-(int, currently 24). CMake reads the first; the heartbeat and `status` report
+(int, currently 25). CMake reads the first; the heartbeat and `status` report
 both. Bump the grammar on **any** change to a verb, its args, or a reply
 shape, and write a line in `CHANGELOG.md`.
 
@@ -119,7 +119,9 @@ Order is load-bearing. Do not reorder without reading the comments in the file.
 
 1. `board_init()` **first** — owns the power latch (GPIO45/46). Without it the
    board powers itself off when the button is released.
-2. `tiny_display_init()`, buzzer, restore silent/soft/rotation-lock from NVS
+2. `tiny_display_init()`, buzzer, restore silent/soft/rotation-lock from NVS;
+   boards with no IMU (`board_caps.imu` false, FNK0104S) also seed the saved
+   manual rotation (`rotq`) via `tiny_display_preset_rotation` before the splash
    **before** the boot chime (or mute un-mutes for one beep).
 3. Cold boot: splash (`tiny` + bar). Deep-sleep wake (EXT1 button / timer) is
    a **glance wake**: no splash, paint home first, init inputs after —
@@ -148,6 +150,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 | `tiny_button` | board GPIO press/hold · raw-GPIO UP+DOWN 1 s unlock chord where both keys exist (reTerminal) |
 | `tiny_lock` | §11 pocket lockout: manual on every board; IMU auto only with local UP+DOWN unlock · gates touch/buttons/**mic capture entry** · `status.locked` |
 | `tiny_orient` | IMU classify → auto-rotate (1 Hz e-ink; 300 ms AMOLED; 3 agreeing samples) · per-board axis tables in `tiny/tiny_orient_map.h` (host-tested) · feeds the supported lock detector at ≤1 Hz (disabled on no-chord boards) |
+| `tiny_rotation` | manual rotation for boards with no IMU (header-only, host-tested): capability gate on `board_caps.imu`, strict `rot:*` tap ids, settings picker card, apply-then-save through `tiny_display_set_rotation`; NVS `rotq`, unset/invalid boots 0° |
 | `tiny_audio` | PDM 16 kHz WAV into PSRAM (cap 15 s) · re-claims GPIO19/20 from USB-JTAG before every capture (deep-sleep wake mutes the mic otherwise) · buzzer LEDC GPIO48, silent/soft tiers |
 | `tiny_upload` / `tiny_screenshot` | `POST /api/media` (PSRAM buffer) · framebuffer → 2-bit PNG → URL |
 | `tiny_sensors` | live on-demand reads: SHT40, LSM6DS3TR-C, PCF8563, plus battery from BQ27220 or FNK GPIO 9 ADC (AMOLED: QMI8658, PCF85063A, AXP2101) · ADC burst cached 1 s so status/glass agree · nulls never fabricated |
@@ -164,7 +167,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 
 Other NVS namespaces: `tinywifi` (breadcrumbs), `tinyaskq`, `tinyboot`.
 
-## 5. The verb grammar (v24) and the parity rule
+## 5. The verb grammar (v25) and the parity rule
 
 Dispatched in `tiny_node.cpp::dispatch_inner()` — **23 verbs** on every
 board, plus `brightness` where `caps.brightness` is true (colour boards):

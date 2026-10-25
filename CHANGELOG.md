@@ -6,6 +6,26 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware 0.32.0, grammar v25** — boards without an accelerometer
+  (`board_caps.imu` false: the FNK0104S) get a manual rotation control in
+  Settings. The "rotation: N deg" row opens a picker card (`rotation`) with
+  the four orientations the canvas supports (portrait, landscape and both
+  flips, named from the panel's own aspect); a tap turns the glass through
+  `tiny_display_set_rotation`, the same commit/rollback path auto-rotate
+  uses, so layout, tap regions and the gesture frame turn together. The
+  choice is saved only after the panel commits it (NVS `tiny/cfg` `rotq`,
+  quarter turns) and is seeded before the splash on the next boot; an unset
+  or invalid value boots at 0°. The reTerminal and AMOLED-1.8 (both with an
+  IMU) are unchanged: their auto/lock row stays and `rot:*` taps are
+  refused. `tests/host/rotation_host_test.sh` runs the shipped rules and
+  `tiny_config.cpp` across process restarts (persist, failed save, invalid
+  value) plus a source contract on the capability gating;
+  `render_host_test.sh` renders the picker at all four FNK angles and checks
+  regions over ink, the turned button bar, the bottom-band home gesture, a
+  failed commit that neither saves nor reports the new angle, and the boot
+  preset. v25 was the number the spoken-replies design had proposed; it now
+  takes the next free one.
+
 - **firmware 0.31.2** — a relay envelope without a string `prompt` is now
   logged before its "unparseable envelope (no prompt)" reply:
   `envelope <id> rejected (no prompt): msg keys=[…] payload=… type=… keys=[…]

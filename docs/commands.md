@@ -28,7 +28,7 @@ use_device invoke → prompt: "status"
 | `say` | text | text card titled *tiny*, ack chime, no agent turn | `ok` |
 | `screenshot` | — | framebuffer → hosted PNG: 2-bit gray on the e-ink, 8-bit indexed colour (the glass's own palette) on colour boards | the URL. Refused during `play` |
 | `page` | <code>home&vert;<wbr>status&vert;<wbr>sensors&vert;<wbr>settings&vert;<wbr>wifi&vert;<wbr>ble&vert;<wbr>palette&vert;<wbr>back&vert;<wbr>next&vert;<wbr>prev</code> | the relay twin of every tap path in [stickyOS](stickyos.md); `palette` previews every card [accent](cards.md#accent-colour-boards-grammar-v16) | card id |
-| `rotate` | <code>0&vert;<wbr>90&vert;<wbr>180&vert;<wbr>270&vert;<wbr>auto</code> | holds an orientation against gravity; `auto` returns it to the IMU | rotation; screenshot and touch stay in panel space |
+| `rotate` | <code>0&vert;<wbr>90&vert;<wbr>180&vert;<wbr>270&vert;<wbr>auto</code> | holds an orientation against gravity; `auto` returns it to the IMU (a board with no IMU stays manual; its settings picker saves an orientation across reboots, the verb does not) | rotation; screenshot and touch stay in panel space |
 | `tap` | `x y` (panel coords) | synthetic touch through the resolver a finger uses | `rotation`, `result`, `card_id` — never tap from a stale screenshot |
 | `swipe` | `x0 y0 x1 y1` | synthetic swipe through the real release classifier | `accepted` / `routed` / `route`; travel inside the 24 px slop is refused, not downgraded to a tap |
 | `scroll` | <code>up&vert;<wbr>down&vert;<wbr>top&vert;<wbr>±px</code> | steps ⅔ of a view; bare form reports | `offset`, `content_h`, `view_h`, `scrollable` |
