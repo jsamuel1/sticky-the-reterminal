@@ -1,5 +1,5 @@
 #pragma once
-#define TINY_FW_VERSION "0.32.0"
+#define TINY_FW_VERSION "0.32.1"
 
 // The verb grammar is a 3-consumer contract (dashboard, iOS StickyPanel,
 // relay agents) held together by string prefixes. Bump this on ANY change to
@@ -216,4 +216,12 @@
 //        auto/lock row stays, rot:* taps are refused (NOT_SUPPORTED).
 //      + takes the number the spoken-replies design had proposed; that
 //        design takes the next free one when it lands.
-#define TINY_GRAMMAR_VERSION 25  // v25: manual rotation picker (no-IMU boards)
+// v26 = typed relay pushes are dropped, not answered:
+//      + an envelope whose payload `type` is a string other than "invoke"
+//        (the platform's late-reply "notify", for one) gets NO PATCH and
+//        does not snap the poll cadence. It never runs, even with a prompt.
+//        Envelopes with no `type`, or type "invoke", are unchanged; one
+//        without a string prompt still answers "unparseable envelope".
+//      + status: relay_pushes_dropped (count since boot) and
+//        relay_last_push (the last dropped push's type; absent until one).
+#define TINY_GRAMMAR_VERSION 26  // v26: typed relay pushes dropped unanswered

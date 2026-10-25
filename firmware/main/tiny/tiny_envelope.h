@@ -21,6 +21,32 @@ extern "C" {
 // Max bytes of the redacted payload preview inside the description.
 #define TINY_ENVELOPE_PREVIEW 120
 
+// What the node does with one relay envelope.
+//   INVOKE — run `prompt` as a verb and PATCH the reply. The payload's `type`
+//            is "invoke" or absent (older senders omit it) and `prompt` is a
+//            string.
+//   PUSH   — a typed platform push (`type` is a string other than "invoke":
+//            the platform's late-reply "notify", for one). Nobody waits for
+//            a reply, so the node drops it with no PATCH and no cadence
+//            snap. A push never runs, even if it carries a `prompt`.
+//   REJECT — anything else (no payload, unparseable, an invoke without a
+//            string prompt, a non-string type). Somebody may be waiting, so
+//            the node answers "unparseable envelope (no prompt)".
+// Relay delivery is delivered-once (PUT hands an envelope over exactly once
+// whether or not it is PATCHed), so dropping a push leaves nothing queued.
+typedef enum {
+    TINY_ENVELOPE_INVOKE = 0,
+    TINY_ENVELOPE_PUSH,
+    TINY_ENVELOPE_REJECT,
+} tiny_envelope_kind_t;
+
+// Classify a message's "payload" item (JSON string, object, other, or NULL).
+// For INVOKE, *prompt (when prompt is non-NULL) receives a malloc'd copy of
+// the prompt that the caller frees; otherwise it is set to NULL. For PUSH,
+// type_out (when non-NULL and cap > 0) receives the type, truncated to fit.
+tiny_envelope_kind_t tiny_envelope_classify(const cJSON *payload, char **prompt,
+                                            char *type_out, size_t type_cap);
+
 // `payload` is the message's "payload" item (a JSON string, an object, or
 // anything else, or NULL). Writes a NUL-terminated line into out (always
 // terminated when cap > 0) and returns out.

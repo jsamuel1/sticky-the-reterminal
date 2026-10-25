@@ -6,6 +6,24 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware 0.32.1, grammar v26** — a typed relay push is dropped, not
+  answered. An envelope whose payload `type` is a string other than `invoke`
+  (the platform's late-reply `notify`, "💻 <device> finished", fanned out to
+  every enrolled device) gets no PATCH and no cadence snap, and never runs
+  even if it carries a `prompt`. On 2026-10-25 a burst of 40 of them, from
+  invokes the ip-10-0-3-99 daemon finished after ~376 s, reached tiny-eba6;
+  answering each with a ~3 s TLS PATCH held `status` (and every bench OTA)
+  behind the queue for minutes. Relay delivery is delivered-once (a polled
+  envelope is never returned again, PATCHed or not; probed live), so a
+  dropped push leaves nothing queued. Untyped and `invoke` envelopes are
+  unchanged; one without a string prompt still answers "unparseable
+  envelope". `status` gains `relay_pushes_dropped` and `relay_last_push`.
+  The rule lives in `tiny_envelope_classify` (IDF-free);
+  `tests/host/envelope_host_test.sh` covers it with the flood's own shape.
+  `tools/ota_push.py` takes `--status-wait` (env `TINY_STATUS_WAIT`, default
+  180 s; CI passes 300) and, when a heartbeating board's relay stays silent,
+  fails with "relay backlogged" rather than "asleep or offline?".
+
 - **firmware 0.32.0, grammar v25** — boards without an accelerometer
   (`board_caps.imu` false: the FNK0104S) get a manual rotation control in
   Settings. The "rotation: N deg" row opens a picker card (`rotation`) with

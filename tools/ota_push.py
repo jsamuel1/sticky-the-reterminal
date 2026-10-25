@@ -223,6 +223,28 @@ def same_commit(fw_commit, sha):
     c = commit_of(fw_commit)
     return len(c) >= 7 and sha.startswith(c)
 
+
+def status_timeout_reason(dev, wait_s, now=None):
+    """Why `status` got no reply in wait_s, from a FRESH /api/devices row.
+
+    A board that still heartbeats (online, last_seen recent) is awake and
+    authenticated, so a silent relay means its queue is not draining: work
+    ahead of the probe (a flood of envelopes the firmware answers one ~3 s
+    PATCH at a time; before grammar v26 that included every late-reply
+    `notify` push). Otherwise the board is asleep or offline.
+    """
+    now = time.time() if now is None else now
+    name = dev.get("name") or dev.get("id")
+    seen = dev.get("last_seen")
+    age = int(now - seen) if isinstance(seen, (int, float)) else None
+    if dev.get("online") and age is not None and age <= 120:
+        return (f"status: no reply within {wait_s} s, but {name} heartbeated {age} s ago - "
+                "relay backlogged: envelopes ahead of the probe are not draining. Check the "
+                "owner's /api/events for a burst (device_result / notify), or the board's "
+                "serial log; raise --status-wait to ride it out")
+    when = f"last seen {age} s ago" if age is not None else "never seen"
+    return f"status: no reply within {wait_s} s ({name} {when}: asleep or offline?)"
+
 # --- main -------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -236,6 +258,9 @@ def main():
                     help="send even if the image stamp is not --board (proves the firmware guard)")
     ap.add_argument("--creds", action="store_true", help="fall back to ~/.tiny/credentials.json for the token")
     ap.add_argument("--timeout", type=int, default=300, help="seconds to wait for the new fw_commit")
+    ap.add_argument("--status-wait", type=int,
+                    default=int(os.environ.get("TINY_STATUS_WAIT", "180") or 180),
+                    help="seconds to wait for the first status reply (env TINY_STATUS_WAIT)")
     a = ap.parse_args()
 
     if a.inspect:
@@ -276,10 +301,10 @@ def main():
         # only a missing secret or entry may skip (the workflow's notice).
         die(f"{dev.get('name')} is offline (unplugged or asleep) - bench not updated")
 
-    step("status (before)")
-    s0 = api.status(dev_id)
+    step(f"status (before, up to {a.status_wait} s)")
+    s0 = api.status(dev_id, a.status_wait)
     if not s0:
-        die("status: no reply within 180 s (device asleep or offline?)")
+        die(status_timeout_reason(api.resolve(a.device), a.status_wait))
     if s0.get("board") != a.board:
         die(f"device reports board {s0.get('board')!r}, job is for {a.board!r}")
     if "ota" in (s0.get("absent") or []):

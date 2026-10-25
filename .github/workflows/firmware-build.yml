@@ -141,4 +141,5 @@ jobs:
           export TINY_DEVICE=$(python3 -c 'import json,os; print(json.loads(os.environ["TINY_BENCH_DEVICES"]).get(os.environ["BOARD"],""))')
           unset TINY_BENCH_DEVICES
           [ -n "$TINY_DEVICE" ] || { echo "::notice::no bench device for $BOARD"; exit 0; }
-          python3 tools/ota_push.py --board "$BOARD" --sha "$GITHUB_SHA" --image img/tiny_sticky.bin
+          python3 tools/ota_push.py --board "$BOARD" --sha "$GITHUB_SHA" --image img/tiny_sticky.bin \
+            --status-wait 300

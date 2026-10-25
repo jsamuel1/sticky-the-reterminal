@@ -120,6 +120,39 @@ extern "C" int tiny_envelope_key_is_secret(const char *key) {
     return 0;
 }
 
+extern "C" tiny_envelope_kind_t tiny_envelope_classify(const cJSON *payload, char **prompt,
+                                                       char *type_out, size_t type_cap) {
+    if (prompt) *prompt = nullptr;
+    if (type_out && type_cap) type_out[0] = 0;
+    // payload arrives as a SERIALIZED JSON STRING (the sender does
+    // JSON.stringify); tolerate a nested object too.
+    cJSON *parsed = nullptr;
+    const cJSON *obj = nullptr;
+    if (cJSON_IsString(payload) && payload->valuestring) {
+        parsed = cJSON_Parse(payload->valuestring);
+        obj = parsed;
+    } else if (cJSON_IsObject(payload)) {
+        obj = payload;
+    }
+    tiny_envelope_kind_t kind = TINY_ENVELOPE_REJECT;
+    if (cJSON_IsObject(obj)) {
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(obj, "type");
+        const cJSON *p = cJSON_GetObjectItemCaseSensitive(obj, "prompt");
+        if (cJSON_IsString(t) && t->valuestring && strcmp(t->valuestring, "invoke") != 0) {
+            kind = TINY_ENVELOPE_PUSH;
+            if (type_out && type_cap) snprintf(type_out, type_cap, "%s", t->valuestring);
+        } else if ((!t || cJSON_IsString(t)) && cJSON_IsString(p) && p->valuestring) {
+            kind = TINY_ENVELOPE_INVOKE;
+            if (prompt) {
+                *prompt = strdup(p->valuestring);
+                if (!*prompt) kind = TINY_ENVELOPE_REJECT;  // OOM: answer, never run half
+            }
+        }
+    }
+    cJSON_Delete(parsed);
+    return kind;
+}
+
 extern "C" char *tiny_envelope_describe(const cJSON *payload, char *out, size_t cap) {
     if (!out || cap == 0) return out;
     out[0] = 0;
