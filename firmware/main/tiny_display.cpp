@@ -496,6 +496,15 @@ EXT_RAM_BSS_ATTR static tiny_button_region_t s_regions[kMaxRegions];  // PSRAM .
 static int s_region_count = 0;
 EXT_RAM_BSS_ATTR static tiny_button_region_t s_staged[kMaxRegions];  // PSRAM .bss
 static int s_staged_count = 0;
+
+// Every publisher starts from a complete staging state. Specialized native
+// pages have regions but no card-button accents; leaving this scratch array
+// from a failed card would let their next publish commit unpainted styling.
+static void reset_staged_regions() {
+    s_staged_count = 0;
+    memset(s_btn_accent_staged, lcd_palette::kNeutral,
+           sizeof s_btn_accent_staged);
+}
 // Orientation state. The canvas owns the transform; this is the copy the render
 // path and the touch path both read, plus the JSON of the card on the glass so a
 // rotation can REDRAW it. Without the cache, turning the device would leave the
@@ -671,7 +680,7 @@ static void button_text(const cJSON *b, const char **label, const char **id) {
 }
 
 static void draw_buttons(Canvas &c, cJSON *buttons, int *content_bottom) {
-    s_staged_count = 0;
+    reset_staged_regions();
     if (!cJSON_IsArray(buttons)) return;
     int n = cJSON_GetArraySize(buttons);
     if (n <= 0) return;
@@ -2002,6 +2011,64 @@ extern "C" esp_err_t tiny_display_init(void) {
     return err;
 }
 
+// Snapshot of every Canvas-owned value that can become visible through a later
+// partial refresh. Caller holds display_lock(). Frames live in PSRAM only: a
+// colour panel needs roughly 123 KiB, and internal RAM belongs to DMA/TLS.
+struct CanvasFrameSnapshot {
+    Canvas *canvas;
+    CanvasRotation rotation;
+    uint8_t pen;
+    size_t gray_len;
+    size_t accent_len;
+    uint8_t *gray = nullptr;
+    uint8_t *accent = nullptr;
+    bool captured = false;
+
+    explicit CanvasFrameSnapshot(Canvas *c)
+        : canvas(c), rotation(c->rotation()), pen(c->pen()),
+          gray_len(c->stride() * c->physical_height()),
+          accent_len(c->accent_data()
+                         ? c->accent_stride() * c->physical_height()
+                         : 0) {}
+
+    ~CanvasFrameSnapshot() {
+        heap_caps_free(gray);
+        heap_caps_free(accent);
+    }
+
+    esp_err_t capture() {
+        gray = static_cast<uint8_t *>(heap_caps_malloc(
+            gray_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (accent_len)
+            accent = static_cast<uint8_t *>(heap_caps_malloc(
+                accent_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!gray || (accent_len && !accent)) return ESP_ERR_NO_MEM;
+        memcpy(gray, canvas->data(), gray_len);
+        if (accent_len) memcpy(accent, canvas->accent_data(), accent_len);
+        captured = true;
+        return ESP_OK;
+    }
+
+    void restore() {
+        if (!captured) return;
+        memcpy(canvas->data(), gray, gray_len);
+        if (accent_len) memcpy(canvas->accent_data(), accent, accent_len);
+        canvas->set_rotation(rotation);
+        canvas->set_pen(pen);
+    }
+};
+
+// A colour transfer can report failure after earlier asynchronous strips
+// reached panel RAM. Once Canvas is restored, repaint the old frame once. If
+// that also fails, lcd_canvas keeps its baseline uncertain and forces the next
+// partial request through a full-frame repair.
+static void repair_restored_frame(const char *what) {
+    const esp_err_t repair = sticky_display_refresh();
+    if (repair != ESP_OK)
+        ESP_LOGE(TAG, "%s repair also failed: %s", what,
+                 esp_err_to_name(repair));
+}
+
 // ---- image card -------------------------------------------------------
 // {"type":"image","url":"https://.../<sha16>/0.raw"} — the remote render rail
 // (docs/API_CONTRACT.md). The device is a dumb pixel-pusher: the server
@@ -2130,15 +2197,23 @@ static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch,
     // glass, so it must not leave one in the archive (or poison the same-URL
     // dedupe so a successful retry is never archived).
     display_lock();
-    // Touch mapping reads the canvas rotation; a failed commit leaves the
-    // previous (rotated) card on glass, so it must get its frame back.
-    const CanvasRotation glass_rot = c->rotation();
+    CanvasFrameSnapshot frame(c);
+    err = frame.capture();
+    if (err != ESP_OK) {
+        display_unlock();
+        heap_caps_free(buf);
+        return err;
+    }
     blit_raw_locked(c, buf, len);
     err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
-    s_staged_count = 0;                  // an image has no buttons
-    if (err == ESP_OK) publish_regions(card_id, "image");
-    else c->set_rotation(glass_rot);
+    reset_staged_regions();                  // an image has no buttons
+    if (err == ESP_OK) {
+        publish_regions(card_id, "image");
+    } else {
+        frame.restore();
+        repair_restored_frame("image rollback");
+    }
     display_unlock();
     if (err == ESP_OK) photos_sd_save(ju->valuestring, buf, len);
     heap_caps_free(buf);
@@ -2366,7 +2441,13 @@ static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
         from_net = true;
     }
     display_lock();
-    const CanvasRotation glass_rot = c->rotation();   // restored on failure
+    CanvasFrameSnapshot frame(c);
+    err = frame.capture();
+    if (err != ESP_OK) {
+        display_unlock();
+        if (!cache_owned) heap_caps_free(buf);
+        return err;
+    }
     blit_raw_locked(c, buf, len);
     {   // page indicator chip, bottom-right: white ground so it reads on any
         // photo; tells the truth about position ("2/7"), per the contract.
@@ -2383,14 +2464,19 @@ static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
     // Regions (panel space): home 88x88 top-left; prev/next = 120px edge
     // bands below it. Ids ride the touch router's "g:" namespace; labels
     // stay inert under the defuse rule.
-    s_staged_count = 0;
+    reset_staged_regions();
     stage_region(0, 0, 88, 88, "home", "home");
     stage_region(0, 100, 120, s_ph - 100, "prev", "g:prev");
     stage_region(s_pw - 120, 100, 120, s_ph - 100, "next", "g:next");
     err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
-    if (err == ESP_OK) publish_regions("gallery", "gallery");
-    else c->set_rotation(glass_rot);   // old card's touch frame survives
+    if (err == ESP_OK) {
+        publish_regions("gallery", "gallery");
+    } else {
+        reset_staged_regions();
+        frame.restore();
+        repair_restored_frame("gallery rollback");
+    }
     display_unlock();
     if (err != ESP_OK) {
         if (!cache_owned) heap_caps_free(buf);
@@ -2688,40 +2774,18 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     char geo_scroll_card[sizeof s_scroll_card];
     strlcpy(geo_scroll_card, s_scroll_card, sizeof geo_scroll_card);
     display_lock();
-    const CanvasRotation glass_rot = c->rotation();
     const int glass_w = c->width(), glass_h = c->height();
-    const uint8_t glass_pen = c->pen();
     const uint8_t glass_accent = s_accent;
     const int glass_btn_scale = s_btn_scale;
-    // Draw-only wake-baseline construction intentionally leaves its newly
-    // rendered bytes in Canvas for the caller to snapshot; it never commits
-    // and therefore needs no rollback allocation. Real commits use PSRAM only:
-    // a 368x448 colour frame needs ~123 KiB across both planes and must never
-    // consume the internal heap needed by TLS, DMA, and FreeRTOS.
-    const size_t glass_gray_len = s_draw_only
-        ? 0 : c->stride() * c->physical_height();
-    uint8_t *glass_gray = glass_gray_len
-        ? static_cast<uint8_t *>(heap_caps_malloc(glass_gray_len,
-                                                   MALLOC_CAP_SPIRAM))
-        : nullptr;
-    const uint8_t *canvas_accent = c->accent_data();
-    const size_t glass_accent_len = !s_draw_only && canvas_accent
-        ? c->accent_stride() * c->physical_height() : 0;
-    uint8_t *glass_accent_bytes = glass_accent_len
-        ? static_cast<uint8_t *>(heap_caps_malloc(glass_accent_len,
-                                                   MALLOC_CAP_SPIRAM))
-        : nullptr;
-    if ((!s_draw_only && !glass_gray) ||
-        (glass_accent_len && !glass_accent_bytes)) {
-        heap_caps_free(glass_gray);
-        heap_caps_free(glass_accent_bytes);
-        display_unlock();
-        cJSON_Delete(root);
-        return ESP_ERR_NO_MEM;
+    CanvasFrameSnapshot frame(c);
+    if (!s_draw_only) {
+        const esp_err_t snapshot_err = frame.capture();
+        if (snapshot_err != ESP_OK) {
+            display_unlock();
+            cJSON_Delete(root);
+            return snapshot_err;
+        }
     }
-    if (glass_gray_len) memcpy(glass_gray, c->data(), glass_gray_len);
-    if (glass_accent_len)
-        memcpy(glass_accent_bytes, canvas_accent, glass_accent_len);
 
     // Rotation is applied here, once per render: the layout helpers below all
     // read s_w/s_h, and the canvas turns every pixel they draw.
@@ -2835,9 +2899,9 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     // HEAD did not compile without it.
     static int s_pushed_rot = -1;
     // §12 wake: baseline capture pass — draw into the canvas, push nothing.
-    // Regions are NOT published (nothing new is on the glass). The baseline
-    // capture itself wants the newly drawn bytes, so discard—not restore—the
-    // transaction snapshot.
+    // Draw-only wake-baseline construction intentionally leaves its newly
+    // rendered bytes in Canvas for the caller to capture; it never commits and
+    // therefore skips CanvasFrameSnapshot::capture().
     if (s_draw_only) {
         display_unlock();
         cJSON_Delete(root);
@@ -2870,23 +2934,22 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
         s_commit_alert = is_alert;
         publish_regions(cid_s, type_s);
     } else {
-        memcpy(c->data(), glass_gray, glass_gray_len);
-        if (glass_accent_len)
-            memcpy(c->accent_data(), glass_accent_bytes, glass_accent_len);
-        c->set_rotation(glass_rot);
-        c->set_pen(glass_pen);
+        frame.restore();
         s_w = glass_w; s_h = glass_h;
         s_accent = glass_accent;
         s_btn_scale = glass_btn_scale;
+        reset_staged_regions();
         s_scroll = geo_scroll; s_content_h = geo_content_h;
         s_body_top = geo_body_top; s_body_bot = geo_body_bot;
         s_view_top = geo_view_top; s_view_bot = geo_view_bot;
         strlcpy(s_scroll_card, geo_scroll_card, sizeof s_scroll_card);
+        // The Canvas rollback above restores software truth. Repaint once so
+        // an earlier successful DMA strip from this failed request cannot stay
+        // visible under the old card identity/touch regions.
+        repair_restored_frame("card rollback");
         ESP_LOGW(TAG, "refresh failed (%s) — keeping previous tap regions",
                  esp_err_to_name(err));
     }
-    heap_caps_free(glass_gray);
-    heap_caps_free(glass_accent_bytes);
     display_unlock();
 
     ESP_LOGI(TAG, "card rendered type=%s title=\"%s\" id=\"%s\" buttons=%d -> %s",
@@ -2912,6 +2975,12 @@ extern "C" esp_err_t tiny_display_splash(const char *version, const char *state)
     Canvas *c = sticky_display_canvas();
     if (!c) return ESP_ERR_INVALID_STATE;
     display_lock();
+    CanvasFrameSnapshot frame(c);
+    esp_err_t err = frame.capture();
+    if (err != ESP_OK) {
+        display_unlock();
+        return err;
+    }
     const int kSplashBarX = ((int)c->width() - kSplashBarW) / 2;
     const int kSplashBarY = (int)c->height() / 2 + 20;
     c->clear(GrayLevel::White);
@@ -2925,11 +2994,16 @@ extern "C" esp_err_t tiny_display_splash(const char *version, const char *state)
     c->fill_rect(kSplashBarX + 2, kSplashBarY + 2,
                  (kSplashBarW - 4) * 25 / 100, kSplashBarH - 4,
                  GrayLevel::Black);  // 25%: the display is up (you can see this)
-    esp_err_t err = sticky_display_refresh_monochrome();
+    err = sticky_display_refresh_monochrome();
     // The splash has no buttons: retire the previous card's tap regions, or a
     // tap on a blank corner would still fire the last card's action.
-    s_staged_count = 0;
-    if (err == ESP_OK) publish_regions("splash", "splash");
+    reset_staged_regions();
+    if (err == ESP_OK) {
+        publish_regions("splash", "splash");
+    } else {
+        frame.restore();
+        repair_restored_frame("splash rollback");
+    }
     display_unlock();
     return err;
 }
@@ -2947,13 +3021,19 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     StreamDisplacement displace;
     if (s_stream_on && !s_stream_rendering) displace.begin(render_epoch);
     display_lock();
+    CanvasFrameSnapshot frame(c);
+    esp_err_t err = frame.capture();
+    if (err != ESP_OK) {
+        display_unlock();
+        return err;
+    }
     // Server bytes are canvas-space at the panel's native landscape origin —
     // same law as the image card. Without this, a portrait canvas (IMU
     // auto-rotate on a pocket device) remaps/clips every draw_pixel and the
     // "frame" arrives as white glass: take 2's white-paint bug, convicted.
-    // A failed commit restores the rotation: the previous card is still on
-    // glass and the gesture router maps touches through this canvas.
-    const CanvasRotation glass_rot = c->rotation();
+    // A failed commit restores the whole prior Canvas and repaints it: rotation
+    // alone cannot stop a later partial acknowledgement from exposing rejected
+    // raw pixels.
     c->set_rotation(CanvasRotation::Landscape);
     {
         PenScope pen(*c, lcd_palette::kMono);   // stream frames: literal gray
@@ -2965,9 +3045,9 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
             }
         }
     }
-    esp_err_t err = partial ? sticky_display_refresh_partial()
-                            : sticky_display_refresh_monochrome();
-    s_staged_count = 0;  // a raw blit has no known buttons
+    err = partial ? sticky_display_refresh_partial()
+                  : sticky_display_refresh_monochrome();
+    reset_staged_regions();  // a raw blit has no known buttons
     if (err == ESP_OK) {
         // Claim logical ownership before publishing the new glass identity:
         // an older HTTPS render now observes a stale epoch, and any live text
@@ -2978,7 +3058,8 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
         // keep keyboard gesture policy (cancel/back-refusal/silenced flips).
         publish_regions("blit", "blit");
     } else {
-        c->set_rotation(glass_rot);
+        frame.restore();
+        repair_restored_frame("blit rollback");
     }
     display_unlock();
     return err;

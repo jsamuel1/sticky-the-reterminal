@@ -40,6 +40,9 @@ bool s_awake = false;           // panel out of SLPIN and backlight lit
 bool s_slept = false;           // sticky_display_sleep() sent SLPIN
 uint8_t s_brightness = 80;
 uint32_t s_pushes = 0;
+// A queued colour transfer can fail after earlier strips reached panel RAM.
+// Until one full frame succeeds, s_pushed cannot prove what glass contains.
+bool s_frame_uncertain = false;
 
 // Push canvas rows [y0, y1) through the two bounce buffers: strip k converts
 // while strip k-1 is on the wire. Completions arrive FIFO, so before reusing a
@@ -91,6 +94,9 @@ esp_err_t commit(int y0, int y1, const char *kind)
     const int64_t t0 = esp_timer_get_time();
     esp_err_t err = (y1 > y0) ? push_rows(y0, y1) : ESP_OK;
     if (err != ESP_OK) {
+        // Some strips may already be visible. Keep the old software baseline,
+        // but force the next partial request through a full-frame repair.
+        s_frame_uncertain = true;
         ESP_LOGE(kTag, "%s push rows %d..%d failed: %s", kind, y0, y1,
                  esp_err_to_name(err));
         return err;
@@ -103,6 +109,7 @@ esp_err_t commit(int y0, int y1, const char *kind)
     memcpy(s_acc_pushed + static_cast<size_t>(y0) * astride,
            s_acc + static_cast<size_t>(y0) * astride,
            static_cast<size_t>(y1 - y0) * astride);
+    if (y0 == 0 && y1 == s_ops->height) s_frame_uncertain = false;
     if (!s_awake) {
         err = s_ops->brightness(s_brightness);
         if (err != ESP_OK) return err;
@@ -121,6 +128,10 @@ esp_err_t full(const char *kind) { return commit(0, s_ops->height, kind); }
 esp_err_t partial(const char *kind)
 {
     if (s_canvas == nullptr) return ESP_ERR_INVALID_STATE;
+    // A prior asynchronous strip failure makes dirty-band comparison unsafe:
+    // Canvas and s_pushed can both contain the old frame while glass contains
+    // a prefix of the rejected one. Only a successful full push repairs truth.
+    if (s_frame_uncertain) return full(kind);
     int g0 = 0, g1 = 0, a0 = 0, a1 = 0, y0 = 0, y1 = 0;
     // A pixel can change colour without changing gray (same text, new
     // accent), so the band covers both planes.
@@ -151,6 +162,7 @@ void release()
     s_fb = s_pushed = s_acc = s_acc_pushed = nullptr;
     s_strip[0] = s_strip[1] = nullptr;
     s_pal = nullptr;
+    s_frame_uncertain = false;
 }
 
 }  // namespace

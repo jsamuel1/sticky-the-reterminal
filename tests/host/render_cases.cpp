@@ -129,9 +129,10 @@ void *render_test_malloc(size_t n) {
     return malloc(n);
 }
 
+static int g_gray_refreshes = 0;
 Canvas *sticky_display_canvas() { return g_canvas; }
 esp_err_t sticky_display_init() { return 0; }
-esp_err_t sticky_display_refresh() { return 0; }
+esp_err_t sticky_display_refresh() { ++g_gray_refreshes; return 0; }
 esp_err_t sticky_display_refresh_partial() { return 0; }
 static uint32_t fnv1a(const uint8_t *p, size_t n);
 esp_err_t sticky_display_refresh_partial_baseline(const uint8_t *prev) {
@@ -1051,13 +1052,16 @@ int main(int argc, char **argv) {
                   "panel native: rollback-snapshot OOM refuses before drawing");
             g_fail_alloc_size = 0;
             g_fail_next_full = true;
+            const int repairs = g_gray_refreshes;
             CHECK(tiny_display_render_card(
-                      R"J({"type":"text","card_id":"failed-over-image","title":"x","body":"y"})J") == ESP_FAIL &&
+                      R"J({"type":"text","card_id":"failed-over-image","title":"x","body":"y","buttons":[{"label":"bad","accent":"pink"}]})J") == ESP_FAIL &&
                       !strcmp(tiny_display_current_card_id(), "stream") &&
                       tiny_display_rotation() == 90 &&
                       sticky_display_canvas()->rotation() == CanvasRotation::Landscape &&
-                      frame_hash() == image_frame_hash,
-                  "panel native: failed drawn card restores image bytes and touch frame");
+                      frame_hash() == image_frame_hash &&
+                      g_gray_refreshes == repairs + 1,
+                  "panel native: failed drawn card restores image bytes/touch frame "
+                  "and repaints old glass");
             // Gallery publishes native-space tap regions without running the
             // generic layout. Its visible ack therefore catches stale s_w/s_h:
             // correct landscape dimensions repaint this bottom-left interior
@@ -1066,9 +1070,11 @@ int main(int argc, char **argv) {
                   "panel native: gallery probe starts outside button paint");
             const esp_err_t ack_err = tiny_display_flash_button(0);
             const int ack_px = px(31, 390);
-            CHECK(ack_err == ESP_OK && ack_px == 3,
-                  "panel native: failed card restores live ack dimensions (px=%d)",
-                  ack_px);
+            const int ack_accent = sticky_display_canvas()->accent_at(31, 390);
+            CHECK(ack_err == ESP_OK && ack_px == 3 &&
+                      ack_accent == lcd_palette::kNeutral,
+                  "panel native: failed card restores live ack dimensions/style "
+                  "(px=%d accent=%d)", ack_px, ack_accent);
             int native_offset = -1, native_content = -1, native_view = -1;
             tiny_display_scroll_state(&native_offset, &native_content, &native_view);
             CHECK(!tiny_display_can_scroll() && native_offset == 0 &&
@@ -1273,10 +1279,12 @@ int main(int argc, char **argv) {
                       "kb->blit: keyboard re-renders at 90 deg");
                 expect_keyboard_policy("kb->blit baseline");
 
+                const uint32_t keyboard_frame = frame_hash();
                 g_fail_next_full = true;
                 CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_FAIL &&
-                          !strcmp(tiny_display_current_card_id(), "kb-blit"),
-                      "kb->blit: failed raw frame keeps keyboard on glass");
+                          !strcmp(tiny_display_current_card_id(), "kb-blit") &&
+                          frame_hash() == keyboard_frame,
+                      "kb->blit: failed raw frame keeps keyboard bytes on glass");
                 // Same logical frame as the keyboard: the failed blit must
                 // hand the canvas rotation back (no test-side fix-up).
                 CHECK(static_cast<int>(sticky_display_canvas()->rotation()) * 90 ==
