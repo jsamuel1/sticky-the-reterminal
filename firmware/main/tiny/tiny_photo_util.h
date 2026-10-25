@@ -55,6 +55,10 @@ inline int choose_scale(int sw, int sh, int want_w, int want_h) {
 // nearest neighbour (the covered span is one source pixel).
 inline void resample_row(const uint8_t *src, int sw, int sh, int dw, int dh,
                          int y, uint8_t *out) {
+    // Degenerate boxes or an out-of-range row write nothing (no divide by
+    // zero, no read past the source).
+    if (!src || !out || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 || y < 0 || y >= dh)
+        return;
     int y0 = (int)((int64_t)y * sh / dh);
     int y1 = (int)((int64_t)(y + 1) * sh / dh);
     if (y1 <= y0) y1 = y0 + 1;

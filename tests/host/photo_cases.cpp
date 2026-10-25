@@ -80,6 +80,15 @@ int main() {
         uint8_t up[64];
         resample(src, 4, 4, up, 8, 8);
         CHECK(up[0] == 0 && up[7] == 200 && up[63] == 50, "upscale is nearest neighbour");
+        // degenerate boxes / rows write nothing and do not divide by zero
+        uint8_t keep[4] = {7, 7, 7, 7};
+        resample_row(src, 4, 4, 0, 2, 0, keep);
+        resample_row(src, 4, 4, 2, 0, 0, keep);
+        resample_row(src, 0, 4, 2, 2, 0, keep);
+        resample_row(src, 4, 4, 2, 2, 2, keep);
+        resample_row(src, 4, 4, 2, 2, -1, keep);
+        CHECK(keep[0] == 7 && keep[1] == 7 && keep[2] == 7 && keep[3] == 7,
+              "resample_row ignores zero-size boxes and out-of-range rows");
     }
 
     // ---- dither ----

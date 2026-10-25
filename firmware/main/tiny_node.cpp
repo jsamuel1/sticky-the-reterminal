@@ -1454,7 +1454,7 @@ static esp_err_t render_thread(const char *json, char *sum, size_t scap, int old
         // (video, files) is named in the text instead of vanishing.
         const char *body = jstr(m, "body");
         cJSON *imgs = cJSON_CreateArray();
-        int n_img = 0, n_other = 0;
+        int n_img = 0, n_other = 0, n_over = 0;
         const cJSON *a = nullptr;
         cJSON_ArrayForEach(a, cJSON_GetObjectItem(m, "attachments")) {
             const char *kind = jstr((cJSON *)a, "kind");
@@ -1464,14 +1464,20 @@ static esp_err_t render_thread(const char *json, char *sum, size_t scap, int old
             if (image && *url && n_photos + n_img < 8 && imgs) {
                 cJSON_AddItemToArray(imgs, cJSON_CreateString(url));
                 ++n_img;
+            } else if (image && *url) {
+                ++n_over;  // a photo past the per-card cap: still a photo
             } else {
                 ++n_other;
             }
         }
-        char extra[32] = "";
+        char extra[48] = "";
+        int at = 0;
         if (n_other)
-            snprintf(extra, sizeof extra, "%s[%d %s]", *body ? " " : "", n_other,
-                     n_other == 1 ? "attachment" : "attachments");
+            at = snprintf(extra, sizeof extra, "%s[%d %s]", *body ? " " : "", n_other,
+                          n_other == 1 ? "attachment" : "attachments");
+        if (n_over && at >= 0 && at < (int)sizeof extra)
+            snprintf(extra + at, sizeof extra - at, "%s[+%d %s]",
+                     (*body || at) ? " " : "", n_over, n_over == 1 ? "photo" : "photos");
         snprintf(line, sizeof line, "%s %s: %s%s", clock,
                  strcmp(dir, "sent") == 0 ? "me" : them,
                  (*body || *extra || !n_img) ? body : "photo", extra);
