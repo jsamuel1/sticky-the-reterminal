@@ -5,6 +5,7 @@
 #include "tiny/tiny_node.h"
 #include "tiny/board_caps.h"
 #include "tiny/tiny_beacon.h"
+#include "tiny/tiny_envelope.h"
 #include "tiny/tiny_heapmark.h"
 #include "tiny/tiny_askq.h"
 #include "tiny/tiny_agent.h"
@@ -2842,8 +2843,21 @@ static void poll_relay(char *resp, int cap) {
         note_activity();  // an envelope is a conversation: stay in 5s cadence
         if (cJSON_IsString(prompt))
             dispatch(id->valuestring, prompt->valuestring);
-        else
+        else {
+            // Name what arrived: the reply alone cannot identify a client that
+            // floods the queue with prompt-less messages. Values under
+            // credential-looking keys are redacted (tiny_envelope.cpp).
+            char why[320];
+            tiny_envelope_describe(payload, why, sizeof why);
+            char keys[96] = {0};
+            size_t kl = 0;
+            for (const cJSON *c = m->child; c && kl + 22 < sizeof keys; c = c->next)
+                kl += snprintf(keys + kl, sizeof keys - kl, "%s%.20s", kl ? "," : "",
+                               c->string ? c->string : "?");
+            ESP_LOGW(TAG, "envelope %s rejected (no prompt): msg keys=[%s] %s",
+                     id->valuestring, keys, why);
             reply(id->valuestring, "unparseable envelope (no prompt) - never silence");
+        }
         if (inner) cJSON_Delete(inner);
     }
     cJSON_Delete(root);
