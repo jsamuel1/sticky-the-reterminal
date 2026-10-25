@@ -2731,20 +2731,64 @@ static esp_err_t render_universe_at(const cJSON *spec, uint32_t claimed_epoch);
 // cannot nest), kept off the relay task's stack (~1.2 KB).
 EXT_RAM_BSS_ATTR static tiny_agent_roster_t s_universe_base;
 EXT_RAM_BSS_ATTR static tiny_agent_roster_t s_universe_next;
+// The push's roster merge, all or nothing, BEFORE anything is claimed:
+//   "tinys" absent        -> the page, no merge (ESP_OK)
+//   "tinys" not an array  -> ESP_ERR_INVALID_ARG (null, a string, an object)
+//   any element refused   -> that element's error: a non-string is
+//                            ESP_ERR_INVALID_ARG, a slug tiny_agent refuses
+//                            (empty, >64 chars, space/quote/backslash/control)
+//                            returns its own verdict
+//   more slugs than fit   -> ESP_ERR_INVALID_SIZE: the roster's eviction rule
+//                            would drop a slug this same push asked for
+// One bad element fails the whole push: no subset of what was asked is ever
+// painted, persisted or reported as success.
+static esp_err_t universe_merge(const cJSON *spec, tiny_agent_roster_t &base,
+                                tiny_agent_roster_t &next) {
+    tiny_agent_roster_snapshot(&base);
+    next = base;
+    const cJSON *arr = cJSON_GetObjectItem(spec, "tinys");
+    if (!arr) return ESP_OK;
+    if (!cJSON_IsArray(arr)) {
+        ESP_LOGW(TAG, "universe push: tinys is not an array - refused");
+        return ESP_ERR_INVALID_ARG;
+    }
+    int i = 0;
+    const cJSON *e = nullptr;
+    cJSON_ArrayForEach(e, arr) {
+        const esp_err_t r = cJSON_IsString(e)
+                                ? tiny_agent_roster_preview_add(&next, e->valuestring)
+                                : ESP_ERR_INVALID_ARG;
+        if (r != ESP_OK) {
+            ESP_LOGW(TAG, "universe push: tinys[%d] refused (%s) - push refused",
+                     i, esp_err_to_name(r));
+            return r;
+        }
+        ++i;
+    }
+    cJSON_ArrayForEach(e, arr)
+        if (!tiny_agent_roster_has(&next, e->valuestring)) {
+            ESP_LOGW(TAG, "universe push: %d slugs do not fit a %d-row roster "
+                     "- refused", i, TINY_AGENT_ROSTER_MAX);
+            return ESP_ERR_INVALID_SIZE;
+        }
+    return ESP_OK;
+}
 static esp_err_t render_universe_at(const cJSON *spec, uint32_t claimed_epoch) {
+    tiny_agent_roster_t &base = s_universe_base;
+    tiny_agent_roster_t &next = s_universe_next;
+    // Validated before the claim: a refused push is not a newer request, so
+    // it supersedes nothing (an image still fetching keeps its turn).
+    const esp_err_t verr = universe_merge(spec, base, next);
+    if (verr != ESP_OK) {
+        // As a malformed finale card: the answer still ends, as its text.
+        if (claimed_epoch && s_stream_on && s_stream_end_pending)
+            stream_finish();
+        return verr;
+    }
     const uint32_t claim = claimed_epoch ? claimed_epoch
                            : s_rerendering ? s_render_epoch
                                            : ++s_render_epoch;
     const char *prio = tiny_universe_push_priority(spec);
-    const cJSON *arr = cJSON_GetObjectItem(spec, "tinys");
-    tiny_agent_roster_t &base = s_universe_base;
-    tiny_agent_roster_t &next = s_universe_next;
-    tiny_agent_roster_snapshot(&base);
-    next = base;
-    const cJSON *e = nullptr;
-    cJSON_ArrayForEach(e, arr)
-        if (cJSON_IsString(e))
-            tiny_agent_roster_preview_add(&next, e->valuestring);
     // Only a roster the push actually changes is written: pushing slugs the
     // roster already holds (or none) costs no flash write.
     bool merges = next.n != base.n;
@@ -2764,7 +2808,7 @@ static esp_err_t render_universe_at(const cJSON *spec, uint32_t claimed_epoch) {
     return err;
 }
 extern "C" const char *tiny_display_err_name(esp_err_t err) {
-    return err == TINY_DISPLAY_SUPERSEDED ? "SUPERSEDED" : esp_err_to_name(err);
+    return err == TINY_DISPLAY_SUPERSEDED ? "SUPERSEDED" : tiny_agent_err_name(err);
 }
 
 extern "C" esp_err_t tiny_display_render_card(const char *card_json) {
@@ -3111,7 +3155,7 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch,
         err = tiny_agent_roster_commit(pc.roster_base, pc.roster_next);
         if (err != ESP_OK)
             ESP_LOGW(TAG, "universe roster not saved (%s) - page rolled back",
-                     esp_err_to_name(err));
+                     tiny_agent_err_name(err));
     }
     // Buttons become touchable ONLY once the human can see them. Publishing at
     // draw time made taps in the ~2s refresh window resolve against a layout

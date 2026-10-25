@@ -13,6 +13,21 @@
 // leaves RAM, flash and the caller's answer agreeing on the OLD state, so
 // the glass can never show a roster a reboot would lose.
 //
+// A failed NVS write is OUTCOME-UNKNOWN, not "nothing happened": IDF writes
+// the new blob version before erasing the old one, so set_blob can fail
+// (ESP_ERR_NVS_REMOVE_FAILED, or any error from the old-version erase) after
+// the new bytes are already the newest on flash. So:
+//   set_blob OK or REMOVE_FAILED, commit OK -> the new state is what a
+//       reboot loads (IDF finishes the old-version removal at init): adopt.
+//   anything else after open -> put the old state back (rewrite it, or erase
+//       the key when there was none) and say the write failed.
+//   and if THAT restore fails too -> read back what flash holds and adopt
+//       it: the old state (refused, settled), the new one (ESP_OK — it IS
+//       what a reboot loads), else TINY_AGENT_UNSETTLED: flash holds the
+//       old or the new whole state (one blob: never a mix), RAM stays old,
+//       and s_unsettled makes the next mutation write even when it changes
+//       nothing, so the first healthy write settles flash back onto RAM.
+//
 // Validation lives HERE, once: the backend clamps slugs at 64 chars and
 // slugifies server-side, but a slug with spaces/quotes would also corrupt
 // the JSON body and the roster keys — refuse locally with a real error
@@ -52,10 +67,14 @@ static bool s_loaded = false;
 // written only with s_mux held.
 EXT_RAM_BSS_ATTR static State s_state;
 EXT_RAM_BSS_ATTR static State s_next;
+EXT_RAM_BSS_ATTR static State s_read;   // a read-back's decode
 EXT_RAM_BSS_ATTR static StoredState s_blob;
 // Whether flash holds a "state" blob (else a failed first write must leave
 // none behind, so the legacy keys / seed stay what a reboot loads).
 static bool s_blob_present = false;
+// A write AND its restore failed: flash may differ from RAM (old or new whole
+// state). Cleared by the next write that lands, or restore that succeeds.
+static bool s_unsettled = false;
 
 static void lock(void) {
     if (!s_mux) s_mux = xSemaphoreCreateMutex();
@@ -185,46 +204,126 @@ static void load_locked(void) {
                  s_state.slug);
 }
 
-// Write `next` as the one "state" blob. On any refusal flash is put back to
-// what RAM (s_state) says, so nothing reloads a state the caller was told
-// failed: a blob that landed before nvs_commit refused is rewritten with the
-// previous state, or erased when there was none.
+// set_blob outcomes after which the written bytes are the newest version on
+// flash. REMOVE_FAILED: "the value was written however, and update will be
+// finished after re-initialization of nvs" (IDF nvs.h) — written, not refused.
+static bool blob_landed(esp_err_t r) {
+    return r == ESP_OK || r == ESP_ERR_NVS_REMOVE_FAILED;
+}
+
+// Put flash back to RAM's state (s_state) after a write whose outcome is
+// unknown. Rewriting identical bytes is free (IDF compares before writing);
+// with no blob before, the key is erased so the legacy keys / seed load.
+static esp_err_t restore_locked(nvs_handle_t h) {
+    esp_err_t rb;
+    if (s_blob_present) {
+        encode(s_state, &s_blob);
+        rb = nvs_set_blob(h, KEY, &s_blob, sizeof s_blob);
+        if (blob_landed(rb)) rb = ESP_OK;
+    } else {
+        rb = nvs_erase_key(h, KEY);
+        if (rb == ESP_ERR_NVS_NOT_FOUND) rb = ESP_OK;
+    }
+    if (rb == ESP_OK) rb = nvs_commit(h);
+    return rb;
+}
+
+// Whether a decoded on-flash state `f` is what `s` loads as after a boot
+// (decode reseeds an emptied roster with "tiny").
+static bool same_loaded(const State &f, const State &s) {
+    if (s.n != 0) return same_state(f, s);
+    return f.n == 1 && strcmp(f.roster[0], "tiny") == 0 &&
+           strcmp(f.slug, s.slug) == 0;
+}
+
+// After a failed write AND a failed restore: which whole state flash holds
+// now, as IDF's own reader answers — i.e. what a reboot loads. New = `next` (checked first: when `next`
+// equals RAM, both answers are the same truth). Old = what RAM says: the
+// blob equals it, or there was no blob before and there still is none (so
+// the legacy keys / seed load). Unknown = unreadable, or neither.
+enum class Onflash { Old, New, Unknown };
+static Onflash read_back_locked(nvs_handle_t h, const State &next,
+                                bool *blob_now) {
+    *blob_now = false;
+    size_t len = sizeof s_blob;
+    const esp_err_t g = nvs_get_blob(h, KEY, &s_blob, &len);
+    if (g == ESP_ERR_NVS_NOT_FOUND)
+        return s_blob_present ? Onflash::Unknown : Onflash::Old;
+    State &st = s_read;
+    if (g != ESP_OK || len != sizeof s_blob || !decode(s_blob, &st))
+        return Onflash::Unknown;
+    *blob_now = true;
+    if (same_loaded(s_read, next)) return Onflash::New;
+    if (same_loaded(s_read, s_state)) return Onflash::Old;
+    return Onflash::Unknown;
+}
+
+// Write `next` as the one "state" blob. ESP_OK: `next` is on flash (the
+// caller adopts it). Any other result: flash is back on s_state — or, when
+// neither the restore nor a read-back could establish that,
+// TINY_AGENT_UNSETTLED with s_unsettled set.
 static esp_err_t persist_locked(const State &next) {
     nvs_handle_t h;
     esp_err_t r = nvs_open(NS, NVS_READWRITE, &h);
-    if (r != ESP_OK) return r;
+    if (r != ESP_OK) return r;   // no handle: nothing was written
     encode(next, &s_blob);
     r = nvs_set_blob(h, KEY, &s_blob, sizeof s_blob);
-    const bool wrote = r == ESP_OK;
-    if (r == ESP_OK) r = nvs_commit(h);
+    if (r == ESP_ERR_NVS_REMOVE_FAILED)
+        ESP_LOGW(TAG, "old state not removed (%s) - new state written; NVS "
+                 "finishes the update at init", esp_err_to_name(r));
+    if (blob_landed(r)) r = nvs_commit(h);
     if (r == ESP_OK) {
         s_blob_present = true;
-    } else if (wrote) {
-        esp_err_t rb;
-        if (s_blob_present) {
-            encode(s_state, &s_blob);
-            rb = nvs_set_blob(h, KEY, &s_blob, sizeof s_blob);
-        } else {
-            rb = nvs_erase_key(h, KEY);
-            if (rb == ESP_ERR_NVS_NOT_FOUND) rb = ESP_OK;
-        }
-        if (rb == ESP_OK) rb = nvs_commit(h);
-        if (rb != ESP_OK)
-            ESP_LOGE(TAG, "save refused (%s) and restore failed (%s) - a "
-                     "reboot may load the refused roster",
-                     esp_err_to_name(r), esp_err_to_name(rb));
+        s_unsettled = false;
+        nvs_close(h);
+        return ESP_OK;
     }
+    // Outcome unknown (a failed set_blob may still have landed the new
+    // bytes; a failed commit may or may not have made them durable).
+    const esp_err_t rb = restore_locked(h);
+    if (rb == ESP_OK) {
+        nvs_close(h);
+        s_unsettled = false;   // flash == RAM again
+        return r;
+    }
+    // The restore failed too: whatever flash holds now is what a reboot
+    // loads. Read it back; a state we can name is adopted as the truth.
+    bool blob_now = false;
+    const Onflash f = read_back_locked(h, next, &blob_now);
     nvs_close(h);
+    if (f == Onflash::Old) {
+        s_unsettled = false;
+        s_blob_present = blob_now;
+        ESP_LOGW(TAG, "save failed (%s), restore failed (%s); flash still "
+                 "holds the old state", esp_err_to_name(r), esp_err_to_name(rb));
+        return r;
+    }
+    if (f == Onflash::New) {
+        s_blob_present = true;
+        s_unsettled = false;
+        ESP_LOGW(TAG, "save reported %s but flash holds the new state - "
+                 "adopted (a reboot loads it)", esp_err_to_name(r));
+        return ESP_OK;
+    }
+    s_unsettled = true;
+    ESP_LOGE(TAG, "save failed (%s) and restore failed (%s) - flash holds "
+             "the old or the new state until the next write",
+             esp_err_to_name(r), esp_err_to_name(rb));
+    return TINY_AGENT_UNSETTLED;
+}
+
+// Commit s_next: persist, then adopt. Unchanged state writes nothing —
+// unless flash is unsettled, when this write is what settles it.
+static esp_err_t commit_next_locked(void) {
+    if (!s_unsettled && same_state(s_next, s_state)) return ESP_OK;
+    const esp_err_t r = persist_locked(s_next);
+    if (r == ESP_OK) s_state = s_next;
+    else ESP_LOGW(TAG, "not saved (%s) - state unchanged", tiny_agent_err_name(r));
     return r;
 }
 
-// Commit s_next: persist, then adopt. Unchanged state writes nothing.
-static esp_err_t commit_next_locked(void) {
-    if (same_state(s_next, s_state)) return ESP_OK;
-    const esp_err_t r = persist_locked(s_next);
-    if (r == ESP_OK) s_state = s_next;
-    else ESP_LOGW(TAG, "not saved (%s) - state unchanged", esp_err_to_name(r));
-    return r;
+extern "C" const char *tiny_agent_err_name(esp_err_t err) {
+    return err == TINY_AGENT_UNSETTLED ? "AGENT_UNSETTLED" : esp_err_to_name(err);
 }
 
 extern "C" const char *tiny_agent_current(void) {
@@ -323,6 +422,14 @@ extern "C" esp_err_t tiny_agent_roster_preview_add(tiny_agent_roster_t *r,
     if (!norm[0]) return ESP_ERR_INVALID_ARG;
     roster_add_to(r->slugs, &r->n, norm);   // the copy only: no lock, no NVS
     return ESP_OK;
+}
+
+extern "C" bool tiny_agent_roster_has(const tiny_agent_roster_t *r,
+                                      const char *slug) {
+    if (!r) return false;
+    char norm[TINY_AGENT_SLUG_MAX + 1];
+    if (normalize(slug, norm) != ESP_OK || !norm[0]) return false;
+    return roster_find(r->slugs, r->n, norm) >= 0;
 }
 
 static bool roster_matches_locked(const tiny_agent_roster_t *r) {

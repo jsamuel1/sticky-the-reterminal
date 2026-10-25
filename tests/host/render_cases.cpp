@@ -245,13 +245,34 @@ extern "C" void tiny_agent_roster_snapshot(tiny_agent_roster_t *out) {
     out->n = tiny_agent_roster(out->slugs, TINY_AGENT_ROSTER_MAX);
 }
 // Preview = the stub's add rule on a copy (tiny_agent's own preview/add
-// equivalence is agent_host_test.sh's business).
+// equivalence is agent_host_test.sh's business). The stub refuses what the
+// real one refuses for the cases the renderer tests send — empty, >64
+// chars, space/quote/backslash/control — so a refusal reaches the renderer.
 extern "C" esp_err_t tiny_agent_roster_preview_add(tiny_agent_roster_t *r,
                                                    const char *slug) {
+    if (!r || !slug) return ESP_ERR_INVALID_ARG;
+    const size_t len = strlen(slug);
+    if (len > TINY_AGENT_SLUG_MAX) return ESP_ERR_INVALID_SIZE;
+    if (!len) return ESP_ERR_INVALID_ARG;
+    for (size_t i = 0; i < len; ++i)
+        if (slug[i] == '"' || slug[i] == '\\' || (unsigned char)slug[i] < 0x21)
+            return ESP_ERR_INVALID_ARG;
     for (int i = 0; i < r->n; ++i) if (!strcmp(r->slugs[i], slug)) return ESP_OK;
-    if (r->n < TINY_AGENT_ROSTER_MAX)
-        strlcpy(r->slugs[r->n++], slug, TINY_AGENT_SLUG_MAX + 1);
+    if (r->n >= TINY_AGENT_ROSTER_MAX) {   // full: drop row 1, keep the seed
+        memmove(&r->slugs[1], &r->slugs[2], sizeof r->slugs[0] * (r->n - 2));
+        --r->n;
+    }
+    strlcpy(r->slugs[r->n++], slug, TINY_AGENT_SLUG_MAX + 1);
     return ESP_OK;
+}
+extern "C" bool tiny_agent_roster_has(const tiny_agent_roster_t *r,
+                                      const char *slug) {
+    for (int i = 0; r && slug && i < r->n; ++i)
+        if (!strcmp(r->slugs[i], slug)) return true;
+    return false;
+}
+extern "C" const char *tiny_agent_err_name(esp_err_t err) {
+    return esp_err_to_name(err);
 }
 // The one roster write a universe commit makes. g_roster_commit_fail makes
 // the next one return that error (an NVS refusal) and change nothing; the
@@ -1018,6 +1039,142 @@ int main(int argc, char **argv) {
                 CHECK(g_roster_commits == commits + 1,
                       "universe push of known slugs writes nothing");
                 expect("normal after multi-slug", tiny_display_render_card(normal),
+                       ESP_OK, 1, false);
+            }
+            // ---- universe push: one bad element refuses the whole push -------
+            // Validated before the push claims anything: a refused push merges
+            // no slug, writes nothing, paints nothing, caches nothing, touches
+            // no tap region or light, and is no newer request (an image still
+            // fetching keeps its turn). Absent "tinys" is the page; malformed
+            // "tinys" is an error.
+            {
+                auto census = [] {
+                    tiny_button_region_t regs[48];
+                    const int nr = tiny_display_button_regions(regs, 48);
+                    std::vector<std::string> v;
+                    for (int i = 0; i < nr; ++i)
+                        v.push_back(std::string(regs[i].id) + "=" + regs[i].label);
+                    return v;
+                };
+                const std::string long_slug(TINY_AGENT_SLUG_MAX + 1, 'a');
+                const std::string over_full = [] {
+                    std::string s = R"J({"type":"universe","tinys":[)J";
+                    for (int i = 0; i < TINY_AGENT_ROSTER_MAX; ++i)
+                        s += std::string(i ? "," : "") + "\"fill" + std::to_string(i) + "\"";
+                    return s + "]}";
+                }();
+                struct Bad { const char *what; std::string spec; esp_err_t want; };
+                const Bad bads[] = {
+                    {"mixed valid/invalid",
+                     R"J({"type":"universe","priority":"alert","tinys":["good-u","Bad Slug"]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"invalid first",
+                     R"J({"type":"universe","tinys":["a\"b","good-u"]})J", ESP_ERR_INVALID_ARG},
+                    {"overlong",
+                     R"J({"type":"universe","tinys":["good-u",")J" + long_slug + R"J("]})J",
+                     ESP_ERR_INVALID_SIZE},
+                    {"empty slug", R"J({"type":"universe","tinys":["good-u",""]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"non-string number", R"J({"type":"universe","tinys":["good-u",7]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"non-string null", R"J({"type":"universe","tinys":["good-u",null]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"non-string object", R"J({"type":"universe","tinys":[{"s":"good-u"}]})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"tinys a string", R"J({"type":"universe","tinys":"good-u"})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"tinys null", R"J({"type":"universe","tinys":null})J", ESP_ERR_INVALID_ARG},
+                    {"tinys an object", R"J({"type":"universe","tinys":{"a":"good-u"}})J",
+                     ESP_ERR_INVALID_ARG},
+                    {"more than fit", over_full, ESP_ERR_INVALID_SIZE},
+                };
+                for (const Bad &b : bads) {
+                    const auto roster0 = g_roster;
+                    const uint32_t frame0 = fnv1a(g_buf.data(), g_buf.size());
+                    const auto regs0 = census();
+                    const uint32_t gen0 = tiny_display_card_gen();
+                    const std::string id0 = tiny_display_current_card_id();
+                    const int refreshes = g_full_refreshes;
+                    const int commits = g_roster_commits;
+                    calls = g_led_alert_calls;
+                    const esp_err_t r = tiny_display_render_card(b.spec.c_str());
+                    CHECK(r == b.want, "universe bad/%s: returned %x, want %x",
+                          b.what, r, b.want);
+                    CHECK(g_roster == roster0 && g_roster_commits == commits,
+                          "universe bad/%s: roster unchanged, nothing written", b.what);
+                    CHECK(g_full_refreshes == refreshes &&
+                              fnv1a(g_buf.data(), g_buf.size()) == frame0,
+                          "universe bad/%s: glass untouched", b.what);
+                    CHECK(census() == regs0 && tiny_display_card_gen() == gen0 &&
+                              id0 == tiny_display_current_card_id(),
+                          "universe bad/%s: regions and identity unchanged", b.what);
+                    CHECK(g_led_alert_calls == calls && !g_led_alert,
+                          "universe bad/%s: light untouched", b.what);
+                    CHECK(tiny_display_rerender() == ESP_OK &&
+                              id0 == tiny_display_current_card_id(),
+                          "universe bad/%s: replay cache is the previous card", b.what);
+                    calls = g_led_alert_calls;
+                }
+                // Absent tinys: the page, no merge. Empty array: the same.
+                for (const char *spec : {R"J({"type":"universe"})J",
+                                         R"J({"type":"universe","tinys":[]})J"}) {
+                    const auto roster0 = g_roster;
+                    const int commits = g_roster_commits;
+                    CHECK(tiny_display_render_card(spec) == ESP_OK &&
+                              !strcmp(tiny_display_current_card_id(), "universe") &&
+                              g_roster == roster0 && g_roster_commits == commits,
+                          "universe %s: page, no merge, no write", spec);
+                }
+                // Duplicates of a valid slug are not "over": merged once.
+                CHECK(tiny_display_render_card(
+                          R"J({"type":"universe","tinys":["good-u","good-u"]})J") == ESP_OK &&
+                          g_roster.back() == "good-u" &&
+                          std::count(g_roster.begin(), g_roster.end(), "good-u") == 1,
+                      "universe: duplicate valid slugs merge once");
+                // A refused push is not a newer request: an image already
+                // fetching keeps its turn and commits.
+                {
+                    std::lock_guard<std::mutex> lock(g_http_mutex);
+                    g_http_body.assign(mono, 0x0F);
+                    g_hold_http = true;
+                    g_http_blocked = false;
+                    g_release_http = false;
+                }
+                std::atomic<int> img{ESP_FAIL};
+                std::thread it([&] {
+                    img = tiny_display_render_card(
+                        R"J({"type":"image","card_id":"held-img","url":"https://x/h.raw"})J");
+                });
+                {
+                    std::unique_lock<std::mutex> lock(g_http_mutex);
+                    CHECK(g_http_ready.wait_for(lock, std::chrono::seconds(2),
+                                                [] { return g_http_blocked; }),
+                          "universe bad: image fetch held");
+                }
+                CHECK(tiny_display_render_card(bads[0].spec.c_str()) == bads[0].want,
+                      "universe bad: refused while an image fetches");
+                {
+                    std::lock_guard<std::mutex> lock(g_http_mutex);
+                    g_release_http = true;
+                    g_http_ready.notify_all();
+                }
+                it.join();
+                CHECK(img == ESP_OK && !strcmp(tiny_display_current_card_id(), "held-img"),
+                      "universe bad: refused push superseded nothing (image %d)", img.load());
+                unserve();
+                calls = g_led_alert_calls;
+                expect("normal after bad pushes", tiny_display_render_card(normal),
+                       ESP_OK, 1, false);
+                // A refused universe FINALE still ends the answer, as text.
+                CHECK(tiny_display_stream_begin("tiny", "ansBad", nullptr) == ESP_OK,
+                      "universe bad finale: begin");
+                tiny_display_stream_append("words");
+                const auto roster1 = g_roster;
+                CHECK(tiny_display_stream_end(bads[0].spec.c_str()) == bads[0].want &&
+                          !tiny_display_stream_active() && g_roster == roster1,
+                      "universe bad finale: refused, answer ended, nothing merged");
+                calls = g_led_alert_calls;
+                expect("normal after bad finale", tiny_display_render_card(normal),
                        ESP_OK, 1, false);
             }
             unserve();

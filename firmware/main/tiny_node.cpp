@@ -1685,7 +1685,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
                      tiny_display_current_card_id());
             reply(envelope_id, out);
         } else {
-            reply(envelope_id, esp_err_to_name(r));
+            reply(envelope_id, tiny_display_err_name(r));
         }
     } else if (strncmp(prompt, "config ", 7) == 0) {
         // config {"networks":[{"ssid":..,"password"|"key":..}|{"ssid":..,
@@ -2343,7 +2343,7 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
             esp_err_t r = add ? tiny_agent_roster_add(slug)
                               : tiny_agent_roster_remove(slug);
             snprintf(out, sizeof out, "roster %s %.64s -> %s",
-                     add ? "add" : "rm", slug, esp_err_to_name(r));
+                     add ? "add" : "rm", slug, tiny_agent_err_name(r));
             reply(envelope_id, out);
             return;
         }
@@ -2363,9 +2363,17 @@ static void dispatch_inner(const char *envelope_id, const char *prompt) {
         } else if (r == ESP_ERR_INVALID_SIZE)
             snprintf(out, sizeof out, "agent: slug too long (max %d chars)",
                      TINY_AGENT_SLUG_MAX);
-        else
+        else if (r == ESP_ERR_INVALID_ARG)
             snprintf(out, sizeof out, "agent: bad slug (%s) - lowercase "
                      "slug like \"tiny\", no spaces/quotes", esp_err_to_name(r));
+        else {
+            // Not the slug: the save failed. RAM is unchanged, so name who
+            // still answers (UNSETTLED: a reboot may load the switch).
+            const char *cur = tiny_agent_current();
+            snprintf(out, sizeof out, "agent: not saved (%s) - asks still go "
+                     "to %s%s", tiny_agent_err_name(r), cur[0] ? "@" : "",
+                     cur[0] ? cur : "your own tiny");
+        }
         reply(envelope_id, out);
     } else if (strncmp(prompt, "say ", 4) == 0) {
         // say <text> — put words on the fridge, no agent turn, no network wait.

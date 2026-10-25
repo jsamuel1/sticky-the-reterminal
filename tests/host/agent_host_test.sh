@@ -23,5 +23,11 @@ printf 'tinyagent.state\tx00010203\ntinyagent.rcount\t2\ntinyagent.r0\ttiny\ntin
     > "$ASKQ_NVS_FILE"
 /tmp/agent_test corrupt
 /tmp/agent_test corrupt-reboot
+# Outcome-unknown writes: each scenario in its own store, then a reboot.
+for s in $(/tmp/agent_test outcomes); do
+    rm -f "$ASKQ_NVS_FILE" "$AGENT_EXPECT_FILE"
+    /tmp/agent_test outcome "$s"
+    /tmp/agent_test outcome-reboot "$s"
+done
 rm -f "$ASKQ_NVS_FILE" "$AGENT_EXPECT_FILE"
 echo "agent host test: ALL GREEN"

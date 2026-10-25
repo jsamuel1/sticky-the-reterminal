@@ -25,8 +25,22 @@ const char *tiny_agent_current(void);
 
 // Every mutation below is all-or-nothing: the whole state (active slug +
 // roster) is one NVS blob, and RAM takes the new state only once NVS has
-// committed it. A non-ESP_OK return means nothing changed — in RAM, on
-// flash, or after a reboot.
+// accepted it. A failed NVS write is outcome-unknown (IDF writes the new
+// version before erasing the old), so the result says what flash holds:
+//   ESP_OK                the new state is on flash and in RAM. Includes
+//                         ESP_ERR_NVS_REMOVE_FAILED from set_blob (IDF: new
+//                         value written, old removal finished at init), and
+//                         a failed write whose read-back found the new state.
+//   TINY_AGENT_UNSETTLED  the write failed AND restoring the old state
+//                         failed AND flash could not be read back as either:
+//                         RAM is the old state, flash holds the old or the
+//                         new whole state (never a mix). The next mutation
+//                         rewrites flash even if it changes nothing, so the
+//                         first healthy write settles it onto RAM.
+//   any other error       nothing changed — in RAM, on flash, after a reboot.
+#define TINY_AGENT_UNSETTLED ((esp_err_t)0x7D11)
+// esp_err_to_name() that also names TINY_AGENT_UNSETTLED.
+const char *tiny_agent_err_name(esp_err_t err);
 
 // Switch. NULL/"" clears back to the owner's own tiny. Trims whitespace,
 // lowercases, refuses >64 chars or embedded spaces/quotes. Persists to NVS
@@ -53,13 +67,16 @@ typedef struct {
 } tiny_agent_roster_t;
 void tiny_agent_roster_snapshot(tiny_agent_roster_t *out);
 esp_err_t tiny_agent_roster_preview_add(tiny_agent_roster_t *r, const char *slug);
+// Whether `slug`, normalised as roster_add would, is in the copy `r`.
+bool tiny_agent_roster_has(const tiny_agent_roster_t *r, const char *slug);
 
 // Commit a previewed roster as ONE write. `base` is the snapshot `next` was
 // built from; if the live state no longer equals it (another task switched,
 // added or removed meanwhile), nothing is written and ESP_ERR_INVALID_STATE
 // comes back, because the page built from `base` no longer describes the
-// roster. Any NVS failure is returned and leaves RAM and flash at `base`.
-// The active slug is not changed (next->active must equal base->active).
+// roster. NVS outcomes as above (ESP_OK / TINY_AGENT_UNSETTLED / nothing
+// changed). The active slug is not changed (next->active must equal
+// base->active).
 esp_err_t tiny_agent_roster_commit(const tiny_agent_roster_t *base,
                                    const tiny_agent_roster_t *next);
 

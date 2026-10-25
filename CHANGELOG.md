@@ -93,19 +93,37 @@ are folded into `## [Unreleased]` when a version is cut
   the page and before anything of the commit is published; if that write is
   refused (NVS open/set/commit failure, or another task changed the roster
   after the page was built from it) the push fails and the page is rolled
-  back, so a row on glass is always a row a reboot keeps. An
+  back, so a row on glass is always a row a reboot keeps. A push whose
+  `tinys` is malformed is refused whole, before it claims anything: `tinys`
+  that is not an array, any non-string element, any slug tiny_agent refuses
+  (empty, over 64 chars, space/quote/backslash/control) or more slugs than
+  the roster can hold returns that error with no slug merged, nothing
+  written, painted, cached or lit, and no newer request superseded (it used
+  to skip bad elements and succeed with the rest); absent `tinys` still just
+  opens the page. An
   overtaken push (a stream finale whose claim a newer card beat), a failed
   panel commit or any allocation failure on the way paints nothing, merges
   no slug and leaves the light alone; the composite builder refuses to
   return a half-built page. tiny_agent now stores its whole state (active
   slug + roster) as one NVS blob and adopts a change in RAM only after NVS
-  committed it, for `agent <slug>`, `agent add/rm`, the universe row tap and
+  accepted it, for `agent <slug>`, `agent add/rm`, the universe row tap and
   `u:clear` alike (a refused `u:clear` no longer repaints an ACTIVE row it
   did not save); the old per-key store is read once and migrated on the
-  first save. `agent_host_test.sh` proves the roster preview equals the real
-  add and writes nothing, and runs every mutation against injected NVS
-  open/set/commit failures across process restarts (fresh, reboot, legacy
-  store, unreadable blob).
+  first save. A failed NVS write is treated as outcome-unknown, because IDF
+  writes a blob's new version before erasing the old: `set_blob` returning
+  `ESP_ERR_NVS_REMOVE_FAILED` (new value written, old removal finished at
+  init) is a successful save; any other failure puts the old state back;
+  if that restore fails too, flash is read back and whichever whole state
+  it holds is adopted and reported (new = `ESP_OK`, old = the error); if
+  even that is unreadable the result is `TINY_AGENT_UNSETTLED` (RAM old,
+  flash old or new, never a mix) and the next mutation rewrites flash even
+  if it changes nothing. `agent_host_test.sh` proves the roster preview
+  equals the real add and writes nothing, runs every mutation against
+  injected NVS open/set/commit failures across process restarts (fresh,
+  reboot, legacy store, unreadable blob), and runs 19 outcome-unknown
+  scenarios (failed writes that landed, REMOVE_FAILED, failed restores,
+  failed read-backs, first saves) each through a restart that must load
+  what the answer promised.
   Verified hardware facts (WS2812B LED2, GPIO42, +5 V rail) are in
   `docs/hardware.md`.
 - **firmware** — a render that a newer card overtook now returns

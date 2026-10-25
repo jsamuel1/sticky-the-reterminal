@@ -15,6 +15,9 @@
 //           as before; a refused first save leaves it loadable
 //   corrupt an unreadable "state" blob falls back to the legacy keys, and a
 //           refused save changes nothing a reboot loads
+//   outcome one outcome-unknown write per store (a failed set_blob that
+//           landed, REMOVE_FAILED, a restore that fails, a read-back that
+//           fails), then outcome-reboot: the answer matches what loads
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -247,6 +250,190 @@ static int corrupt_reboot() {
     return 0;
 }
 
+// ---- outcome-unknown writes ------------------------------------------------
+// IDF writes a blob's new version BEFORE erasing the old one, so a failed
+// set_blob may already have landed the new bytes (REMOVE_FAILED says so
+// outright), and the restore after any failure can itself fail. Each
+// scenario runs in its own store: setup, one scripted mutation, a RAM check,
+// then a PROCESS RESTART checks what a reboot loads against what the
+// mutation's answer promised:
+//   ESP_OK                -> new state, in RAM and after reboot
+//   other error           -> old state, in RAM and after reboot
+//   TINY_AGENT_UNSETTLED  -> old state in RAM; a reboot loads old or new,
+//                            never a mix; the next mutation settles flash.
+using agent_shim::kCommit;
+using agent_shim::kErase;
+using agent_shim::kGetBlob;
+using agent_shim::kOpenRw;
+using agent_shim::kSetBlob;
+using agent_shim::push;
+enum Want { kOk, kErr, kUnsettled };
+struct Scenario {
+    const char *name;
+    bool first_save;   // no blob before (seed): the restore is an erase
+    bool batch;        // mutate via roster_commit instead of roster_add
+    void (*inject)();
+    Want want;
+    bool settle;       // after: one no-op mutation, healthy, must settle
+};
+static const Scenario kScenarios[] = {
+    {"open-fail", false, false, [] { push(kOpenRw, ESP_FAIL, false); }, kErr, false},
+    {"set-fail-unlanded", false, false, [] { push(kSetBlob, ESP_FAIL, false); }, kErr, false},
+    {"set-fail-landed", false, false, [] { push(kSetBlob, ESP_FAIL, true); }, kErr, false},
+    {"commit-fail", false, false, [] { push(kCommit, ESP_FAIL, false); }, kErr, false},
+    // IDF: "The value was written however, and update will be finished after
+    // re-initialization of nvs" -> written; the answer must say so.
+    {"remove-failed", false, false,
+     [] { push(kSetBlob, ESP_ERR_NVS_REMOVE_FAILED, true); }, kOk, false},
+    {"remove-failed-batch", false, true,
+     [] { push(kSetBlob, ESP_ERR_NVS_REMOVE_FAILED, true); }, kOk, false},
+    // The restore's own write reports REMOVE_FAILED: the old bytes landed.
+    {"restore-remove-failed", false, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kSetBlob, ESP_ERR_NVS_REMOVE_FAILED, true);
+     }, kErr, false},
+    // Write landed, restore refused: flash holds the NEW state -> adopt it.
+    {"restore-fail-new", false, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kSetBlob, ESP_FAIL, false);
+     }, kOk, false},
+    {"commit-fail-restore-fail-new", false, false, [] {
+         push(kSetBlob, ESP_OK, true);     // the write
+         push(kCommit, ESP_FAIL, false);
+         push(kSetBlob, ESP_FAIL, false);  // the restore
+     }, kOk, false},
+    // Write did not land, restore "failed" after landing: flash is OLD.
+    {"restore-fail-old", false, false, [] {
+         push(kSetBlob, ESP_FAIL, false);
+         push(kSetBlob, ESP_FAIL, true);
+     }, kErr, false},
+    {"restore-commit-fail-old", false, false, [] {
+         push(kCommit, ESP_FAIL, false);
+         push(kCommit, ESP_FAIL, false);
+     }, kErr, false},
+    // Nothing can be established: UNSETTLED, never a claim either way.
+    {"unsettled", false, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kSetBlob, ESP_FAIL, false);
+         push(kGetBlob, ESP_FAIL, false);
+     }, kUnsettled, false},
+    {"unsettled-batch", false, true, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kSetBlob, ESP_FAIL, false);
+         push(kGetBlob, ESP_FAIL, false);
+     }, kUnsettled, false},
+    {"unsettled-settles", false, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kSetBlob, ESP_FAIL, false);
+         push(kGetBlob, ESP_FAIL, false);
+     }, kUnsettled, true},
+    // First save (no blob before): the restore is an erase of the new key.
+    {"first-set-fail-landed", true, false, [] { push(kSetBlob, ESP_FAIL, true); }, kErr, false},
+    {"first-erase-fail-new", true, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kErase, ESP_FAIL, false);
+     }, kOk, false},
+    {"first-erase-fail-old", true, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kErase, ESP_FAIL, true);   // erased, yet reported failure
+     }, kErr, false},
+    {"first-unsettled", true, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kErase, ESP_FAIL, false);
+         push(kGetBlob, ESP_FAIL, false);
+     }, kUnsettled, false},
+    {"first-unsettled-settles", true, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kErase, ESP_FAIL, false);
+         push(kGetBlob, ESP_FAIL, false);
+     }, kUnsettled, true},
+};
+static const Scenario *scenario(const std::string &name) {
+    for (const Scenario &s : kScenarios) if (name == s.name) return &s;
+    return nullptr;
+}
+static std::string render(const std::string &slug, const Roster &r) {
+    std::string s = slug + "|";
+    for (const auto &e : r) s += e + ",";
+    return s;
+}
+static std::string now() { return render(tiny_agent_current(), live()); }
+
+static int outcome(const Scenario &sc) {
+    if (!sc.first_save)
+        CHECK(tiny_agent_set("old-a") == ESP_OK, "%s: setup", sc.name);
+    const std::string old_s = now();
+    tiny_agent_roster_t base, next;
+    tiny_agent_roster_snapshot(&base);
+    next = base;
+    tiny_agent_roster_preview_add(&next, "new-b");
+    const std::string new_s = render(base.active, of(next));
+    agent_shim::reset();
+    sc.inject();
+    const esp_err_t e = sc.batch ? tiny_agent_roster_commit(&base, &next)
+                                 : tiny_agent_roster_add("new-b");
+    CHECK(agent_shim::idle(), "%s: every scripted fault was reached", sc.name);
+    agent_shim::reset();
+    switch (sc.want) {
+    case kOk:
+        CHECK(e == ESP_OK && now() == new_s,
+              "%s: ESP_OK and RAM is the new state (got %s, %s)", sc.name,
+              tiny_agent_err_name(e), now().c_str());
+        break;
+    case kErr:
+        CHECK(e != ESP_OK && e != TINY_AGENT_UNSETTLED && now() == old_s,
+              "%s: refused and RAM is the old state (got %s, %s)", sc.name,
+              tiny_agent_err_name(e), now().c_str());
+        break;
+    case kUnsettled:
+        CHECK(e == TINY_AGENT_UNSETTLED && now() == old_s,
+              "%s: UNSETTLED and RAM is the old state (got %s, %s)", sc.name,
+              tiny_agent_err_name(e), now().c_str());
+        break;
+    }
+    const char *expect = sc.want == kOk ? "new" : sc.want == kErr ? "old" : "either";
+    if (sc.settle) {
+        // Flash may hold the new state while RAM says old: a no-op mutation
+        // (a slug already in the roster) must still write, and settle it.
+        const int sets0 = agent_shim::calls()[kSetBlob] + agent_shim::calls()[kErase];
+        CHECK(tiny_agent_roster_add("tiny") == ESP_OK && now() == old_s,
+              "%s: next (no-op) mutation succeeds on the old state", sc.name);
+        CHECK(agent_shim::calls()[kSetBlob] + agent_shim::calls()[kErase] > sets0,
+              "%s: ...and writes, though it changes nothing", sc.name);
+        const int sets1 = agent_shim::calls()[kSetBlob];
+        CHECK(tiny_agent_roster_add("tiny") == ESP_OK &&
+                  agent_shim::calls()[kSetBlob] == sets1,
+              "%s: once settled, a no-op writes nothing again", sc.name);
+        expect = "old";
+    }
+    FILE *f = fopen(getenv("AGENT_EXPECT_FILE"), "w");
+    if (f) {
+        fprintf(f, "%s\n%s\n%s\n", expect, old_s.c_str(), new_s.c_str());
+        fclose(f);
+    }
+    return 0;
+}
+
+static int outcome_reboot(const Scenario &sc) {
+    char exp[16] = {0}, old_s[1024] = {0}, new_s[1024] = {0};
+    FILE *f = fopen(getenv("AGENT_EXPECT_FILE"), "r");
+    const bool ok = f && fgets(exp, sizeof exp, f) && fgets(old_s, sizeof old_s, f) &&
+                    fgets(new_s, sizeof new_s, f);
+    if (f) fclose(f);
+    CHECK(ok, "%s reboot: expectation recorded", sc.name);
+    for (char *s : {exp, old_s, new_s}) s[strcspn(s, "\n")] = 0;
+    const std::string got = now();
+    if (!strcmp(exp, "either"))
+        CHECK(got == old_s || got == new_s,
+              "%s reboot: loads the old or the new whole state (%s)", sc.name,
+              got.c_str());
+    else
+        CHECK(got == (!strcmp(exp, "new") ? new_s : old_s),
+              "%s reboot: loads the %s state the answer promised (%s)", sc.name,
+              exp, got.c_str());
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const std::string phase = argc > 1 ? argv[1] : "fresh";
     if (phase == "fresh") fresh();
@@ -255,6 +442,15 @@ int main(int argc, char **argv) {
     else if (phase == "legacy-reboot") legacy_reboot();
     else if (phase == "corrupt") corrupt();
     else if (phase == "corrupt-reboot") corrupt_reboot();
+    else if (phase == "outcomes") {
+        for (const Scenario &s : kScenarios) printf("%s\n", s.name);
+        return 0;
+    } else if ((phase == "outcome" || phase == "outcome-reboot") && argc > 2) {
+        const Scenario *s = scenario(argv[2]);
+        if (!s) { fprintf(stderr, "unknown scenario %s\n", argv[2]); return 2; }
+        if (phase == "outcome") outcome(*s);
+        else outcome_reboot(*s);
+    }
     else { fprintf(stderr, "unknown phase %s\n", phase.c_str()); return 2; }
     if (g_fail) { fprintf(stderr, "%s: %d check(s) failed\n", phase.c_str(), g_fail); return 1; }
     return 0;
