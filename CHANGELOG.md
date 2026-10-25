@@ -162,7 +162,9 @@ release, newest first.
   rotation, scroll and wake state now commit under one recursive render
   transaction; concurrent auto-rotate and card renders cannot race the cached
   JSON or expose an angle before its panel refresh, and a failed replacement
-  restores the prior card's touch frame, layout dimensions, and ack styling.
+  restores the prior card's touch frame, layout dimensions, ack styling, and
+  framebuffer. Colour-panel transfer failures repaint the restored frame and
+  force a later partial refresh full until panel state is known again.
   Network image/gallery
   fetches stay outside the panel lock and use a generation fence, so a stale
   response cannot overwrite a newer card. Raw one-bit blits now claim that
