@@ -12,9 +12,11 @@ amoled18-90/keyboard_sym 422e6118
 amoled18-90/kv fc895e22
 amoled18-90/list d1b95a86
 amoled18-90/menu 4d9ab588
+amoled18-90/photo_viewer fd7d996a
 amoled18-90/qr 5b815b1a
 amoled18-90/text 9be78dc6
 amoled18-90/text_buttons 946bdee9
+amoled18-90/thread_photos 14bc8b90
 amoled18-90/unknown 40cc9a50
 amoled18/alert 1b347320
 amoled18/buttons5 b5cf62d9
@@ -30,9 +32,11 @@ amoled18/keyboard_sym f2a50566
 amoled18/kv b681ec28
 amoled18/list c39b6a52
 amoled18/menu 254ed9f0
+amoled18/photo_viewer 4521a7df
 amoled18/qr b4f022e0
 amoled18/text 681424f8
 amoled18/text_buttons 800b08d5
+amoled18/thread_photos ae6f7af0
 amoled18/unknown 5bece550
 fnk0104s/alert befefba4
 fnk0104s/buttons5 e297692f
@@ -48,9 +52,11 @@ fnk0104s/keyboard_sym 06431b39
 fnk0104s/kv 7d585f58
 fnk0104s/list db69014e
 fnk0104s/menu 6c41ca04
+fnk0104s/photo_viewer 57ae66ed
 fnk0104s/qr b10d5384
 fnk0104s/text 828d9a8c
 fnk0104s/text_buttons 056379bd
+fnk0104s/thread_photos c8a66dba
 fnk0104s/unknown 71c47098
 reterminal-0/alert eab6e375
 reterminal-0/buttons5 681d63d6
@@ -66,9 +72,11 @@ reterminal-0/keyboard_sym 87fe9011
 reterminal-0/kv cd71f32f
 reterminal-0/list 1106630d
 reterminal-0/menu e0d7ce43
+reterminal-0/photo_viewer 5dda5498
 reterminal-0/qr 025d560e
 reterminal-0/text 81b98ff9
 reterminal-0/text_buttons a9361eea
+reterminal-0/thread_photos 148124ec
 reterminal-0/unknown fc6db273
 reterminal-90/alert af5765e2
 reterminal-90/buttons5 3ca44fb0
@@ -84,7 +92,9 @@ reterminal-90/keyboard_sym b683738c
 reterminal-90/kv 4b9c35c5
 reterminal-90/list 3b9e38c5
 reterminal-90/menu 96479b07
+reterminal-90/photo_viewer 69e3f18b
 reterminal-90/qr 77eb239d
 reterminal-90/text 655a424b
 reterminal-90/text_buttons 542a0f0e
+reterminal-90/thread_photos e3b59bb7
 reterminal-90/unknown 161d4faf

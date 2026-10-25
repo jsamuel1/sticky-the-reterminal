@@ -138,6 +138,11 @@ static void nav_task(void *) {
                         sticky_buzzer_beep_double();
                     break;
                 }
+                // Photo viewer (v27): either key closes it, back to the thread.
+                if (!strcmp(tiny_display_current_card_id(), "photo")) {
+                    if (tiny_display_photo_back() != ESP_OK) sticky_buzzer_beep_double();
+                    break;
+                }
                 if (tiny_display_scroll_page(-1) == ESP_ERR_INVALID_STATE &&
                     tiny_shell_cycle(-1) == ESP_ERR_NOT_ALLOWED)
                     sticky_buzzer_beep_double();  // pushed page: not on the ring
@@ -146,6 +151,10 @@ static void nav_task(void *) {
                 if (!strcmp(tiny_display_current_card_id(), "gallery")) {
                     if (tiny_display_gallery_nav(+1) != ESP_OK)
                         sticky_buzzer_beep_double();
+                    break;
+                }
+                if (!strcmp(tiny_display_current_card_id(), "photo")) {
+                    if (tiny_display_photo_back() != ESP_OK) sticky_buzzer_beep_double();
                     break;
                 }
                 if (tiny_display_scroll_page(+1) == ESP_ERR_INVALID_STATE &&

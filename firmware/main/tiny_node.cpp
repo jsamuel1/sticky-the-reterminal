@@ -1321,7 +1321,14 @@ static esp_err_t render_inbox(const char *json, char *sum, size_t scap) {
         age_str(cJSON_IsNumber(la) ? la->valuedouble : 0, age, sizeof age);
 
         char label[96];
-        snprintf(label, sizeof label, "%s - %s", name, jstr(t, "lastBody"));
+        // A photo-only last message has no body; say what it was (v27).
+        const char *last = jstr(t, "lastBody");
+        cJSON *latt = cJSON_GetObjectItem(t, "lastAttachments");
+        if (!*last && cJSON_GetArraySize(latt) > 0) {
+            const char *k = jstr(cJSON_GetArrayItem(latt, 0), "kind");
+            last = !strcmp(k, "image") ? "[photo]" : "[attachment]";
+        }
+        snprintf(label, sizeof label, "%s - %s", name, last);
         clip_utf8(label, 56);
         // 48, not 64, and CHECKED. A 64-byte producer feeding 48-byte consumers
         // (render_menu_card's id[48], then stage_region's r.id[48]) is worse than
@@ -1422,7 +1429,7 @@ static esp_err_t render_thread(const char *json, char *sum, size_t scap, int old
     const int avail = older ? (total - page < 0 ? 0 : total - page) : total;
     const int shown = avail < page ? avail : page;
     const int skip  = avail - shown;  // oldest messages to pass over
-    int i = 0, added = 0;
+    int i = 0, added = 0, n_photos = 0;
     cJSON *m = NULL;
     cJSON_ArrayForEach(m, msgs) {
         const int idx = i++;
@@ -1442,10 +1449,43 @@ static esp_err_t render_thread(const char *json, char *sum, size_t scap, int old
                 snprintf(clock, sizeof clock, "%02d:%02dZ", tmv.tm_hour, tmv.tm_min);
         }
         char line[240];
-        snprintf(line, sizeof line, "%s %s: %s", clock,
-                 strcmp(dir, "sent") == 0 ? "me" : them, jstr(m, "body"));
+        // Attachments (v27): photos ride the item as "images" and draw as
+        // tappable thumbnails under the text. What the glass cannot show
+        // (video, files) is named in the text instead of vanishing.
+        const char *body = jstr(m, "body");
+        cJSON *imgs = cJSON_CreateArray();
+        int n_img = 0, n_other = 0;
+        const cJSON *a = nullptr;
+        cJSON_ArrayForEach(a, cJSON_GetObjectItem(m, "attachments")) {
+            const char *kind = jstr((cJSON *)a, "kind");
+            const char *url = jstr((cJSON *)a, "url");
+            const char *ctype = jstr((cJSON *)a, "contentType");
+            const bool image = !strcmp(kind, "image") || !strncmp(ctype, "image/", 6);
+            if (image && *url && n_photos + n_img < 8 && imgs) {
+                cJSON_AddItemToArray(imgs, cJSON_CreateString(url));
+                ++n_img;
+            } else {
+                ++n_other;
+            }
+        }
+        char extra[32] = "";
+        if (n_other)
+            snprintf(extra, sizeof extra, "%s[%d %s]", *body ? " " : "", n_other,
+                     n_other == 1 ? "attachment" : "attachments");
+        snprintf(line, sizeof line, "%s %s: %s%s", clock,
+                 strcmp(dir, "sent") == 0 ? "me" : them,
+                 (*body || *extra || !n_img) ? body : "photo", extra);
         clip_utf8(line, 150);
-        cJSON_AddItemToArray(items, cJSON_CreateString(line));
+        if (n_img) {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "text", line);
+            cJSON_AddItemToObject(item, "images", imgs);
+            cJSON_AddItemToArray(items, item);
+            n_photos += n_img;
+        } else {
+            cJSON_Delete(imgs);
+            cJSON_AddItemToArray(items, cJSON_CreateString(line));
+        }
         ++added;
     }
     if (!added) cJSON_AddItemToArray(items, cJSON_CreateString("(no messages)"));
@@ -1518,7 +1558,8 @@ static esp_err_t render_thread(const char *json, char *sum, size_t scap, int old
     // The delta is clamped by the display layer, so "huge" means "to the end";
     // it costs one extra partial refresh and only when the body overflows.
     if (r == ESP_OK && tiny_display_can_scroll()) tiny_display_scroll(100000);
-    snprintf(sum, scap, "thread @%s: newest %d of %d loaded", login, added, total);
+    snprintf(sum, scap, "thread @%s: newest %d of %d loaded, %d photos", login,
+             added, total, n_photos);
     return r;
 }
 

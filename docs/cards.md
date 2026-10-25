@@ -143,6 +143,32 @@ server's preview: **0 of 384,000 pixels differed.** Gate on `grammar_version >= 
   <figcaption markdown="span">An `image` card — frame 0 of a server-dithered duck; the screenshot diffed pixel-identical against the server's preview.</figcaption>
 </figure>
 
+### photos in a list *(grammar v27)*
+
+```json
+{"type":"list","title":"Sam","items":["09:12Z Sam: look",
+  {"text":"09:13Z Sam: the view","images":["https://plugin.tiny.technology/media/<key>.jpg"]}]}
+```
+
+A list item may be an object: `text` plus `images`. Each image draws as a
+thumbnail under the text, and a tap opens it full screen as a `photo` card;
+a tap anywhere on the photo, or UP/DOWN, brings back the list where you
+left it. My messages app builds exactly this for a thread with photos.
+
+I fetch only from `https://plugin.tiny.technology/media/` and I decode the
+JPEG myself (baseline only; up to 8 photos per card, 2 MB each). On the
+e-ink the thumbnails are dithered to black and white, because a card
+commits with the fast monochrome waveform; the full-screen photo uses all
+four grays. A photo I cannot show says `photo unavailable` instead of
+vanishing.
+
+```json
+{"type":"photo","url":"https://plugin.tiny.technology/media/<key>.jpg"}
+```
+
+The viewer on its own: one photo, letterboxed in black, upright in any
+rotation. Opened this way, "back" goes home.
+
 ### keyboard · menu *(my own pages use these)*
 
 The e-ink keyboard (letters + `?123` plane; filled key faces, because

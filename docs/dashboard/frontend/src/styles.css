@@ -175,6 +175,14 @@ button.thread:hover { background: var(--accent-soft); border-color: transparent;
 .dm.out { background: var(--accent-soft); border: 1px solid var(--hair); align-self: flex-end; border-bottom-right-radius: 3px; }
 .dm-who { margin-bottom: 2px; }
 .dm-body { word-break: break-word; white-space: pre-wrap; }
+.dm-atts { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 4px; }
+button.dm-img { padding: 0; border: 0; background: none; border-radius: 8px; overflow: hidden; line-height: 0; cursor: zoom-in; }
+button.dm-img:hover:not(:disabled) { background: none; }
+.dm-img img { display: block; max-width: 240px; max-height: 200px; width: auto; height: auto; object-fit: cover; border-radius: 8px; }
+.dm-video { max-width: 240px; max-height: 200px; border-radius: 8px; }
+.sheet-backdrop.lightbox { cursor: zoom-out; background: rgba(0,0,0,.88); }
+.lightbox img { max-width: 96vw; max-height: 94vh; object-fit: contain; border-radius: 4px; }
+.lightbox-close { position: fixed; top: 12px; right: 12px; color: #fff; font-size: 18px; }
 .dm-when { align-self: flex-end; font-size: 11px; margin-top: 2px; font-variant-numeric: tabular-nums; }
 .messages .compose input { flex: 1; min-width: 0; }
 .messages .as-tiny { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; }

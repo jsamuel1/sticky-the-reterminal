@@ -29,7 +29,7 @@ recovery/                factory-dump manifest + sha (the 32 MB dump itself is g
 
 Versions live in exactly one place: `firmware/main/tiny/tiny_version.h` —
 `TINY_FW_VERSION` (string, e.g. `0.27.0-u2`) and `TINY_GRAMMAR_VERSION`
-(int, currently 26). CMake reads the first; the heartbeat and `status` report
+(int, currently 27). CMake reads the first; the heartbeat and `status` report
 both. Bump the grammar on **any** change to a verb, its args, or a reply
 shape, and add a changelog note (`changelog.d/<pr>-<name>.md`, see
 `changelog.d/README.md` — never edit `CHANGELOG.md` in a PR).
@@ -160,6 +160,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 | `tiny_config` | NVS namespace `tiny`, key `cfg`: ONE JSON blob {device_id, token, api, name, networks[]} · `merge_json` is the single owner of merge semantics (portal, serial, `config` verb all funnel here) |
 | `tiny_provision` | softAP `tiny-XXXX` / `tinysetup` / 192.168.4.1 · `GET /` form · `GET /info` · `POST /setup` (JSON from the iOS app, or urlencoded from a human) → merge → reboot · also the **rescue portal** (APSTA) after auth-halt |
 | `tiny_ota` | `ota [channel]`: `PUT /api/firmware/manifest` → sha256-pinned download to the other slot → reboot as rollback-armed trial · numeric `ver_cmp` refuses downgrade unless `force` · `ota <url> <sha256>` (v15): media-store URL only, no ver_cmp (pusher proves ancestry) · both refuse an image whose board stamp (offset 288, `tiny/tiny_ota_util.h`) is not this board's, before the slot is touched |
+| `tiny_photo` | message photos (v27): media-store-only fetch (8 s wall cap, 2 MB cap) → ROM TJpgDec at 1/2^s → area-resampled luma; dither happens at draw in `tiny_display` |
 | `tiny_stream` | `play <manifest>`: all frames prefetched to PSRAM in the **node task** before the ack, then a socket-less metronome task |
 | `tiny_askq` | NVS ring of 8 queued text asks; one drained per healthy heartbeat |
 | `tiny_agent` | which public tiny answers (`agent` verb, roster in NVS, `@slug` badge) |
@@ -168,7 +169,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 
 Other NVS namespaces: `tinywifi` (breadcrumbs), `tinyaskq`, `tinyboot`.
 
-## 5. The verb grammar (v26) and the parity rule
+## 5. The verb grammar (v27) and the parity rule
 
 Dispatched in `tiny_node.cpp::dispatch_inner()` — **23 verbs** on every
 board, plus `brightness` where `caps.brightness` is true (colour boards):
@@ -195,8 +196,17 @@ because answering a burst of them starved real verbs for minutes. `config` accep
 
 Card types the renderer knows (`tiny_display.cpp render_*_card`): `text`
 `list` `kv` `menu` `qr` `chart` `chat` `composite` `image` `gallery`
-`keyboard` `agent_home`, plus `universe` (shell). Agent-facing docs list the
+`photo` `keyboard` `agent_home`, plus `universe` (shell). Agent-facing docs list the
 first eight; `docs/cards.md` is the grammar with a real-glass capture per type.
+
+Message photos (v27): a `list` item `{"text","images":[url]}` draws
+thumbnails, tap id `p:<n>` opens the `photo` viewer, `p:back` returns.
+`tiny_photo.cpp` fetches only the media store (`tiny_ota_util::media_url_ok`)
+and decodes baseline JPEG with the S3 ROM TJpgDec (no component). Math is
+`tiny/tiny_photo_util.h` (`tests/host/photo_host_test.sh`). Photos decode in
+`render_card_at` with the render lock released; re-layouts draw from the
+thumbnail cache and never fetch. The per-card photo budget (14 s) plus the
+8 s per-photo cap keep a thread open under the act task's 45 s watchdog.
 
 ## 6. First boot (`tiny_onboard.cpp`, since 0.28.0)
 

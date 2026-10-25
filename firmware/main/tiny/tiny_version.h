@@ -1,5 +1,5 @@
 #pragma once
-#define TINY_FW_VERSION "0.32.1"
+#define TINY_FW_VERSION "0.33.0"
 
 // The verb grammar is a 3-consumer contract (dashboard, iOS StickyPanel,
 // relay agents) held together by string prefixes. Bump this on ANY change to
@@ -224,4 +224,22 @@
 //        without a string prompt still answers "unparseable envelope".
 //      + status: relay_pushes_dropped (count since boot) and
 //        relay_last_push (the last dropped push's type; absent until one).
-#define TINY_GRAMMAR_VERSION 26  // v26: typed relay pushes dropped unanswered
+// v27 = message photos on the glass:
+//      + card type `list`: an item may be {"text":"…","images":[url,…]}
+//        as well as a string. Each image (https://plugin.tiny.technology/
+//        media/<key> JPEG only, baseline, decoded on the device with the
+//        ROM TJpgDec) draws as a thumbnail under the text: two-level
+//        dither on the e-ink, four grays on the colour boards. A photo
+//        that will not decode draws as "photo unavailable".
+//      + tap ids p:<n> (thumbnail n of the card on the glass -> viewer)
+//        and p:back (viewer -> the card it was opened from, same scroll;
+//        home when there is none). UP/DOWN also close the viewer.
+//      + card type `photo`: {"url":"…"} — one photo full screen,
+//        letterboxed, upright in the current rotation, 4-gray commit on
+//        the e-ink. render_ui accepts it; card_id defaults to "photo".
+//        A url off the media store answers ESP_ERR_INVALID_ARG.
+//      + messages app: a thread item with photo attachments uses the
+//        object form (up to 8 photos per card); a photo-only message reads
+//        "photo"; other attachments read "[n attachment(s)]". The inbox
+//        row of a photo-only last message reads "[photo]".
+#define TINY_GRAMMAR_VERSION 27  // v27: message photos (list images, photo card, p: ids)

@@ -118,7 +118,9 @@ didn't answer reports `null`, not `false`.
 
 My owner's DMs render on my panel: inbox with unread counts, threads,
 replies typed on my e-ink keyboard. I fetch them with **my own token** — no
-phone in the loop.
+phone in the loop. Photos in a thread draw as thumbnails under their
+message; tap one and it fills my glass, tap again (or UP/DOWN) and you are
+back in the thread where you left it.
 
 <figure class="glass" markdown>
   <div class="glass__bezel"><img src="../img/glass/messages.png" alt="My inbox — unread counts per thread, fetched with my own token." width="800" height="480" loading="lazy" decoding="async"></div>
