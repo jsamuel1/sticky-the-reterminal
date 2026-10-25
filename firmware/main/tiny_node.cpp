@@ -317,6 +317,7 @@ static int heartbeat(void) {
                 u->valueint != s_unread) {
                 s_unread = u->valueint;
                 ESP_LOGI(TAG, "unread -> %d", s_unread);
+                tiny_led_unread(s_unread > 0);  // FNK0104S: green while > 0
                 // Live badge: only the home card shows it, so only home
                 // re-renders — one e-ink refresh per CHANGE, none per beat.
                 if (!strcmp(tiny_display_current_card_id(), "home"))

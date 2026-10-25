@@ -6,6 +6,20 @@ release, newest first.
 
 ## Unreleased
 
+- **firmware (FNK0104S)** — the status light gains an attention layer under
+  blue/amber/red: magenta while a `"priority":"alert"` card is the
+  committed card (set from the same commit that publishes its tap regions,
+  so it is on exactly while that card is on glass; any other commit clears
+  it), green while the heartbeat reports unread DMs > 0. Both are steady,
+  no timer; locked and asleep stay dark. `CONFIG_TINY_STATUS_LED_BRIGHTNESS`
+  default 12 → 8 (owner's choice: the light can now stay lit). No verb or
+  reply change, so no grammar bump; the reTerminal and AMOLED-1.8 images
+  still carry no LED code. `led_host_test.sh` pins precedence, expiry back
+  to the attention colour and pairwise-distinct colours at 8/255;
+  `render_host_test.sh` asserts one alert-layer update per committed card.
+  Verified hardware facts (WS2812B LED2, GPIO42, +5 V rail) are in
+  `docs/hardware.md`.
+
 - **firmware 0.31.1, grammar v24** — colour boards: more internal RAM for
   the voice upload's TLS session (`tiny_upload` refuses below 60 KB free;
   tiny-eba6 idled at 16.8 KB). Kernel and ring-buffer code moves to flash
