@@ -23,6 +23,11 @@ printf 'tinyagent.state\tx00010203\ntinyagent.rcount\t2\ntinyagent.r0\ttiny\ntin
     > "$ASKQ_NVS_FILE"
 /tmp/agent_test corrupt
 /tmp/agent_test corrupt-reboot
+# A v1 "state" blob with n == 0 and active slug "bonk" (StoredState: ver,
+# n, slug[65], roster[8][65], zero-padded) loads as the seed.
+python3 -c 'import sys; b = bytes([1, 0]) + b"bonk".ljust(65, b"\0") + bytes(8 * 65); sys.stdout.write("tinyagent.state\tx" + b.hex() + "\n")' \
+    > "$ASKQ_NVS_FILE"
+/tmp/agent_test empty-blob
 # Outcome-unknown writes: each scenario in its own store, then a reboot.
 for s in $(/tmp/agent_test outcomes); do
     rm -f "$ASKQ_NVS_FILE" "$AGENT_EXPECT_FILE"

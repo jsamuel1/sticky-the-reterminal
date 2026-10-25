@@ -51,6 +51,10 @@ esp_err_t tiny_agent_set(const char *slug);
 // cap TINY_AGENT_SLUG_MAX+1 bytes).
 int tiny_agent_roster(char out[][TINY_AGENT_SLUG_MAX + 1], int max);
 esp_err_t tiny_agent_roster_add(const char *slug);
+// The roster is never empty: removing its last entry leaves the seed
+// {"tiny"} — in RAM, on flash and after a reboot alike (one rule, applied
+// before the write). Removing the sole seed itself is therefore ESP_OK with
+// the roster unchanged (only a matching active slug is cleared).
 esp_err_t tiny_agent_roster_remove(const char *slug);
 
 // A roster COPY, for showing what a merge would produce before committing
@@ -76,7 +80,8 @@ bool tiny_agent_roster_has(const tiny_agent_roster_t *r, const char *slug);
 // comes back, because the page built from `base` no longer describes the
 // roster. NVS outcomes as above (ESP_OK / TINY_AGENT_UNSETTLED / nothing
 // changed). The active slug is not changed (next->active must equal
-// base->active).
+// base->active). An empty `next` (n == 0) commits as the seed {"tiny"},
+// the same non-empty rule as roster_remove.
 esp_err_t tiny_agent_roster_commit(const tiny_agent_roster_t *base,
                                    const tiny_agent_roster_t *next);
 

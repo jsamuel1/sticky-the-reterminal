@@ -80,6 +80,22 @@ static esp_err_t refused_then_ok(const char *what, F mutate) {
 
 static int fresh() {
     CHECK(live() == Roster{"tiny"}, "fresh roster is the seed");
+    // The roster is never empty: removing the sole seed, or committing an
+    // empty batch, leaves {"tiny"} — the same state a reboot would load —
+    // and, being no change, writes nothing.
+    {
+        const int sets0 = agent_shim::calls()[agent_shim::kSetBlob];
+        CHECK(tiny_agent_roster_remove("tiny") == ESP_OK && live() == Roster{"tiny"},
+              "rm sole seed: ESP_OK, roster still the seed");
+        tiny_agent_roster_t b, n;
+        tiny_agent_roster_snapshot(&b);
+        n = b;
+        n.n = 0;
+        CHECK(tiny_agent_roster_commit(&b, &n) == ESP_OK && live() == Roster{"tiny"},
+              "empty batch on the seed: ESP_OK, roster still the seed");
+        CHECK(agent_shim::calls()[agent_shim::kSetBlob] == sets0,
+              "rm sole seed / empty batch: nothing written");
+    }
     // Preview on a snapshot, then the real add; both must agree, and the
     // preview alone must not touch RAM state or NVS.
     const char *inputs[] = {"bonk", "  Clod \n", "bonk", "a\"b", "", "x y",
@@ -244,6 +260,15 @@ static int corrupt() {
     agent_shim::reset();
     return 0;
 }
+// A v1 blob with n == 0 (this build never writes one; earlier pre-release
+// builds of the blob could): it loads as the seed, the same non-empty rule a
+// live mutation applies, with the active slug kept.
+static int empty_blob() {
+    CHECK(live() == Roster{"tiny"} && !strcmp(tiny_agent_current(), "bonk"),
+          "empty blob: loads as the seed, active slug kept");
+    return 0;
+}
+
 static int corrupt_reboot() {
     CHECK(live() == (Roster{"tiny", "bonk"}),
           "corrupt reboot: refused slug did not come back");
@@ -275,6 +300,10 @@ struct Scenario {
     void (*inject)();
     Want want;
     bool settle;       // after: one no-op mutation, healthy, must settle
+    // The mutation EMPTIES the roster (setup leaves it {old-a}): remove of
+    // the sole entry, or (batch) a commit of n == 0. The new state is the
+    // seed {"tiny"} — in RAM at once, and after the reboot.
+    bool empty = false;
 };
 static const Scenario kScenarios[] = {
     {"open-fail", false, false, [] { push(kOpenRw, ESP_FAIL, false); }, kErr, false},
@@ -347,6 +376,35 @@ static const Scenario kScenarios[] = {
          push(kErase, ESP_FAIL, false);
          push(kGetBlob, ESP_FAIL, false);
      }, kUnsettled, true},
+    // Emptying the roster: healthy and through every outcome class. The
+    // answer, RAM and the reboot must all say {"tiny"}, never an empty
+    // roster a reboot would reseed behind the caller's back.
+    {"empty-rm", false, false, [] {}, kOk, false, true},
+    {"empty-batch", false, true, [] {}, kOk, false, true},
+    {"empty-rm-commit-fail", false, false, [] { push(kCommit, ESP_FAIL, false); },
+     kErr, false, true},
+    {"empty-rm-remove-failed", false, false,
+     [] { push(kSetBlob, ESP_ERR_NVS_REMOVE_FAILED, true); }, kOk, false, true},
+    {"empty-rm-restore-fail-new", false, false, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kSetBlob, ESP_FAIL, false);
+     }, kOk, false, true},
+    {"empty-rm-restore-fail-old", false, false, [] {
+         push(kSetBlob, ESP_FAIL, false);
+         push(kSetBlob, ESP_FAIL, true);
+     }, kErr, false, true},
+    {"empty-batch-remove-failed", false, true,
+     [] { push(kSetBlob, ESP_ERR_NVS_REMOVE_FAILED, true); }, kOk, false, true},
+    {"empty-batch-restore-fail-new", false, true, [] {
+         push(kSetBlob, ESP_OK, true);
+         push(kCommit, ESP_FAIL, false);
+         push(kSetBlob, ESP_FAIL, false);
+     }, kOk, false, true},
+    {"empty-batch-unsettled", false, true, [] {
+         push(kSetBlob, ESP_FAIL, true);
+         push(kSetBlob, ESP_FAIL, false);
+         push(kGetBlob, ESP_FAIL, false);
+     }, kUnsettled, false, true},
 };
 static const Scenario *scenario(const std::string &name) {
     for (const Scenario &s : kScenarios) if (name == s.name) return &s;
@@ -362,15 +420,25 @@ static std::string now() { return render(tiny_agent_current(), live()); }
 static int outcome(const Scenario &sc) {
     if (!sc.first_save)
         CHECK(tiny_agent_set("old-a") == ESP_OK, "%s: setup", sc.name);
+    if (sc.empty)
+        CHECK(tiny_agent_roster_remove("tiny") == ESP_OK && live() == Roster{"old-a"},
+              "%s: setup leaves one entry", sc.name);
     const std::string old_s = now();
     tiny_agent_roster_t base, next;
     tiny_agent_roster_snapshot(&base);
     next = base;
-    tiny_agent_roster_preview_add(&next, "new-b");
-    const std::string new_s = render(base.active, of(next));
+    if (sc.empty) next.n = 0;
+    else tiny_agent_roster_preview_add(&next, "new-b");
+    // Emptied: the seed, written literally (not derived from the code under
+    // test). Removing the active old-a also clears the active slug.
+    const std::string new_s =
+        sc.empty ? render(sc.batch ? base.active : "", Roster{"tiny"})
+                 : render(base.active, of(next));
     agent_shim::reset();
     sc.inject();
-    const esp_err_t e = sc.batch ? tiny_agent_roster_commit(&base, &next)
+    const esp_err_t e = sc.empty ? (sc.batch ? tiny_agent_roster_commit(&base, &next)
+                                             : tiny_agent_roster_remove("old-a"))
+                      : sc.batch ? tiny_agent_roster_commit(&base, &next)
                                  : tiny_agent_roster_add("new-b");
     CHECK(agent_shim::idle(), "%s: every scripted fault was reached", sc.name);
     agent_shim::reset();
@@ -442,6 +510,7 @@ int main(int argc, char **argv) {
     else if (phase == "legacy-reboot") legacy_reboot();
     else if (phase == "corrupt") corrupt();
     else if (phase == "corrupt-reboot") corrupt_reboot();
+    else if (phase == "empty-blob") empty_blob();
     else if (phase == "outcomes") {
         for (const Scenario &s : kScenarios) printf("%s\n", s.name);
         return 0;

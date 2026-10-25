@@ -114,12 +114,21 @@ static bool canonical(const char *s, size_t cap, bool allow_empty) {
     return strcmp(norm, s) == 0;
 }
 
-static void seed(State *st) {
-    memset(st, 0, sizeof *st);
-    // The universe card is never an empty page ("tiny" is the platform's own
-    // public tiny — known-good, free, always resolvable).
+// THE non-empty rule, in one place: the universe card is never an empty
+// page ("tiny" is the platform's own public tiny — known-good, free, always
+// resolvable). Every state that exists — seeded, decoded, loaded from the
+// legacy keys, or built by a mutation before it is written — passes through
+// here, so what a mutation writes and adopts is exactly what a reboot loads.
+static void reseed_if_empty(State *st) {
+    if (st->n != 0) return;
+    memset(st->roster[0], 0, sizeof st->roster[0]);
     strlcpy(st->roster[0], "tiny", sizeof st->roster[0]);
     st->n = 1;
+}
+
+static void seed(State *st) {
+    memset(st, 0, sizeof *st);
+    reseed_if_empty(st);
 }
 
 static bool same_state(const State &a, const State &b) {
@@ -148,10 +157,9 @@ static bool decode(const StoredState &in, State *out) {
     for (int i = 0; i < in.n; ++i)
         strlcpy(out->roster[i], in.roster[i], sizeof out->roster[i]);
     out->n = in.n;
-    if (out->n == 0) {   // a roster emptied by `agent rm` reseeds, as before
-        strlcpy(out->roster[0], "tiny", sizeof out->roster[0]);
-        out->n = 1;
-    }
+    // This build never writes n=0 (commit_next_locked reseeds first); a
+    // blob from elsewhere with n=0 loads as the seed, the same rule.
+    reseed_if_empty(out);
     return true;
 }
 
@@ -172,10 +180,7 @@ static void load_legacy(nvs_handle_t h, State *st) {
             canonical(st->roster[st->n], sizeof st->roster[st->n], false))
             ++st->n;
     }
-    if (st->n == 0) {
-        strlcpy(st->roster[0], "tiny", sizeof st->roster[0]);
-        st->n = 1;
-    }
+    reseed_if_empty(st);
 }
 
 static void load_locked(void) {
@@ -228,13 +233,6 @@ static esp_err_t restore_locked(nvs_handle_t h) {
     return rb;
 }
 
-// Whether a decoded on-flash state `f` is what `s` loads as after a boot
-// (decode reseeds an emptied roster with "tiny").
-static bool same_loaded(const State &f, const State &s) {
-    if (s.n != 0) return same_state(f, s);
-    return f.n == 1 && strcmp(f.roster[0], "tiny") == 0 &&
-           strcmp(f.slug, s.slug) == 0;
-}
 
 // After a failed write AND a failed restore: which whole state flash holds
 // now, as IDF's own reader answers — i.e. what a reboot loads. New = `next` (checked first: when `next`
@@ -253,8 +251,11 @@ static Onflash read_back_locked(nvs_handle_t h, const State &next,
     if (g != ESP_OK || len != sizeof s_blob || !decode(s_blob, &st))
         return Onflash::Unknown;
     *blob_now = true;
-    if (same_loaded(s_read, next)) return Onflash::New;
-    if (same_loaded(s_read, s_state)) return Onflash::Old;
+    // `next` and s_state are both canonical (never an empty roster), and
+    // decode applies the same rule, so plain equality is "what a reboot
+    // loads" — no empty-equals-seed special case to drift from RAM.
+    if (same_state(s_read, next)) return Onflash::New;
+    if (same_state(s_read, s_state)) return Onflash::Old;
     return Onflash::Unknown;
 }
 
@@ -312,9 +313,14 @@ static esp_err_t persist_locked(const State &next) {
     return TINY_AGENT_UNSETTLED;
 }
 
-// Commit s_next: persist, then adopt. Unchanged state writes nothing —
-// unless flash is unsettled, when this write is what settles it.
+// Commit s_next: canonicalise, persist, then adopt. Canonicalising FIRST is
+// what makes ESP_OK mean one state everywhere: removing the last roster
+// entry writes, adopts and reboots as the seed {"tiny"} — never an empty
+// roster in RAM that a reboot would silently reseed. Unchanged state (after
+// canonicalising) writes nothing — unless flash is unsettled, when this
+// write is what settles it.
 static esp_err_t commit_next_locked(void) {
+    reseed_if_empty(&s_next);
     if (!s_unsettled && same_state(s_next, s_state)) return ESP_OK;
     const esp_err_t r = persist_locked(s_next);
     if (r == ESP_OK) s_state = s_next;
