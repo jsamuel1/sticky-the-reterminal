@@ -447,14 +447,47 @@ int main(int argc, char **argv) {
             // current. tiny_orient compares against this state before calling
             // again; retaining the failed target would suppress every
             // same-pose retry indefinitely.
+            //
+            // The card on glass is a keyboard so the failed request also
+            // proves gesture POLICY survives: a bottom-band swipe delivered in
+            // panel coordinates of the committed frame must still resolve to
+            // keyboard cancel, which needs the restored canvas rotation AND
+            // layout dimensions (the router maps panel -> logical through them).
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"keyboard","card_id":"kb-rot","title":"pw","value":"abc"})J") == ESP_OK,
+                  "rotation: keyboard commits before failed rotation");
             const int before = tiny_display_rotation();
+            CHECK(before != 0, "rotation: failure case starts at nonzero angle (%d)",
+                  before);
             const int target = (before + 90) % 360;
             const int refreshes = g_full_refreshes;
+            const int glass_w = sticky_display_canvas()->width();
+            const int glass_h = sticky_display_canvas()->height();
             g_fail_next_full = true;
             CHECK(tiny_display_set_rotation(target) == ESP_FAIL,
                   "rotation: injected panel failure is returned");
             CHECK(tiny_display_rotation() == before,
                   "rotation: failed commit keeps prior glass angle");
+            CHECK(static_cast<int>(sticky_display_canvas()->rotation()) * 90 ==
+                      before &&
+                      sticky_display_canvas()->width() == glass_w &&
+                      sticky_display_canvas()->height() == glass_h,
+                  "rotation: failed commit restores canvas touch frame");
+            CHECK(!strcmp(tiny_display_current_card_id(), "kb-rot"),
+                  "rotation: failed commit keeps keyboard identity on glass");
+            {
+                Canvas *cv = sticky_display_canvas();
+                int px0, py0, px1, py1;
+                cv->to_physical(glass_w / 2, glass_h * 98 / 100, px0, py0);
+                cv->to_physical(glass_w / 2, glass_h * 40 / 100, px1, py1);
+                g_shell_last_key.clear();
+                const int h0 = g_shell_home_calls;
+                tiny_display_scroll_gesture(px0, py0, px1, py1);
+                CHECK(g_shell_last_key == "k:cancel" && g_shell_home_calls == h0,
+                      "rotation: failed commit keeps keyboard gesture policy "
+                      "(key=%s home=%d)",
+                      g_shell_last_key.c_str(), g_shell_home_calls - h0);
+            }
             CHECK(g_full_refreshes == refreshes + 1,
                   "rotation: failed request reaches panel once");
             CHECK(tiny_display_set_rotation(target) == ESP_OK,
@@ -833,11 +866,36 @@ int main(int argc, char **argv) {
             CHECK(tiny_display_render_card(long_card.c_str()) == ESP_OK &&
                       tiny_display_can_scroll(),
                   "panel native: long text establishes scroll state");
+            CHECK(tiny_display_set_rotation(90) == ESP_OK,
+                  "panel native: policy angle is portrait before image");
             serve_http(gray4, true);
             CHECK(tiny_display_render_card(
                       R"J({"type":"image","card_id":"stream","url":"https://h/id.raw"})J") == ESP_OK &&
                       !strcmp(tiny_display_current_card_id(), "stream"),
                   "image identity: requested card_id is published on success");
+            CHECK(tiny_display_rotation() == 90 &&
+                      sticky_display_canvas()->rotation() == CanvasRotation::Landscape,
+                  "panel native: image keeps policy angle but commits landscape frame");
+            const uint32_t image_frame_hash = frame_hash();
+            g_fail_next_full = true;
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"text","card_id":"failed-over-image","title":"x","body":"y"})J") == ESP_FAIL &&
+                      !strcmp(tiny_display_current_card_id(), "stream") &&
+                      tiny_display_rotation() == 90 &&
+                      sticky_display_canvas()->rotation() == CanvasRotation::Landscape &&
+                      frame_hash() == image_frame_hash,
+                  "panel native: failed drawn card restores image bytes and touch frame");
+            // Gallery publishes native-space tap regions without running the
+            // generic layout. Its visible ack therefore catches stale s_w/s_h:
+            // correct landscape dimensions repaint this bottom-left interior
+            // white; the failed portrait candidate would repaint 80 px above.
+            CHECK(tiny_display_gallery_nav(0) == ESP_OK && px(31, 390) == 0,
+                  "panel native: gallery probe starts outside button paint");
+            const esp_err_t ack_err = tiny_display_flash_button(0);
+            const int ack_px = px(31, 390);
+            CHECK(ack_err == ESP_OK && ack_px == 3,
+                  "panel native: failed card restores live ack dimensions (px=%d)",
+                  ack_px);
             int native_offset = -1, native_content = -1, native_view = -1;
             tiny_display_scroll_state(&native_offset, &native_content, &native_view);
             CHECK(!tiny_display_can_scroll() && native_offset == 0 &&

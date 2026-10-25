@@ -883,10 +883,9 @@ extern "C" esp_err_t tiny_display_set_rotation(int degrees) {
                  "\"body\":\"rotated to %d deg\",\"card_id\":\"rot%d\"}", d, d);
         err = tiny_display_render_card(card);
     }
-    // s_rot describes what successfully committed to glass. If refresh fails,
-    // keep the prior value so the next stable IMU sample retries this angle
-    // instead of taking tiny_orient's "already there" early-out forever.
-    // Do not overwrite a newer concurrent request that changed it meanwhile.
+    // s_rot describes what successfully committed to glass. render_card_at()
+    // restores the exact prior Canvas frame and layout dimensions on failure;
+    // restore policy angle here so the next stable IMU sample retries.
     if (err != ESP_OK && s_rot == r) s_rot = previous;
     ESP_LOGI(TAG, "rotation -> %d deg (%s)", d, esp_err_to_name(err));
     return err;
@@ -2672,6 +2671,41 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     char geo_scroll_card[sizeof s_scroll_card];
     strlcpy(geo_scroll_card, s_scroll_card, sizeof geo_scroll_card);
     display_lock();
+    // The Canvas bytes are also uncommitted until panel refresh succeeds.
+    // Snapshot both planes before drawing: otherwise a later partial ack can
+    // push pixels from a failed replacement while card_id/regions still name
+    // the prior card. Refuse before mutation if rollback storage is unavailable.
+    const size_t glass_gray_len = c->stride() * c->physical_height();
+    uint8_t *glass_gray = static_cast<uint8_t *>(
+        heap_caps_malloc(glass_gray_len, MALLOC_CAP_SPIRAM));
+    if (!glass_gray) glass_gray = static_cast<uint8_t *>(malloc(glass_gray_len));
+    const uint8_t *canvas_accent = c->accent_data();
+    const size_t glass_accent_len = canvas_accent
+        ? c->accent_stride() * c->physical_height() : 0;
+    uint8_t *glass_accent_bytes = nullptr;
+    if (glass_accent_len) {
+        glass_accent_bytes = static_cast<uint8_t *>(
+            heap_caps_malloc(glass_accent_len, MALLOC_CAP_SPIRAM));
+        if (!glass_accent_bytes)
+            glass_accent_bytes = static_cast<uint8_t *>(malloc(glass_accent_len));
+    }
+    if (!glass_gray || (glass_accent_len && !glass_accent_bytes)) {
+        free(glass_gray);
+        free(glass_accent_bytes);
+        display_unlock();
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(glass_gray, c->data(), glass_gray_len);
+    if (glass_accent_len)
+        memcpy(glass_accent_bytes, canvas_accent, glass_accent_len);
+    // Canvas rotation and layout/style metadata are glass-derived state too.
+    // This matters when a panel-native image is landscape while s_rot already
+    // holds the portrait orientation intended for the next drawn card.
+    const CanvasRotation glass_rot = c->rotation();
+    const int glass_w = c->width(), glass_h = c->height();
+    const uint8_t glass_accent = s_accent;
+    const int glass_btn_scale = s_btn_scale;
 
     // Rotation is applied here, once per render: the layout helpers below all
     // read s_w/s_h, and the canvas turns every pixel they draw.
@@ -2785,8 +2819,16 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     // HEAD did not compile without it.
     static int s_pushed_rot = -1;
     // §12 wake: baseline capture pass — draw into the canvas, push nothing.
-    // Regions are NOT published (nothing new is on the glass).
-    if (s_draw_only) { display_unlock(); cJSON_Delete(root); return ESP_OK; }
+    // Regions are NOT published (nothing new is on the glass). The baseline
+    // capture itself wants the newly drawn bytes, so discard—not restore—the
+    // transaction snapshot.
+    if (s_draw_only) {
+        free(glass_gray);
+        free(glass_accent_bytes);
+        display_unlock();
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
     const bool rot_changed = (s_pushed_rot != static_cast<int>(s_rot));
     esp_err_t err;
     if (s_wake_partial_pending && s_wake_baseline) {
@@ -2814,6 +2856,13 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
         s_commit_alert = is_alert;
         publish_regions(cid_s, type_s);
     } else {
+        memcpy(c->data(), glass_gray, glass_gray_len);
+        if (glass_accent_len)
+            memcpy(c->accent_data(), glass_accent_bytes, glass_accent_len);
+        c->set_rotation(glass_rot);
+        s_w = glass_w; s_h = glass_h;
+        s_accent = glass_accent;
+        s_btn_scale = glass_btn_scale;
         s_scroll = geo_scroll; s_content_h = geo_content_h;
         s_body_top = geo_body_top; s_body_bot = geo_body_bot;
         s_view_top = geo_view_top; s_view_bot = geo_view_bot;
@@ -2821,6 +2870,8 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
         ESP_LOGW(TAG, "refresh failed (%s) — keeping previous tap regions",
                  esp_err_to_name(err));
     }
+    free(glass_gray);
+    free(glass_accent_bytes);
     display_unlock();
 
     ESP_LOGI(TAG, "card rendered type=%s title=\"%s\" id=\"%s\" buttons=%d -> %s",

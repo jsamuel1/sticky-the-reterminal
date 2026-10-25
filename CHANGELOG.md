@@ -141,7 +141,9 @@ release, newest first.
   tour teaches BOOT and swipes there instead of UP/DOWN. Display cache,
   rotation, scroll and wake state now commit under one recursive render
   transaction; concurrent auto-rotate and card renders cannot race the cached
-  JSON or expose an angle before its panel refresh. Network image/gallery
+  JSON or expose an angle before its panel refresh, and a failed replacement
+  restores the prior card's touch frame, layout dimensions, and ack styling.
+  Network image/gallery
   fetches stay outside the panel lock and use a generation fence, so a stale
   response cannot overwrite a newer card. Raw one-bit blits now claim that
   same generation and retire a live text stream only after panel success;
