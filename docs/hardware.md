@@ -127,8 +127,11 @@ What it shows, strongest first:
 The last two are steady: magenta clears when the next card commits, green
 when the heartbeat reports zero. Image, gallery and universe cards honour
 `priority` like any other card; gallery page flips and universe row taps
-repaint the same page and keep its magenta. The reTerminal and AMOLED-1.8
-have no such light and carry none of this code.
+repaint the same page and keep its magenta. "The same page" is the
+device's own gallery or universe page, not a card id: a sender's card that
+happens to be named `gallery` or `universe` lends nothing to a later flip
+or row tap. The reTerminal and AMOLED-1.8 have no such light and carry none
+of this code.
 
 Not yet verified on the physical FNK0104S: the colours as seen, every
 transition above, touch while the light is lit, and whether 3.3 V data

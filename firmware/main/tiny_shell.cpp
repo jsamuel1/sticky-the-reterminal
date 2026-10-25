@@ -792,13 +792,14 @@ static esp_err_t render_universe(void) {
     const char *cur = tiny_agent_current();
     char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
     const int n = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
-    // A device REPAINT (row tap, u:open): no priority field, so tiny_display
-    // keeps the alert only while the universe page on glass committed with
-    // it. A render_ui universe PUSH never comes through here: tiny_display
-    // renders it under the push's own claim, with the push's priority.
+    // A device REPAINT (row tap, u:open): no priority field, rendered as the
+    // typed universe page, so tiny_display keeps the alert only while the
+    // universe page on glass committed with it. A render_ui universe PUSH
+    // never comes through here: tiny_display renders it under the push's own
+    // claim, with the push's priority.
     char *cs = tiny_universe_card_json(cur, roster, n, NULL);
     if (!cs) return ESP_ERR_NO_MEM;
-    esp_err_t r = tiny_display_render_card(cs);
+    esp_err_t r = tiny_display_render_universe_page(cs);
     free(cs);
     return r;
 }

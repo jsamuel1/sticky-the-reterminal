@@ -116,24 +116,36 @@ extern "C" const char *tiny_agent_current(void) {
     return s_slug;  // stable static storage; readers get a C string
 }
 
-static int roster_find_locked(const char *slug) {
-    for (int i = 0; i < s_rcount; ++i)
-        if (strcmp(s_roster[i], slug) == 0) return i;
+static int roster_find(const char (*roster)[TINY_AGENT_SLUG_MAX + 1], int n,
+                       const char *slug) {
+    for (int i = 0; i < n; ++i)
+        if (strcmp(roster[i], slug) == 0) return i;
     return -1;
 }
 
-static void roster_add_locked(const char *slug) {
-    if (!slug[0] || roster_find_locked(slug) >= 0) return;
-    if (s_rcount >= TINY_AGENT_ROSTER_MAX) {
+static int roster_find_locked(const char *slug) {
+    return roster_find(s_roster, s_rcount, slug);
+}
+
+// THE add rule, on any roster copy: the live one (roster_add_locked) and a
+// caller's preview (tiny_agent_roster_preview_add) cannot drift apart.
+static void roster_add_to(char (*roster)[TINY_AGENT_SLUG_MAX + 1], int *n,
+                          const char *slug) {
+    if (!slug[0] || roster_find(roster, *n, slug) >= 0) return;
+    if (*n >= TINY_AGENT_ROSTER_MAX) {
         // Full: drop the OLDEST non-"tiny" entry (index 0 is usually the
         // seed; keep it reachable — switching home must never need typing).
-        int drop = strcmp(s_roster[0], "tiny") == 0 && s_rcount > 1 ? 1 : 0;
-        memmove(&s_roster[drop], &s_roster[drop + 1],
-                sizeof s_roster[0] * (s_rcount - drop - 1));
-        --s_rcount;
+        int drop = strcmp(roster[0], "tiny") == 0 && *n > 1 ? 1 : 0;
+        memmove(&roster[drop], &roster[drop + 1],
+                sizeof roster[0] * (*n - drop - 1));
+        --*n;
     }
-    strlcpy(s_roster[s_rcount], slug, sizeof s_roster[0]);
-    ++s_rcount;
+    strlcpy(roster[*n], slug, sizeof roster[0]);
+    ++*n;
+}
+
+static void roster_add_locked(const char *slug) {
+    roster_add_to(s_roster, &s_rcount, slug);
 }
 
 extern "C" esp_err_t tiny_agent_set(const char *slug) {
@@ -177,6 +189,22 @@ extern "C" esp_err_t tiny_agent_roster_add(const char *slug) {
     r = save_locked();
     unlock();
     return r;
+}
+
+extern "C" void tiny_agent_roster_snapshot(tiny_agent_roster_t *out) {
+    if (!out) return;
+    out->n = tiny_agent_roster(out->slugs, TINY_AGENT_ROSTER_MAX);
+}
+
+extern "C" esp_err_t tiny_agent_roster_preview_add(tiny_agent_roster_t *r,
+                                                   const char *slug) {
+    if (!r) return ESP_ERR_INVALID_ARG;
+    char norm[TINY_AGENT_SLUG_MAX + 1];
+    esp_err_t e = normalize(slug, norm);
+    if (e != ESP_OK) return e;
+    if (!norm[0]) return ESP_ERR_INVALID_ARG;
+    roster_add_to(r->slugs, &r->n, norm);   // the copy only: no lock, no NVS
+    return ESP_OK;
 }
 
 extern "C" esp_err_t tiny_agent_roster_remove(const char *slug) {

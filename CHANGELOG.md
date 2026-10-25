@@ -81,11 +81,20 @@ are folded into `## [Unreleased]` when a version is cut
   universe push writes its priority into the roster composite
   (`tiny/tiny_universe_card.h`, shared with the shell's row-tap repaint and
   the host test), and a gallery page flip or universe repaint keeps the
-  alert only while that same page is on glass. A universe push is now one
-  request with one render claim: tiny_display merges its slugs and renders
-  the composite under that claim instead of re-entering the public renderer
-  for a second one, so an overtaken push (a stream finale whose claim a
-  newer card beat) paints nothing and merges no slug.
+  alert only while that same page is on glass. "Same page" is typed by the
+  render path (the gallery store's paint, a universe push, the shell's
+  `tiny_display_render_universe_page`), never read from the `card_id`, so a
+  sender's alert card named `gallery` or `universe` lends nothing to a later
+  flip or row tap; the UP/DOWN page-flip rule asks the same typed page
+  (`tiny_display_glass_is_gallery`). A universe push is now one request with
+  one render claim and one parse: tiny_display renders the composite from
+  the tree it already parsed, under that claim, from a preview of the merged
+  roster, and persists the pushed slugs only once the page is on glass. An
+  overtaken push (a stream finale whose claim a newer card beat), a failed
+  panel commit or any allocation failure on the way paints nothing, merges
+  no slug and leaves the light alone; the composite builder refuses to
+  return a half-built page. `agent_host_test.sh` proves the roster preview
+  equals the real add and writes nothing.
   Verified hardware facts (WS2812B LED2, GPIO42, +5 V rail) are in
   `docs/hardware.md`.
 - **firmware** — a render that a newer card overtook now returns
@@ -96,8 +105,9 @@ are folded into `## [Unreleased]` when a version is cut
   answers `superseded: newer card_id=<id> on glass` and `page` names
   `SUPERSEDED`. Photo-archive order still follows paint order (archive runs
   inside the painting request's render transaction); the render host test
-  now pins it with two images, pause-after-paint, and the adjacent-resend
-  dedupe.
+  now pins it with two images: at the pause after A's paint, A still holds
+  render ownership and B has reached its render-lock attempt unpainted,
+  then the files and the adjacent-resend dedupe are checked.
 
 - **firmware 0.31.1, grammar v24** — colour boards: more internal RAM for
   the voice upload's TLS session (`tiny_upload` refuses below 60 KB free;

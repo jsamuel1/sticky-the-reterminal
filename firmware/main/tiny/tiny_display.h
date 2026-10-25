@@ -22,6 +22,16 @@ esp_err_t tiny_display_init(void);
 // ("SUPERSEDED"), which IDF's table does not know, and defers otherwise.
 const char *tiny_display_err_name(esp_err_t err);
 esp_err_t tiny_display_render_card(const char *card_json);   // parse+draw+refresh
+// The device's OWN universe roster page (tiny_shell's u:open / row taps,
+// built by tiny_universe_card_json with no priority). Same render as above,
+// but the commit is typed as the universe page, so it keeps the alert of a
+// universe page already on glass. A sender's card — even one whose card_id
+// is "universe" — goes through render_card and never inherits.
+esp_err_t tiny_display_render_universe_page(const char *card_json);
+// True while the gallery STORE's page is on glass (a gallery card or page
+// flip), never because some other card is named "gallery". The UP/DOWN
+// page-flip rule asks this, not the card_id.
+bool tiny_display_glass_is_gallery(void);
 esp_err_t tiny_display_splash(const char *version, const char *state);
 esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len, bool partial);
 // Fetch a server-packed canvas-space .raw (panel W*H/8 B mono / W*H/4 B gray4:

@@ -34,6 +34,18 @@ int tiny_agent_roster(char out[][TINY_AGENT_SLUG_MAX + 1], int max);
 esp_err_t tiny_agent_roster_add(const char *slug);
 esp_err_t tiny_agent_roster_remove(const char *slug);
 
+// A roster COPY, for showing what a merge would produce before committing
+// it (a universe push paints the merged page first and persists the slugs
+// only once that page is on glass). preview_add applies exactly the rules of
+// roster_add — normalisation, refusal, dedupe, full-roster eviction — to the
+// copy only: no lock held afterwards, nothing written to RAM state or NVS.
+typedef struct {
+    char slugs[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
+    int n;
+} tiny_agent_roster_t;
+void tiny_agent_roster_snapshot(tiny_agent_roster_t *out);
+esp_err_t tiny_agent_roster_preview_add(tiny_agent_roster_t *r, const char *slug);
+
 #ifdef __cplusplus
 }
 #endif

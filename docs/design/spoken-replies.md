@@ -221,7 +221,8 @@ with today's internal re-entries):
 | Public entry | Takes `s_stream_mux`? | Internal route after the split |
 | --- | --- | --- |
 | `render_card` | yes | `render_card_impl`. A `gallery` spec calls `gallery_commit_impl` → `gallery_nav_impl(0)` (today `render_gallery_card` → public `gallery_nav(0)`, a recursive acquisition after the split). An `image` spec calls `image_impl`. |
-| `render_card` with `type:"universe"` | **no** | The wrapper parses the spec before locking (parsing needs no lock). For `universe` it calls `tiny_shell_universe_push()` holding nothing; that merges the roster and makes exactly one public `render_card` of a composite. Today this branch sits inside `render_card` and re-enters it from `render_universe()`. `render_card_impl` refuses a universe spec with `ESP_ERR_INVALID_ARG` rather than calling the shell. |
+| `render_card` with `type:"universe"` | yes | `render_card_impl`. The impl parses the spec **once**; a `universe` spec is routed off that same tree to `universe_impl`, which claims the request's one epoch (or carries a finale's claimed one), builds the roster composite from a *preview* of the merged roster (`tiny_universe_card_json`, shared with the shell), and calls `render_card_impl` of that composite under the same claim and the same lock hold — no second claim, no second parse, no public re-entry. The pushed slugs persist only at the composite's commit. Today this is `render_universe_at` → `render_card_at(composite, claim, {Universe, tinys})`; the retired `tiny_shell_universe_push()` route, which re-entered the public `render_card` and minted a second claim, must not come back. |
+| `render_universe_page` (shell `u:open`, row taps) | yes | `render_card_impl` of the shell-built composite, committed as the typed universe page (it inherits that page's alert; a sender's card named `universe` does not) |
 | `gallery_nav` | yes | `gallery_nav_impl(dir)` |
 | `rerender`, `glance` | yes | valid stream: stream redraw, token kept (like rotation; today a clock-tick, lock or clean-flash rerender silently ends the stream); otherwise claim, `rerender_impl` → `render_card_impl(s_card_cache)` (a cached gallery reaches `gallery_nav_impl(0)` as above) |
 | `set_rotation` | yes | valid stream: stream redraw; otherwise `rerender_impl`, and on `INVALID_STATE` the `rotated to N deg` card through `render_card_impl` |
@@ -1180,8 +1181,10 @@ speech-to-text.
    (iii) a stream paint that would re-enter a public display entry point
    trips the fake mutex's non-recursive assert, and the same assert runs
    over every census route: a cached-gallery rerender, a gallery spec
-   through `render_card`, a `universe` spec through `render_card` (shell
-   push → one composite render), `scroll_page` and a sideways
+   through `render_card`, a `universe` spec through `render_card` (one
+   parse → `universe_impl` → one composite `render_card_impl` under the
+   same claim), the shell's `render_universe_page`, `scroll_page` and a
+   sideways
    `scroll_gesture`, each with and without a valid stream; (iv) a
    lock-order checker records every acquisition and fails on any
    `display` → `stream` or `region` → `display` edge; (v) a takeover pauses

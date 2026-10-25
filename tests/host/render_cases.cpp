@@ -29,6 +29,8 @@
 #include <zlib.h>
 
 #include "esp_http_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"   // render_test_recursive_held
 #include "canvas.h"
 #include "lcd_palette.h"
 #include "tiny/tiny_display.h"
@@ -240,6 +242,45 @@ extern "C" esp_err_t tiny_agent_roster_add(const char *slug) {
     for (const auto &r : g_roster) if (r == slug) return ESP_OK;
     g_roster.push_back(slug);
     return ESP_OK;
+}
+// Preview = the stub's add rule on a copy (tiny_agent's own preview/add
+// equivalence is agent_host_test.sh's business).
+extern "C" void tiny_agent_roster_snapshot(tiny_agent_roster_t *out) {
+    out->n = tiny_agent_roster(out->slugs, TINY_AGENT_ROSTER_MAX);
+}
+extern "C" esp_err_t tiny_agent_roster_preview_add(tiny_agent_roster_t *r,
+                                                   const char *slug) {
+    for (int i = 0; i < r->n; ++i) if (!strcmp(r->slugs[i], slug)) return ESP_OK;
+    if (r->n < TINY_AGENT_ROSTER_MAX)
+        strlcpy(r->slugs[r->n++], slug, TINY_AGENT_SLUG_MAX + 1);
+    return ESP_OK;
+}
+
+// cJSON allocation failure injection (cJSON_InitHooks): while armed, the
+// g_cjson_fail_at-th cJSON allocation after arming returns NULL. cJSON is
+// the device's own allocator path for every parse, build and print.
+static std::atomic<long> g_cjson_allocs{0};
+static std::atomic<long> g_cjson_fail_at{0};
+static std::atomic<bool> g_cjson_failed{false};
+static void *cjson_test_malloc(size_t n) {
+    const long k = ++g_cjson_allocs;
+    if (g_cjson_fail_at > 0 && k == g_cjson_fail_at) {
+        g_cjson_failed = true;
+        return nullptr;
+    }
+    return malloc(n);
+}
+static void cjson_test_free(void *p) { free(p); }
+static void cjson_fail_arm(long at) {
+    g_cjson_allocs = 0;
+    g_cjson_failed = false;
+    g_cjson_fail_at = at;
+    cJSON_Hooks h{cjson_test_malloc, cjson_test_free};
+    cJSON_InitHooks(&h);
+}
+static void cjson_fail_disarm() {
+    g_cjson_fail_at = 0;
+    cJSON_InitHooks(nullptr);
 }
 extern "C" esp_err_t tiny_config_gallery_save(const void *, size_t, uint8_t, uint8_t) { return 0; }
 extern "C" esp_err_t tiny_config_gallery_save_index(uint8_t) { return 0; }
@@ -657,7 +698,7 @@ int main(int argc, char **argv) {
                 char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
                 const int n = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
                 char *cs = tiny_universe_card_json(g_agent, roster, n, nullptr);
-                const esp_err_t r = tiny_display_render_card(cs);
+                const esp_err_t r = tiny_display_render_universe_page(cs);
                 free(cs);
                 return r;
             };
@@ -716,6 +757,163 @@ int main(int argc, char **argv) {
             expect("normal card replaces universe", tiny_display_render_card(normal),
                    ESP_OK, 1, false);
             expect("universe repaint after replace", repaint_universe(), ESP_OK, 1, false);
+
+            // ---- page ownership is typed, not a card_id ---------------------
+            // A sender may legally name any card "gallery" or "universe". Such
+            // a card is not the device's page: a later page flip / reopen or
+            // roster repaint must not inherit its alert, it must not drive the
+            // UP/DOWN page-flip rule, and the real pages still inherit from
+            // themselves.
+            expect("gallery store page, alert", tiny_display_render_card(
+                R"J({"type":"gallery","urls":["https://x/5.raw","https://x/6.raw"],"priority":"alert"})J"),
+                ESP_OK, 1, true);
+            CHECK(tiny_display_glass_is_gallery(),
+                  "typed page: the gallery store's page is the gallery");
+            expect("text card NAMED gallery, alert", tiny_display_render_card(
+                R"J({"type":"text","card_id":"gallery","title":"x","priority":"alert","body":"y"})J"),
+                ESP_OK, 1, true);
+            CHECK(!tiny_display_glass_is_gallery() &&
+                      !strcmp(tiny_display_current_card_id(), "gallery"),
+                  "typed page: a card named gallery is not the gallery page");
+            expect("gallery reopened after a card named gallery",
+                   tiny_display_gallery_nav(0), ESP_OK, 1, false);
+            CHECK(tiny_display_glass_is_gallery(), "typed page: reopened gallery");
+            expect("image card NAMED gallery, alert", tiny_display_render_card(
+                R"J({"type":"image","card_id":"gallery","url":"https://x/c.raw","priority":"alert"})J"),
+                ESP_OK, 1, true);
+            CHECK(!tiny_display_glass_is_gallery(),
+                  "typed page: an image named gallery is not the gallery page");
+            expect("gallery flip after an image named gallery",
+                   tiny_display_gallery_nav(+1), ESP_OK, 1, false);
+
+            expect("text card NAMED universe, alert", tiny_display_render_card(
+                R"J({"type":"text","card_id":"universe","title":"x","priority":"alert","body":"y"})J"),
+                ESP_OK, 1, true);
+            expect("universe repaint after a card named universe", repaint_universe(),
+                   ESP_OK, 1, false);
+            expect("composite NAMED universe, alert", tiny_display_render_card(
+                R"J({"type":"composite","card_id":"universe","title":"x","priority":"alert","parts":[{"type":"text","body":"y"}]})J"),
+                ESP_OK, 1, true);
+            expect("universe repaint after a composite named universe",
+                   repaint_universe(), ESP_OK, 1, false);
+            // The universe page's own JSON, but SENT (no priority) over the
+            // device's alert universe page: a sender's card, so normal.
+            expect("alert universe page for the sender case", tiny_display_render_card(
+                R"J({"type":"universe","priority":"alert"})J"), ESP_OK, 1, true);
+            {
+                char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
+                const int n = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
+                char *cs = tiny_universe_card_json(g_agent, roster, n, nullptr);
+                expect("sender re-sends the page JSON with no priority",
+                       tiny_display_render_card(cs), ESP_OK, 1, false);
+                free(cs);
+            }
+            // The real pages still inherit from themselves, including after a
+            // replay of the cached universe page.
+            expect("alert universe page again", tiny_display_render_card(
+                R"J({"type":"universe","priority":"alert"})J"), ESP_OK, 1, true);
+            expect("universe page rerender keeps alert", tiny_display_rerender(),
+                   ESP_OK, 1, true);
+            expect("universe repaint after rerender keeps alert", repaint_universe(),
+                   ESP_OK, 1, true);
+            expect("normal card ends it", tiny_display_render_card(normal),
+                   ESP_OK, 1, false);
+
+            // ---- universe push: every allocation failure fails closed --------
+            // One parse, one build, one render. Fail each cJSON allocation the
+            // push makes, in turn (parse, preview build, print, the nested
+            // render's parse). A failure must change NOTHING — no roster
+            // merge, no paint, no cache, no tap regions, no status light —
+            // and the first k that succeeds must be the whole push: alert
+            // light on, slug merged. Never a "successful" normal page.
+            {
+                const char *push =
+                    R"J({"type":"universe","priority":"alert","tinys":["oom-slug"]})J";
+                const uint32_t frame0 = fnv1a(g_buf.data(), g_buf.size());
+                const size_t roster0 = g_roster.size();
+                bool succeeded = false;
+                int failures = 0;
+                for (long k = 1; k < 400 && !succeeded; ++k) {
+                    const int refreshes = g_full_refreshes;
+                    const uint32_t gen0 = tiny_display_card_gen();
+                    calls = g_led_alert_calls;
+                    cjson_fail_arm(k);
+                    const esp_err_t r = tiny_display_render_card(push);
+                    const bool injected = g_cjson_failed.load();
+                    cjson_fail_disarm();
+                    if (!injected) {
+                        CHECK(r == ESP_OK, "universe oom: no failure at k=%ld yet %d", k, r);
+                        succeeded = true;
+                    } else if (r == ESP_OK) {
+                        // cJSON may survive a failed allocation it can retry
+                        // around; then the push must still be all there.
+                        succeeded = true;
+                    }
+                    if (succeeded) {
+                        CHECK(g_led_alert && g_led_alert_calls == calls + 1 &&
+                                  !strcmp(tiny_display_current_card_id(), "universe") &&
+                                  g_roster.size() == roster0 + 1 &&
+                                  g_roster.back() == "oom-slug",
+                              "universe oom: k=%ld success is the whole alert push", k);
+                        // Whole page too: the glass and the tap regions must
+                        // equal a reference render of the complete composite
+                        // (built with no injection) — a half-built page would
+                        // drop a row, or point a row index at the wrong slug.
+                        auto census = [] {
+                            tiny_button_region_t regs[48];
+                            const int nr = tiny_display_button_regions(regs, 48);
+                            std::vector<std::string> v;
+                            for (int i = 0; i < nr; ++i)
+                                v.push_back(std::string(regs[i].id) + "=" + regs[i].label);
+                            return v;
+                        };
+                        const uint32_t got_frame = fnv1a(g_buf.data(), g_buf.size());
+                        const auto got = census();
+                        char roster[TINY_AGENT_ROSTER_MAX][TINY_AGENT_SLUG_MAX + 1];
+                        const int rn = tiny_agent_roster(roster, TINY_AGENT_ROSTER_MAX);
+                        char *ref = tiny_universe_card_json(g_agent, roster, rn, "alert");
+                        CHECK(ref && tiny_display_render_card(ref) == ESP_OK,
+                              "universe oom: reference page renders");
+                        free(ref);
+                        CHECK(got_frame == fnv1a(g_buf.data(), g_buf.size()) &&
+                                  got == census() && got.size() >= 2,
+                              "universe oom: k=%ld page is the complete composite "
+                              "(%zu regions)", k, got.size());
+                        break;
+                    }
+                    ++failures;
+                    CHECK(g_roster.size() == roster0,
+                          "universe oom: k=%ld (%d) merged a slug", k, r);
+                    CHECK(g_full_refreshes == refreshes &&
+                              tiny_display_card_gen() == gen0 &&
+                              fnv1a(g_buf.data(), g_buf.size()) == frame0,
+                          "universe oom: k=%ld (%d) reached the glass", k, r);
+                    CHECK(g_led_alert_calls == calls && !g_led_alert,
+                          "universe oom: k=%ld (%d) touched the light", k, r);
+                    CHECK(!strcmp(tiny_display_current_card_id(), "n1"),
+                          "universe oom: k=%ld (%d) changed glass identity", k, r);
+                }
+                CHECK(succeeded && failures >= 4,
+                      "universe oom: swept %d failing allocations then succeeded",
+                      failures);
+                calls = g_led_alert_calls;
+                CHECK(tiny_display_rerender() == ESP_OK && g_led_alert &&
+                          !strcmp(tiny_display_current_card_id(), "universe"),
+                      "universe oom: replay is the committed alert push");
+                calls = g_led_alert_calls;
+                expect("normal after oom sweep", tiny_display_render_card(normal),
+                       ESP_OK, 1, false);
+            }
+            // A push whose panel commit fails merges nothing either.
+            {
+                const size_t roster0 = g_roster.size();
+                g_fail_next_full = true;
+                expect("universe push, panel fails", tiny_display_render_card(
+                    R"J({"type":"universe","priority":"alert","tinys":["panel-fail-slug"]})J"),
+                    ESP_FAIL, 0, false);
+                CHECK(g_roster.size() == roster0,
+                      "universe push, panel fails: no slug merged");
+            }
             unserve();
 
             // ---- one request, one claim: universe push ----------------------
@@ -797,6 +995,12 @@ int main(int argc, char **argv) {
             // Image B is sent then. B cannot paint (or archive) until A has
             // archived, so 00001 = A and 00002 = B; a B resend archives
             // nothing (adjacent dedupe names B), and an A resend is new again.
+            // Proven by admission, not by time: at the seam A must still hold
+            // render ownership (the recursive lock's per-thread level), and B
+            // must have reached its own render-lock attempt — so B is queued
+            // on the lock A holds, cannot have painted, and runs only after
+            // A's archive. Moving the archive outside A's render transaction
+            // fails the ownership check on every run, whatever the scheduler.
             {
                 g_sd_present = true;
                 auto photo = [](int n) {
@@ -819,26 +1023,38 @@ int main(int argc, char **argv) {
                 std::atomic<int> rb{ESP_FAIL};
                 std::atomic<bool> b_done{false};
                 std::thread bthr;
-                bool b_waited = false;
+                bool a_owned = false, b_queued = false, b_pending = false;
+                int b_refreshes = -1;
                 arm_seam("image-painted", [&] {
+                    a_owned = render_test_recursive_held > 0;
                     {
                         std::lock_guard<std::mutex> lock(g_http_mutex);
                         g_http_body.assign(mono, 0xB2);   // A already fetched
                     }
+                    int attempts;
+                    {
+                        std::lock_guard<std::mutex> lock(g_attempt_mutex);
+                        attempts = g_render_attempts;
+                    }
+                    const int refreshes = g_full_refreshes;
                     bthr = std::thread([&] {
                         rb = tiny_display_render_card(img_b);
                         b_done = true;
                     });
-                    // Give B every chance to paint+archive inside A's gap.
-                    for (int i = 0; i < 30 && !b_done.load(); ++i)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    b_waited = !b_done.load();
+                    b_queued = wait_for_attempts(attempts + 1);
+                    b_pending = !b_done.load();
+                    b_refreshes = g_full_refreshes - refreshes;
                 });
                 const esp_err_t ra = tiny_display_render_card(img_a);
                 bthr.join();
                 CHECK(ra == ESP_OK && rb == ESP_OK, "archive order: A %d, B %d", ra,
                       rb.load());
-                CHECK(b_waited, "archive order: B could not paint inside A's archive gap");
+                CHECK(a_owned,
+                      "archive order: A archives inside its render transaction");
+                CHECK(b_queued && b_pending && b_refreshes == 0,
+                      "archive order: B queued on render ownership, unpainted, "
+                      "while A archives (queued %d, pending %d, refreshes %d)",
+                      b_queued, b_pending, b_refreshes);
                 CHECK(photo(1) == a_bytes && photo(2) == b_bytes && photo(3).empty(),
                       "archive order: 00001=A (%zu B), 00002=B (%zu B), no 00003",
                       photo(1).size(), photo(2).size());

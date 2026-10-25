@@ -166,7 +166,9 @@ and goes back off (or green for waiting DMs) when the next card replaces it
 includes `image`, `gallery` and `universe` cards, which have no title to
 prefix: the light is their only alert sign. Paging an alert gallery, or
 tapping a row on an alert universe page, keeps it magenta; a commit that
-fails to reach the glass leaves the light as it was.
+fails to reach the glass leaves the light as it was. Only the device's own
+gallery and universe pages carry it over — any other card, including one
+whose `card_id` is `gallery` or `universe`, does not.
 
 ### accent *(colour boards, grammar v16)*
 

@@ -13,6 +13,7 @@ copy of the code.
 | test | compiles | asserts |
 |---|---|---|
 | `askq_host_test.sh` | `firmware/main/tiny_askq.cpp` | the offline ask queue: FIFO order, depth-8 eviction, and that the queue survives a reboot — the script runs the binary twice against one NVS file; the second process *is* the reboot (20 checks) |
+| `agent_host_test.sh` | `firmware/main/tiny_agent.cpp` | the roster preview a universe push paints from (`tiny_agent_roster_preview_add`) gives the same verdict and roster as the real add — normalisation, refusal, dedupe, full-roster eviction keeping `tiny` at row 0 — and leaves the live roster and NVS untouched (45 checks) |
 | `bootmark_host_test.sh` | `firmware/main/tiny_bootmark.cpp` | the boot flight recorder: `prev` reads -1 before any write, latches the crash stage, reports 9 after a clean run (6 checks) |
 | `batt_curve_host_test.sh` | `firmware/main/tiny_batt_curve.cpp` | FNK0104S divider battery: median of a burst (a lone spike moves neither it nor the IQR gate), ×2 applied after the median, LiPo resting-voltage curve (monotone, clamped), no percent outside 3.0–4.35 V or with a >150 mV spread; no signed overflow for any int input, under UBSan trap mode (39 checks) |
 | `fnk_battery_contract_host_test.sh` | `tiny_version.h`, `Kconfig.projbuild`, `AGENTS.md`, `tiny_sensors.h`, `tiny_display.cpp`, `tiny_main.cpp` | FNK help/docs and live source contracts advertise the driven GPIO 9 ADC estimate, board-specific boot transport, and 1 s shared burst; AGENTS grammar markers equal the shipped grammar macro |
