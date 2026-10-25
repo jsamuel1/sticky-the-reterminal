@@ -534,9 +534,12 @@ static void regions_unlock(void) {
     if (s_region_mux) xSemaphoreGive(s_region_mux);
 }
 
-// Publish the staged table + card_id as the live one. Called once, after the
-// refresh returns — until then the OLD card is what the human can touch.
-static void publish_regions(const char *card_id) {
+// Publish the staged table + card_id + card type as the live one. Called once,
+// after the refresh returns — until then the OLD card is what the human can
+// touch. The type is committed HERE, with the identity, so no glass commit
+// (card, image, gallery, raw blit, splash) can publish a new card_id while the
+// gesture router still classifies swipes by the previous card's type.
+static void publish_regions(const char *card_id, const char *card_type) {
     // Layout stages regions in LOGICAL coordinates; they are published in
     // PHYSICAL (panel) coordinates so the touch task — which reads raw GT911
     // panel coordinates — needs no idea that the UI is rotated, and so a tap
@@ -555,6 +558,7 @@ static void publish_regions(const char *card_id) {
     s_region_count = s_staged_count;
     memcpy(s_btn_accent, s_btn_accent_staged, sizeof s_btn_accent);
     strlcpy(s_card_id, card_id ? card_id : "", sizeof s_card_id);
+    strlcpy(s_card_type, card_type ? card_type : "", sizeof s_card_type);
     for (int i = 0; i < s_region_count; ++i)
         strlcpy(s_regions[i].card_id, s_card_id, sizeof s_regions[i].card_id);
     ++s_card_gen;
@@ -2110,14 +2114,15 @@ static esp_err_t render_image_card(cJSON *root, uint32_t render_epoch,
     // glass, so it must not leave one in the archive (or poison the same-URL
     // dedupe so a successful retry is never archived).
     display_lock();
+    // Touch mapping reads the canvas rotation; a failed commit leaves the
+    // previous (rotated) card on glass, so it must get its frame back.
+    const CanvasRotation glass_rot = c->rotation();
     blit_raw_locked(c, buf, len);
     err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
     s_staged_count = 0;                  // an image has no buttons
-    if (err == ESP_OK) {
-        strlcpy(s_card_type, "image", sizeof s_card_type);
-        publish_regions(card_id);
-    }
+    if (err == ESP_OK) publish_regions(card_id, "image");
+    else c->set_rotation(glass_rot);
     display_unlock();
     if (err == ESP_OK) photos_sd_save(ju->valuestring, buf, len);
     heap_caps_free(buf);
@@ -2345,6 +2350,7 @@ static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
         from_net = true;
     }
     display_lock();
+    const CanvasRotation glass_rot = c->rotation();   // restored on failure
     blit_raw_locked(c, buf, len);
     {   // page indicator chip, bottom-right: white ground so it reads on any
         // photo; tells the truth about position ("2/7"), per the contract.
@@ -2367,10 +2373,8 @@ static esp_err_t gallery_show_locked(int idx, uint32_t render_epoch,
     stage_region(s_pw - 120, 100, 120, s_ph - 100, "next", "g:next");
     err = (len == img_gray4_len()) ? sticky_display_refresh()
                                 : sticky_display_refresh_monochrome();
-    if (err == ESP_OK) {
-        strlcpy(s_card_type, "gallery", sizeof s_card_type);
-        publish_regions("gallery");
-    }
+    if (err == ESP_OK) publish_regions("gallery", "gallery");
+    else c->set_rotation(glass_rot);   // old card's touch frame survives
     display_unlock();
     if (err != ESP_OK) {
         if (!cache_owned) heap_caps_free(buf);
@@ -2807,9 +2811,8 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     if (err == ESP_OK) {
         pending.publish();
         displace.commit();
-        strlcpy(s_card_type, type_s, sizeof s_card_type);
         s_commit_alert = is_alert;
-        publish_regions(cid_s);
+        publish_regions(cid_s, type_s);
     } else {
         s_scroll = geo_scroll; s_content_h = geo_content_h;
         s_body_top = geo_body_top; s_body_bot = geo_body_bot;
@@ -2860,7 +2863,7 @@ extern "C" esp_err_t tiny_display_splash(const char *version, const char *state)
     // The splash has no buttons: retire the previous card's tap regions, or a
     // tap on a blank corner would still fire the last card's action.
     s_staged_count = 0;
-    if (err == ESP_OK) publish_regions("splash");
+    if (err == ESP_OK) publish_regions("splash", "splash");
     display_unlock();
     return err;
 }
@@ -2882,6 +2885,9 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
     // same law as the image card. Without this, a portrait canvas (IMU
     // auto-rotate on a pocket device) remaps/clips every draw_pixel and the
     // "frame" arrives as white glass: take 2's white-paint bug, convicted.
+    // A failed commit restores the rotation: the previous card is still on
+    // glass and the gesture router maps touches through this canvas.
+    const CanvasRotation glass_rot = c->rotation();
     c->set_rotation(CanvasRotation::Landscape);
     {
         PenScope pen(*c, lcd_palette::kMono);   // stream frames: literal gray
@@ -2902,7 +2908,11 @@ extern "C" esp_err_t tiny_display_blit_1bit(const uint8_t *buf, size_t len,
         // stream retires only after this raw frame physically committed.
         card_cache_mark_native("blit");
         displace.commit();
-        publish_regions("blit");
+        // Type commits with identity: a raw frame after a keyboard must not
+        // keep keyboard gesture policy (cancel/back-refusal/silenced flips).
+        publish_regions("blit", "blit");
+    } else {
+        c->set_rotation(glass_rot);
     }
     display_unlock();
     return err;

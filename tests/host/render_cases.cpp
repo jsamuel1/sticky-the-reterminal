@@ -198,11 +198,15 @@ extern "C" esp_err_t tiny_config_gallery_load(void *, size_t, uint8_t *, uint8_t
 extern "C" bool tiny_lock_is_locked(void) { return false; }
 static int g_unread = 0;
 extern "C" int tiny_node_unread(void) { return g_unread; }
-extern "C" esp_err_t tiny_shell_home(void) { return 0; }
-extern "C" esp_err_t tiny_shell_key(const char *) { return 0; }
-extern "C" esp_err_t tiny_shell_nav_back(void) { return 0; }
+// Shell entry points the gesture router dispatches to: recorded so a test can
+// prove WHICH routing policy a swipe took (keyboard vs ordinary card).
+static int g_shell_home_calls = 0, g_shell_back_calls = 0, g_shell_cycle_calls = 0;
+static std::string g_shell_last_key;
+extern "C" esp_err_t tiny_shell_home(void) { ++g_shell_home_calls; return 0; }
+extern "C" esp_err_t tiny_shell_key(const char *k) { g_shell_last_key = k ? k : ""; return 0; }
+extern "C" esp_err_t tiny_shell_nav_back(void) { ++g_shell_back_calls; return 0; }
 extern "C" bool tiny_shell_at_root(void) { return true; }
-extern "C" esp_err_t tiny_shell_cycle(int) { return 0; }
+extern "C" esp_err_t tiny_shell_cycle(int) { ++g_shell_cycle_calls; return 0; }
 extern "C" esp_err_t tiny_shell_universe_push(const char *) { return 0; }
 // A fixed clock so the glance cluster has its widest realistic content.
 extern "C" bool tiny_time_is_synced(void) { return true; }
@@ -983,6 +987,88 @@ int main(int argc, char **argv) {
                           view == 0 &&
                           tiny_display_scroll(40) == ESP_ERR_INVALID_STATE,
                       "blit scroll: raw frame clears stale scroll geometry");
+            }
+
+            // ---- raw blit commits card TYPE with identity -------------------
+            // Gesture policy follows what is on glass. After a keyboard, a
+            // committed raw frame must route swipes as an ordinary card
+            // (home / back / page flip); a FAILED raw frame leaves the
+            // keyboard on glass, so keyboard policy must survive it.
+            {
+                struct Routed { std::string key; int home, back, cycle; esp_err_t r; };
+                // Swipe in the canvas's CURRENT logical frame, delivered in
+                // panel coordinates exactly like the touch task does.
+                auto swipe = [&](double fx0, double fy0, double fx1, double fy1) {
+                    Canvas *cv = sticky_display_canvas();
+                    const int W = cv->width(), H = cv->height();
+                    int px0, py0, px1, py1;
+                    cv->to_physical((int)(fx0 * W), (int)(fy0 * H), px0, py0);
+                    cv->to_physical((int)(fx1 * W), (int)(fy1 * H), px1, py1);
+                    g_shell_last_key.clear();
+                    const int h0 = g_shell_home_calls, b0 = g_shell_back_calls,
+                              c0 = g_shell_cycle_calls;
+                    const esp_err_t r = tiny_display_scroll_gesture(px0, py0, px1, py1);
+                    return Routed{g_shell_last_key, g_shell_home_calls - h0,
+                                  g_shell_back_calls - b0,
+                                  g_shell_cycle_calls - c0, r};
+                };
+                // bottom band up, left band right, mid-content leftward flip
+                auto bottom_up = [&] { return swipe(0.5, 0.98, 0.5, 0.40); };
+                auto left_back = [&] { return swipe(0.02, 0.5, 0.70, 0.5); };
+                auto page_flip = [&] { return swipe(0.75, 0.5, 0.25, 0.5); };
+                const char *kb_card =
+                    R"J({"type":"keyboard","card_id":"kb-blit","title":"pw","value":"abc"})J";
+                auto expect_keyboard_policy = [&](const char *tag) {
+                    Routed u = bottom_up();
+                    CHECK(u.key == "k:cancel" && u.home == 0,
+                          "%s: bottom-up is keyboard cancel (key=%s home=%d)", tag,
+                          u.key.c_str(), u.home);
+                    Routed b = left_back();
+                    CHECK(b.r == ESP_ERR_NOT_ALLOWED && b.back == 0,
+                          "%s: left-band back refused over draft (r=%d back=%d)",
+                          tag, b.r, b.back);
+                    Routed p = page_flip();
+                    CHECK(p.r == ESP_ERR_NOT_SUPPORTED && p.cycle == 0,
+                          "%s: page flip silenced over draft (r=%d cycle=%d)",
+                          tag, p.r, p.cycle);
+                };
+                CHECK(tiny_display_render_card(kb_card) == ESP_OK,
+                      "kb->blit: keyboard commits");
+                // Rotated glass: a failed raw frame (pinned landscape while
+                // drawing) must hand the keyboard's touch frame back.
+                CHECK(tiny_display_set_rotation(90) == ESP_OK &&
+                          tiny_display_rotation() == 90 &&
+                          !strcmp(tiny_display_current_card_id(), "kb-blit"),
+                      "kb->blit: keyboard re-renders at 90 deg");
+                expect_keyboard_policy("kb->blit baseline");
+
+                g_fail_next_full = true;
+                CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_FAIL &&
+                          !strcmp(tiny_display_current_card_id(), "kb-blit"),
+                      "kb->blit: failed raw frame keeps keyboard on glass");
+                // Same logical frame as the keyboard: the failed blit must
+                // hand the canvas rotation back (no test-side fix-up).
+                CHECK(static_cast<int>(sticky_display_canvas()->rotation()) * 90 ==
+                          tiny_display_rotation(),
+                      "kb->blit: failed raw frame restores the touch frame");
+                expect_keyboard_policy("kb->failed blit");
+
+                CHECK(tiny_display_blit_1bit(raw_blit.data(), raw_blit.size(), false) == ESP_OK &&
+                          !strcmp(tiny_display_current_card_id(), "blit"),
+                      "kb->blit: raw frame commits");
+                Routed u = bottom_up();
+                CHECK(u.key.empty() && u.home == 1 && u.r == ESP_OK,
+                      "kb->blit: bottom-up goes home, not keyboard cancel (key=%s home=%d)",
+                      u.key.c_str(), u.home);
+                Routed b = left_back();
+                CHECK(b.r == ESP_OK && b.back == 1,
+                      "kb->blit: left-band back navigates (r=%d back=%d)", b.r, b.back);
+                Routed p = page_flip();
+                CHECK(p.r == ESP_OK && p.cycle == 1,
+                      "kb->blit: horizontal swipe flips the page (r=%d cycle=%d)",
+                      p.r, p.cycle);
+                CHECK(tiny_display_set_rotation(0) == ESP_OK,
+                      "kb->blit: rotation back to 0 for later cases");
             }
 
             // ---- structured stream finale over HTTPS ------------------------
