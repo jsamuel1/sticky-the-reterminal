@@ -72,71 +72,9 @@ are folded into `## [Unreleased]` when a version is cut
   reply change, so no grammar bump; the reTerminal and AMOLED-1.8 images
   still carry no LED code. `led_host_test.sh` pins precedence, expiry back
   to the attention colour and pairwise-distinct colours at 8/255;
-  `render_host_test.sh` asserts one alert-layer update per committed card,
-  and for `image`, `gallery` and `universe` cards (which leave the text
-  pipeline before it reads `priority`, and so used to clear the light):
-  alert on, kept across gallery page flips / universe repaints / rerender,
-  cleared by the next normal card, unchanged by a failed fetch or refresh.
-  The status light is decided at each commit, under the display lock: a
-  universe push writes its priority into the roster composite
-  (`tiny/tiny_universe_card.h`, shared with the shell's row-tap repaint and
-  the host test), and a gallery page flip or universe repaint keeps the
-  alert only while that same page is on glass. "Same page" is typed by the
-  render path (the gallery store's paint, a universe push, the shell's
-  `tiny_display_render_universe_page`), never read from the `card_id`, so a
-  sender's alert card named `gallery` or `universe` lends nothing to a later
-  flip or row tap; the UP/DOWN page-flip rule asks the same typed page
-  (`tiny_display_glass_is_gallery`). A universe push is now one request with
-  one render claim and one parse: tiny_display renders the composite from
-  the tree it already parsed, under that claim, from a preview of the merged
-  roster. The merged roster is then saved as ONE write, after the panel took
-  the page and before anything of the commit is published; if that write is
-  refused (NVS open/set/commit failure, or another task changed the roster
-  after the page was built from it) the push fails and the page is rolled
-  back, so a row on glass is always a row a reboot keeps. A push whose
-  `tinys` is malformed is refused whole, before it claims anything: `tinys`
-  that is not an array, any non-string element, any slug tiny_agent refuses
-  (empty, over 64 chars, space/quote/backslash/control) or more slugs than
-  the roster can hold returns that error with no slug merged, nothing
-  written, painted, cached or lit, and no newer request superseded (it used
-  to skip bad elements and succeed with the rest); absent `tinys` still just
-  opens the page. An
-  overtaken push (a stream finale whose claim a newer card beat), a failed
-  panel commit or any allocation failure on the way paints nothing, merges
-  no slug and leaves the light alone; the composite builder refuses to
-  return a half-built page. tiny_agent now stores its whole state (active
-  slug + roster) as one NVS blob and adopts a change in RAM only after NVS
-  accepted it, for `agent <slug>`, `agent add/rm`, the universe row tap and
-  `u:clear` alike (a refused `u:clear` no longer repaints an ACTIVE row it
-  did not save); the old per-key store is read once and migrated on the
-  first save. A failed NVS write is treated as outcome-unknown, because IDF
-  writes a blob's new version before erasing the old: `set_blob` returning
-  `ESP_ERR_NVS_REMOVE_FAILED` (new value written, old removal finished at
-  init) is a successful save; any other failure puts the old state back;
-  if that restore fails too, flash is read back and whichever whole state
-  it holds is adopted and reported (new = `ESP_OK`, old = the error); if
-  even that is unreadable the result is `TINY_AGENT_UNSETTLED` (RAM old,
-  flash old or new, never a mix) and the next mutation rewrites flash even
-  if it changes nothing. `agent_host_test.sh` proves the roster preview
-  equals the real add and writes nothing, runs every mutation against
-  injected NVS open/set/commit failures across process restarts (fresh,
-  reboot, legacy store, unreadable blob), and runs 19 outcome-unknown
-  scenarios (failed writes that landed, REMOVE_FAILED, failed restores,
-  failed read-backs, first saves) each through a restart that must load
-  what the answer promised.
+  `render_host_test.sh` asserts one alert-layer update per committed card.
   Verified hardware facts (WS2812B LED2, GPIO42, +5 V rail) are in
   `docs/hardware.md`.
-- **firmware** — a render that a newer card overtook now returns
-  `TINY_DISPLAY_SUPERSEDED` instead of `ESP_ERR_INVALID_STATE`. That code
-  also meant "empty gallery", so a page flip overtaken mid-fetch used to
-  paint the "No photos here yet" card over the newer card; the touch, UP/DOWN
-  and `page gallery` paths now leave a superseded flip alone. `render_ui`
-  answers `superseded: newer card_id=<id> on glass` and `page` names
-  `SUPERSEDED`. Photo-archive order still follows paint order (archive runs
-  inside the painting request's render transaction); the render host test
-  now pins it with two images: at the pause after A's paint, A still holds
-  render ownership and B has reached its render-lock attempt unpainted,
-  then the files and the adjacent-resend dedupe are checked.
 
 - **firmware 0.31.1, grammar v24** — colour boards: more internal RAM for
   the voice upload's TLS session (`tiny_upload` refuses below 60 KB free;
