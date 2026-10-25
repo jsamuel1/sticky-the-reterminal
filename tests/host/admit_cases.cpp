@@ -107,6 +107,59 @@ static void race() {
     CHECK("race: gate idle at end", tiny_admit::word().load() == 0);
 }
 
+// Queue consumer shared by the queue tests. It exits only once EVERY producer
+// has left its loop AND the mailbox is empty. `stop` alone is not a fence: a
+// producer can read stop=false, pause before work_enter(), then reserve and
+// publish after the consumer saw stop=true with an empty mailbox. That item's
+// reservation would be stranded (the firmware consumer never exits, so this
+// is a teardown fence for the test, not a product property).
+static void run_consumer(std::atomic<int> &mailbox,
+                         const std::atomic<int> &producers_done,
+                         int producers, std::atomic<int> &inside,
+                         std::atomic<int> &violations,
+                         std::atomic<int> &consumed) {
+    while (producers_done.load() < producers || mailbox.load()) {
+        int full = 1;
+        if (!mailbox.compare_exchange_strong(full, 0)) continue;
+        tiny_admit::Work w(tiny_admit::AdoptReserved::Yes);
+        inside.fetch_add(1);
+        if (tiny_admit::sleep_claimed()) violations.fetch_add(1);
+        consumed.fetch_add(1);
+        inside.fetch_sub(1);
+    }
+}
+
+// Deterministic teardown case: the only producer reserves and publishes
+// AFTER stop is set and the consumer has had ample time to observe
+// stop=true + empty mailbox. A consumer that exits on `stop && !mailbox`
+// leaves the reservation stranded; the producer-completion fence drains it.
+static void queue_late_producer() {
+    reset();
+    std::atomic<int> mailbox{0}, inside{0}, violations{0}, consumed{0};
+    std::atomic<int> producers_done{0};
+    std::atomic<bool> stop{false};
+    std::thread consumer([&] {
+        run_consumer(mailbox, producers_done, 1, inside, violations, consumed);
+    });
+    std::thread producer([&] {
+        while (!stop.load()) std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (tiny_admit::work_enter()) {
+            int empty = 0;
+            if (!mailbox.compare_exchange_strong(empty, 1))
+                tiny_admit::work_exit();
+        }
+        producers_done.fetch_add(1);
+    });
+    stop.store(true);
+    producer.join();
+    consumer.join();
+    CHECK("queue late producer: item published after stop is consumed",
+          consumed.load() == 1 && mailbox.load() == 0);
+    CHECK("queue late producer: gate idle at end",
+          tiny_admit::word().load() == 0);
+}
+
 // Queue handoff race: producers reserve, then publish into a depth-1
 // mailbox (the firmware queues are depth 1..4, no wait); on a full mailbox
 // they cancel. A consumer adopts the reservation. Sleepers claim and must
@@ -119,8 +172,10 @@ static void queue_race() {
     std::atomic<int> inside{0};
     std::atomic<bool> stop{false};
     std::atomic<int> violations{0}, claims{0}, consumed{0}, cancelled{0};
+    std::atomic<int> producers_done{0};
+    constexpr int kProducers = 3;
     std::vector<std::thread> ts;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < kProducers; ++i)
         ts.emplace_back([&] {
             while (!stop.load()) {
                 if (!tiny_admit::work_enter()) continue;
@@ -130,17 +185,11 @@ static void queue_race() {
                     cancelled.fetch_add(1);
                 }
             }
+            producers_done.fetch_add(1);
         });
     ts.emplace_back([&] {
-        while (!stop.load() || mailbox.load()) {
-            int full = 1;
-            if (!mailbox.compare_exchange_strong(full, 0)) continue;
-            tiny_admit::Work w(tiny_admit::AdoptReserved::Yes);
-            inside.fetch_add(1);
-            if (tiny_admit::sleep_claimed()) violations.fetch_add(1);
-            consumed.fetch_add(1);
-            inside.fetch_sub(1);
-        }
+        run_consumer(mailbox, producers_done, kProducers, inside, violations,
+                     consumed);
     });
     for (int i = 0; i < 2; ++i)
         ts.emplace_back([&] {
@@ -170,6 +219,7 @@ static void queue_race() {
 int main() {
     sequential();
     race();
+    queue_late_producer();
     queue_race();
     if (fails) { printf("%d FAILED\n", fails); return 1; }
     return 0;
