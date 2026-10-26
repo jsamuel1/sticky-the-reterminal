@@ -1,5 +1,6 @@
 import { Receipt } from './Receipt'
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../lib'
 
 // ── DM rail (gate 7): the same tiny.technology inbox the glass shows.
@@ -14,6 +15,7 @@ export function MessagesCard({ mode }: { mode: 'mock' | 'live' }) {
   const [asTiny, setAsTiny] = useState(false)
   const [msg, setMsg] = useState('')
   const [busy, setBusy] = useState(false)
+  const [lightbox, setLightbox] = useState<Attachment | null>(null)
 
   useEffect(() => {
     if (mode !== 'live') return
@@ -114,7 +116,7 @@ export function MessagesCard({ mode }: { mode: 'mock' | 'live' }) {
                       <span className="who">@{t.login || t.userId}{showName(t) && <span className="dim"> · {t.name}</span>}</span>
                       <span className="when dim">{t.lastAt ? shortAgo(t.lastAt) : ''}</span>
                     </span>
-                    <span className="preview">{t.unread > 0 && <b className="dot" aria-label={`${t.unread} unread`} />}{String(t.lastBody || (t.lastAttachments?.length ? '[attachment]' : '')).slice(0, 96)}</span>
+                    <span className="preview">{t.unread > 0 && <b className="dot" aria-label={`${t.unread} unread`} />}{String(t.lastBody || (t.lastAttachments?.length ? (t.lastAttachments.some(isImage) ? '[photo]' : '[attachment]') : '')).slice(0, 96)}</span>
                   </span>
                 </button>
               </li>
@@ -131,7 +133,8 @@ export function MessagesCard({ mode }: { mode: 'mock' | 'live' }) {
               return (
                 <div key={m.id} className={'dm ' + (m.direction === 'in' ? 'in' : 'out') + (newSpeaker ? ' first' : '')}>
                   {newSpeaker && <span className="dm-who dim tiny">{m.direction === 'in' ? `@${open.peer.login}` : m.viaTiny ? 'tiny (as agent)' : 'you'}</span>}
-                  <span className="dm-body">{m.body}</span>
+                  <Attachments items={m.attachments} onOpen={setLightbox} />
+                  {m.body && <span className="dm-body">{m.body}</span>}
                   <time className="dm-when dim" dateTime={m.created ? new Date(m.created * 1000).toISOString() : undefined}>{m.created ? clock(m.created) : ''}</time>
                 </div>
               )
@@ -147,7 +150,62 @@ export function MessagesCard({ mode }: { mode: 'mock' | 'live' }) {
         </>
       )}
       <Receipt msg={msg} />
+      {lightbox && <Lightbox a={lightbox} onClose={() => setLightbox(null)} />}
     </section>
+  )
+}
+
+// ── attachments: the same rule the firmware follows ─────────────────────
+// Only the tiny.technology media store is rendered (tiny_relay.is_device_media_url
+// and the firmware's tiny_ota_util::media_url_ok agree on the shape). Anything
+// else in an attachment is a stranger's URL and shows as a plain label.
+type Attachment = { kind?: string; url?: string; contentType?: string; width?: number; height?: number }
+const MEDIA = /^https:\/\/plugin\.tiny\.technology\/media\/[A-Za-z0-9._-]+$/
+const isImage = (a: Attachment) => a.kind === 'image' || String(a.contentType || '').startsWith('image/')
+const isVideo = (a: Attachment) => a.kind === 'video' || String(a.contentType || '').startsWith('video/')
+
+function Attachments({ items, onOpen }: { items?: Attachment[]; onOpen: (a: Attachment) => void }) {
+  // A media key the platform lost answers 404 JSON; the browser then shows a
+  // broken image. Say what it was instead, like the glass does.
+  const [failed, setFailed] = useState<Set<string>>(new Set())
+  const list = (items || []).filter((a) => a && typeof a.url === 'string')
+  if (!list.length) return null
+  return (
+    <span className="dm-atts">
+      {list.map((a, i) => {
+        const safe = MEDIA.test(a.url!)
+        if (safe && isImage(a) && failed.has(a.url!))
+          return <span key={i} className="dm-file dim tiny">[photo unavailable]</span>
+        if (safe && isImage(a))
+          return (
+            <button key={i} type="button" className="dm-img" onClick={() => onOpen(a)} aria-label="open photo full screen">
+              <img src={a.url} alt="photo attachment" loading="lazy" width={a.width} height={a.height}
+                onError={() => setFailed((s) => new Set(s).add(a.url!))} />
+            </button>
+          )
+        if (safe && isVideo(a))
+          return <video key={i} className="dm-video" src={a.url} controls preload="metadata" />
+        return <span key={i} className="dm-file dim tiny">[{a.kind || 'attachment'}]</span>
+      })}
+    </span>
+  )
+}
+
+function Lightbox({ a, onClose }: { a: Attachment; onClose: () => void }) {
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('keydown', k)
+    return () => window.removeEventListener('keydown', k)
+  }, [onClose])
+  // Portaled to <body>: .main animates a transform, and a transformed
+  // ancestor becomes the containing block of position:fixed — inside it the
+  // "full screen" photo would stop at the device rail and under the header.
+  return createPortal(
+    <div className="sheet-backdrop lightbox" role="dialog" aria-modal="true" aria-label="photo" onClick={onClose}>
+      <img src={a.url} alt="photo attachment, full size" />
+      <button type="button" className="ghost lightbox-close" onClick={onClose} aria-label="close photo" autoFocus>✕</button>
+    </div>,
+    document.body,
   )
 }
 

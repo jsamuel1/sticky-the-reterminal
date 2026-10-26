@@ -31,6 +31,8 @@
 #include "canvas.h"
 #include "lcd_palette.h"
 #include "tiny/tiny_display.h"
+#include "tiny/tiny_photo.h"
+#include "tiny/tiny_photo_util.h"
 #include "tiny/tiny_rotation.h"
 
 // ---- the panel: a host Canvas the renderer draws into -----------------------
@@ -224,6 +226,37 @@ static int g_led_alert_calls = 0;
 static bool g_led_alert = false;
 extern "C" void tiny_led_alert(bool on) { ++g_led_alert_calls; g_led_alert = on; }
 
+// Message photos (tiny/tiny_photo.h): the device decodes JPEG with the ROM
+// TJpgDec; here a URL names a synthetic photo instead. ".../tall" is the
+// first real thread's 514x695 portrait, ".../wide" its 1531x329 banner,
+// ".../gone" the platform's 404. The luma is a diagonal gradient with a dark
+// disc, so dither and fit both leave a recognisable picture in the PNGs.
+static int g_photo_loads = 0;
+static std::vector<std::string> g_photo_urls;
+extern "C" esp_err_t tiny_photo_load(const char *url, int box_w, int box_h,
+                                     bool allow_up, uint8_t **out, int *ow, int *oh) {
+    ++g_photo_loads;
+    g_photo_urls.push_back(url ? url : "");
+    *out = nullptr;
+    if (!url || strncmp(url, "https://plugin.tiny.technology/media/", 37) != 0)
+        return ESP_ERR_INVALID_ARG;
+    int sw, sh;
+    if (strstr(url, "tall")) { sw = 514; sh = 695; }
+    else if (strstr(url, "wide")) { sw = 1531; sh = 329; }
+    else return ESP_ERR_NOT_FOUND;
+    tiny_photo_util::fit(sw, sh, box_w, box_h, allow_up, ow, oh);
+    const int w = *ow, h = *oh;
+    uint8_t *p = (uint8_t *)malloc((size_t)w * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const int dx = x - w / 2, dy = y - h / 2, r = std::min(w, h) / 3;
+            const bool disc = dx * dx + dy * dy < r * r;
+            p[(size_t)y * w + x] = disc ? 30 : (uint8_t)(255 * (x + y) / (w + h));
+        }
+    *out = p;
+    return ESP_OK;
+}
+
 // ---- PNG (gray8, stored deflate via zlib) -----------------------------------
 static void put32(std::vector<uint8_t> &v, uint32_t x) {
     for (int i = 3; i >= 0; --i) v.push_back((uint8_t)(x >> (8 * i)));
@@ -410,6 +443,193 @@ int main(int argc, char **argv) {
                     free(idx);
                 }
             }
+        }
+
+        // ---- message photos (v27) ------------------------------------------
+        // The thread card tiny_node builds: list items in the object form with
+        // "images". Thumbnails draw under the text and tap into the viewer;
+        // the viewer fills the glass and taps back to the thread.
+        {
+            const std::string key = std::string(sz.tag) + "/thread_photos";
+            // Per-size media keys: the device caches by URL, and each size
+            // here must prove its own fetch count.
+            std::string thread_s = R"J({"type":"list","card_id":"dm-th-cagataycali","title":"./c²","items":["21:05Z them: Love it!",{"text":"21:20Z me: Hey! Josh wanted to share this with you","images":["https://plugin.tiny.technology/media/tall-{SZ}.jpg"]},{"text":"21:31Z me: need emoji's :)","images":["https://plugin.tiny.technology/media/wide-{SZ}.jpg","https://plugin.tiny.technology/media/gone-{SZ}.jpg"]}],"footer":"@cagataycali - 9 in thread, newest 6 loaded - swipe","buttons":[{"id":"m:c:cagataycali","label":"Reply"},{"id":"m:inbox","label":"Inbox"},{"id":"home","label":"Home"}]})J";
+            for (size_t at; (at = thread_s.find("{SZ}")) != std::string::npos;)
+                thread_s.replace(at, 4, sz.tag);
+            const char *thread = thread_s.c_str();
+            g_photo_loads = 0;
+            g_photo_urls.clear();
+            CHECK(tiny_display_render_card(thread) == ESP_OK, "%s: render", key.c_str());
+            CHECK(g_photo_loads == 3, "%s: %d photo loads, want 3", key.c_str(), g_photo_loads);
+            CHECK(edge_ink(4) == 0, "%s: ink in the edge band", key.c_str());
+            // Photos that decoded and are on screen are tap targets; the 404
+            // is a labelled box, not a target.
+            auto photo_regions = [&](std::vector<tiny_button_region_t> *out) {
+                tiny_button_region_t regs[48];
+                const int n = tiny_display_button_regions(regs, 48);
+                int k = 0;
+                for (int i = 0; i < n; ++i) {
+                    const auto &q = regs[i];
+                    CHECK(q.x >= 0 && q.y >= 0 && q.x + q.w <= sz.w && q.y + q.h <= sz.h,
+                          "%s: region %s leaves the panel", key.c_str(), q.id);
+                    if (!strncmp(q.id, "p:", 2)) { ++k; if (out) out->push_back(q); }
+                }
+                return k;
+            };
+            // Scroll the whole thread: every decoded photo becomes tappable
+            // somewhere, and re-layouts never fetch.
+            std::set<std::string> seen_ids;
+            for (int step = 0; step < 12; ++step) {
+                std::vector<tiny_button_region_t> pr;
+                photo_regions(&pr);
+                for (auto &q : pr) {
+                    seen_ids.insert(q.id);
+                    int ink = 0;
+                    for (int y = q.y; y < q.y + q.h; ++y)
+                        for (int x = q.x; x < q.x + q.w; ++x) ink += px(x, y) != 3;
+                    CHECK(ink > q.w * q.h / 10, "%s: photo region %s over blank glass",
+                          key.c_str(), q.id);
+                }
+                if (tiny_display_scroll_page(+1) != ESP_OK) break;
+            }
+            CHECK(seen_ids.count("p:0") && seen_ids.count("p:1") && !seen_ids.count("p:2"),
+                  "%s: photos 0,1 tappable, the 404 is not (%zu ids)", key.c_str(),
+                  seen_ids.size());
+            CHECK(g_photo_loads == 3, "%s: scrolling fetched (%d loads)", key.c_str(),
+                  g_photo_loads);
+            // Reopen (same card, fresh render): everything cached, the 404
+            // remembered as permanent.
+            CHECK(tiny_display_render_card(thread) == ESP_OK && g_photo_loads == 3,
+                  "%s: reopen draws from cache (%d loads)", key.c_str(), g_photo_loads);
+            {
+                uint32_t hsh = fnv1a(g_buf.data(), g_buf.size());
+                if (!g_acc.empty()) hsh ^= fnv1a(g_acc.data(), g_acc.size()) * 31u;
+                seen[key] = hsh;
+            }
+            if (out_dir) {
+                uint8_t *idx = nullptr; size_t len = 0; bool acc = false;
+                if (tiny_display_snapshot_index8(&idx, &len, &acc) == 0) {
+                    const auto theme = sz.dark ? lcd_palette::Theme::Dark : lcd_palette::Theme::Light;
+                    std::vector<uint8_t> rgb(len * 3);
+                    for (size_t i = 0; i < len; ++i) {
+                        const uint8_t a = idx[i] >> 2, l = idx[i] & 3;
+                        lcd_palette::Rgb c = sz.color ? lcd_palette::color(theme, a, l)
+                                                      : lcd_palette::gray((uint8_t)(l * 0x55));
+                        rgb[3 * i] = c.r; rgb[3 * i + 1] = c.g; rgb[3 * i + 2] = c.b;
+                    }
+                    char path[512];
+                    snprintf(path, sizeof path, "%s/%s-thread_photos.png", out_dir, sz.tag);
+                    write_png(path, sz.w, sz.h, rgb.data());
+                    free(idx);
+                }
+            }
+            // On the e-ink the card commit is monochrome: thumbnails must be
+            // two-level already, or the panel would posterise them itself.
+            if (!sz.color) {
+                std::vector<tiny_button_region_t> thumbs;
+                photo_regions(&thumbs);
+                int mid = 0, all = 0;
+                for (auto &q : thumbs)
+                    for (int y = q.y; y < q.y + q.h; ++y)
+                        for (int x = q.x; x < q.x + q.w; ++x) {
+                            ++all;
+                            mid += (px(x, y) == 1 || px(x, y) == 2);
+                        }
+                CHECK(all > 0 && mid == 0, "%s: %d of %d thumbnail px mid-gray on a mono commit",
+                      key.c_str(), mid, all);
+            }
+
+            // ---- viewer ----
+            std::vector<tiny_button_region_t> pr;
+            photo_regions(&pr);
+            CHECK(!pr.empty(), "%s: a photo is tappable after reopen", key.c_str());
+            int scroll_before = -1, ch = 0, vh = 0;
+            tiny_display_scroll_state(&scroll_before, &ch, &vh);
+            const int open_idx = pr.empty() ? 0 : atoi(pr[0].id + 2);
+            const int gray_before = g_gray_refreshes;
+            CHECK(tiny_display_photo_open(open_idx) == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "photo"),
+                  "%s: photo %d opens the viewer", key.c_str(), open_idx);
+            CHECK(g_gray_refreshes == gray_before + 1,
+                  "%s: viewer commits with the 4-gray refresh", key.c_str());
+            CHECK(g_photo_urls.back().find(open_idx == 0 ? "tall" : "wide") != std::string::npos,
+                  "%s: viewer loaded photo %d's own url (%s)", key.c_str(), open_idx,
+                  g_photo_urls.back().c_str());
+            {
+                tiny_button_region_t regs[48];
+                const int n = tiny_display_button_regions(regs, 48);
+                CHECK(n == 1 && !strcmp(regs[0].id, "p:back") && regs[0].w == sz.w &&
+                          regs[0].h == sz.h,
+                      "%s: viewer is one full-glass p:back region", key.c_str());
+                // The photo fills one axis of the glass.
+                int ink_rows = 0, ink_cols = 0;
+                for (int y = 0; y < sz.h; ++y) {
+                    int lit = 0;
+                    for (int x = 0; x < sz.w; ++x) lit += px(x, y) != 0;
+                    ink_rows += lit > 0;
+                }
+                for (int x = 0; x < sz.w; ++x) {
+                    int lit = 0;
+                    for (int y = 0; y < sz.h; ++y) lit += px(x, y) != 0;
+                    ink_cols += lit > 0;
+                }
+                CHECK(ink_rows >= sz.h - 4 || ink_cols >= sz.w - 4,
+                      "%s: viewer photo fills an axis (%d rows, %d cols lit)", key.c_str(),
+                      ink_rows, ink_cols);
+                uint32_t hsh = fnv1a(g_buf.data(), g_buf.size());
+                if (!g_acc.empty()) hsh ^= fnv1a(g_acc.data(), g_acc.size()) * 31u;
+                seen[std::string(sz.tag) + "/photo_viewer"] = hsh;
+                if (out_dir) {
+                    uint8_t *idx = nullptr; size_t len = 0; bool acc = false;
+                    if (tiny_display_snapshot_index8(&idx, &len, &acc) == 0) {
+                        const auto theme = sz.dark ? lcd_palette::Theme::Dark : lcd_palette::Theme::Light;
+                        std::vector<uint8_t> rgb(len * 3);
+                        for (size_t i = 0; i < len; ++i) {
+                            const uint8_t a = idx[i] >> 2, l = idx[i] & 3;
+                            lcd_palette::Rgb c = sz.color ? lcd_palette::color(theme, a, l)
+                                                          : lcd_palette::gray((uint8_t)(l * 0x55));
+                            rgb[3 * i] = c.r; rgb[3 * i + 1] = c.g; rgb[3 * i + 2] = c.b;
+                        }
+                        char path[512];
+                        snprintf(path, sizeof path, "%s/%s-photo_viewer.png", out_dir, sz.tag);
+                        write_png(path, sz.w, sz.h, rgb.data());
+                        free(idx);
+                    }
+                }
+            }
+            // A rotation re-lays the viewer out from the kept decode.
+            const int loads_open = g_photo_loads;
+            const int rot0 = tiny_display_rotation();
+            CHECK(tiny_display_set_rotation((rot0 + 90) % 360) == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "photo") &&
+                      g_photo_loads == loads_open,
+                  "%s: viewer rotates without a fetch", key.c_str());
+            CHECK(tiny_display_set_rotation(rot0) == ESP_OK, "%s: rotate back", key.c_str());
+            // Back: the same thread, at the same scroll offset, photos still
+            // tappable — and nothing refetched.
+            CHECK(tiny_display_photo_back() == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "dm-th-cagataycali"),
+                  "%s: p:back returns to the thread", key.c_str());
+            int scroll_after = -2;
+            tiny_display_scroll_state(&scroll_after, &ch, &vh);
+            CHECK(scroll_after == scroll_before && photo_regions(nullptr) > 0 &&
+                      g_photo_loads == loads_open,
+                  "%s: back keeps scroll %d (was %d), regions, no fetch", key.c_str(),
+                  scroll_after, scroll_before);
+            // A stale index is refused, never resolved to a different photo.
+            CHECK(tiny_display_photo_open(7) == ESP_ERR_INVALID_ARG,
+                  "%s: photo index past the card refused", key.c_str());
+            // No return target (viewer opened by render_ui): back = home.
+            const int homes = g_shell_home_calls;
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"photo","url":"https://plugin.tiny.technology/media/tall-x.jpg"})J") == ESP_OK &&
+                      !strcmp(tiny_display_current_card_id(), "photo") &&
+                      tiny_display_photo_back() == ESP_OK && g_shell_home_calls == homes + 1,
+                  "%s: render_ui photo, back goes home", key.c_str());
+            CHECK(tiny_display_render_card(
+                      R"J({"type":"photo","url":"https://evil.example/x.jpg"})J") ==
+                      ESP_ERR_INVALID_ARG,
+                  "%s: photo off the media store refused", key.c_str());
         }
 
         if (!strcmp(sz.tag, "fnk0104s")) {

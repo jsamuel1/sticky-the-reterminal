@@ -17,6 +17,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "driver/gpio.h"
@@ -107,7 +108,7 @@ uint32_t s_gen_at_down = 0;
 enum class Act : uint8_t { kNone, kVoiceAsk, kStatusCard, kSensorsCard,
                            kHome, kSettings, kBack, kWifi, kKey, kMenu, kGallery, kSilent,
                            kRescanWifi, kBle, kScroll, kMessages, kTypeAsk, kConfigQr,
-                           kUniverse, kOnboard };
+                           kUniverse, kOnboard, kPhoto };
 // kScroll carries the swipe's endpoints in x0..y1 (panel coords); the display
 // layer decides whether that vector means scroll under the current rotation.
 struct ActMsg { Act act; int index; int x0, y0, x1, y1;
@@ -201,6 +202,9 @@ Act action_for(const char *id, const char *label) {
     // "g:open" / "g:prev" / "g:next" — the gallery. Direction travels in the
     // id, same pattern as the messages app.
     if (id && id[0] == 'g' && id[1] == ':') return Act::kGallery;
+    // "p:<n>" / "p:back" — message photos (grammar v27): a thumbnail opens
+    // photo n of the card on the glass, a tap on the viewer goes back.
+    if (id && id[0] == 'p' && id[1] == ':') return Act::kPhoto;
     // "u:open" / "u:clear" / "u:i:<n>" — the universe (grammar v11). The
     // switch target travels in the id as a roster INDEX, same pattern as
     // the messages/gallery apps (48-byte id cap; a 64-char slug would clip).
@@ -332,6 +336,15 @@ void act_task(void *) {
                 // Skips the "m:" prefix; blocks on HTTPS + a refresh, which is
                 // exactly why this runs here and not on the touch task.
                 tiny_node_messages_open(m.id + 2);
+                break;
+            case Act::kPhoto:
+                // Full-size fetch + decode + gray refresh: this task, like
+                // kMessages. A photo index the glass no longer has is a
+                // refusal (double blip), never a different photo.
+                s_route_result = !strcmp(m.id, "p:back")
+                                     ? tiny_display_photo_back()
+                                     : tiny_display_photo_open(atoi(m.id + 2));
+                if (s_route_result != ESP_OK) sticky_buzzer_beep_double();
                 break;
             case Act::kUniverse:
                 // "u:*" ids or the "universe" token (no id ⇒ open). NVS write

@@ -23,6 +23,14 @@ esp_err_t tiny_display_fetch_raw(const char *url, uint8_t **out, size_t *out_len
 // ESP_ERR_INVALID_STATE when no set has been sent yet.
 esp_err_t tiny_display_gallery_nav(int dir);
 int tiny_display_gallery_count(void);
+// Message photos (grammar v27). A `list` item {"text","images":[url,…]}
+// draws thumbnails whose tap ids are "p:<n>"; open(n) shows photo n of the
+// card on the glass full screen (card type "photo"), back() returns to the
+// card it was opened from (home when there is none). Both block on HTTPS +
+// a refresh: call from the touch action worker. open: INVALID_ARG when the
+// card on the glass has no photo n.
+esp_err_t tiny_display_photo_open(int index);
+esp_err_t tiny_display_photo_back(void);
 // Screenshot support: copy of the LAST RENDERED framebuffer, one byte per
 // pixel, rows panel-native (800x480 e-ink, 320x480 FNK0104S). Each byte is a
 // lcd_palette index: (accent << 2) | gray level 0..3. The e-ink canvas has no

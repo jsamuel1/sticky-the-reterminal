@@ -71,12 +71,15 @@ export const CARD_PRESETS: Record<string, any> = {
 // v11 (fw 0.27.0-u2, re-verified 2026-09-07 against firmware/main/tiny/*.cpp): card
 // types text list kv composite qr menu keyboard chart chat image gallery
 // agent_home (+ nested buttons); shell-owned button-id prefixes k: w: m: u:.
+// v27: `photo` card ({url}) and list items {text, images:[url]} — media-store
+// JPEG URLs only (https://plugin.tiny.technology/media/<key>); p: tap ids.
 // fwGrammar = what the device last REPORTED; on drift, every lint says so first.
-export const LINT_GRAMMAR = 11
+export const LINT_GRAMMAR = 27
 export let fwGrammar: number | null = null
 export function setFwGrammar(v: number | null) { fwGrammar = v }
-export const CARD_TYPES = ['text', 'list', 'kv', 'composite', 'qr', 'menu', 'keyboard', 'chart', 'chat', 'image', 'gallery', 'agent_home']
-export const CARD_KEYS = new Set(['type', 'card_id', 'title', 'body', 'items', 'rows', 'parts', 'buttons', 'footer', 'text', 'caption', 'value', 'shift', 'priority', 'data', 'labels', 'style', 'unit', 'y_min', 'y_max'])
+export const CARD_TYPES = ['text', 'list', 'kv', 'composite', 'qr', 'menu', 'keyboard', 'chart', 'chat', 'image', 'gallery', 'photo', 'agent_home']
+export const CARD_KEYS = new Set(['type', 'card_id', 'title', 'body', 'items', 'rows', 'parts', 'buttons', 'footer', 'text', 'caption', 'value', 'shift', 'priority', 'data', 'labels', 'style', 'unit', 'y_min', 'y_max', 'url', 'urls', 'index', 'accent'])
+const MEDIA_URL = /^https:\/\/plugin\.tiny\.technology\/media\/[A-Za-z0-9._-]+$/
 // Faithful mirror of fw tiny_touch.cpp action_for()/token_match() @0.14.6:
 // token_match is a case-insensitive SUBSTRING scan (no word boundaries — id
 // "sorted" trips "sor" → microphone). Sniff target = id when non-empty, else
@@ -135,7 +138,16 @@ export function lintCard(spec: any, nested = false): string[] {
     spec.items.forEach((it: any, i: number) => {
       if (typeof it === 'string' && foldedLen(it) > FOLD_BUDGET)
         w.push(`items[${i}] is ~${foldedLen(it)} bytes after fold — silently cut at ${FOLD_BUDGET} on the glass`)
+      if (t === 'list' && it && typeof it === 'object' && it.images != null) {
+        if (!Array.isArray(it.images)) w.push(`items[${i}].images must be an array of urls`)
+        else it.images.forEach((u: any, j: number) => {
+          if (typeof u !== 'string' || !MEDIA_URL.test(u))
+            w.push(`items[${i}].images[${j}] is not a plugin.tiny.technology/media url — the glass draws "photo unavailable"`)
+        })
+      }
     })
+  if (t === 'photo' && (typeof spec.url !== 'string' || !MEDIA_URL.test(spec.url)))
+    w.push('photo needs url: https://plugin.tiny.technology/media/<key> (a JPEG) — anything else is refused')
   if (t === 'list' && !Array.isArray(spec.items)) w.push('list needs items: []')
   if (t === 'kv' && (typeof spec.rows !== 'object' || Array.isArray(spec.rows))) w.push('kv needs rows: {k: v}')
   if (t === 'qr' && !spec.text) w.push('qr needs text (the encoded payload)')

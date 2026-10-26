@@ -55,6 +55,8 @@
 #include "tiny/tiny_wifi.h"
 #include "qrcode.h"   // espressif/qrcode — see firmware/main/idf_component.yml
 #include "lcd_palette.h"  // accent indices + names (grammar v16); pure header
+#include "tiny/tiny_photo.h"       // message photos: fetch + decode (v27)
+#include "tiny/tiny_photo_util.h"  // fit + dither, shared with the host tests
 
 static const char *TAG = "tiny_display";
 
@@ -497,11 +499,23 @@ static int s_region_count = 0;
 EXT_RAM_BSS_ATTR static tiny_button_region_t s_staged[kMaxRegions];  // PSRAM .bss
 static int s_staged_count = 0;
 
+// Photo URLs of the card being drawn (staged) and of the card on the glass
+// (live), grammar v27. A photo's tap region carries "p:<n>", an index into
+// the live table, so the table is staged, reset and published together with
+// the regions: a tap can never index another card's photos.
+static constexpr int kPhotoMax = 8;      // photos per card (the thread caps too)
+static constexpr int kPhotoUrlCap = 256;
+EXT_RAM_BSS_ATTR static char s_photo_staged[kPhotoMax][kPhotoUrlCap];
+static int s_photo_staged_n = 0;
+EXT_RAM_BSS_ATTR static char s_photo_urls[kPhotoMax][kPhotoUrlCap];
+static int s_photo_n = 0;
+
 // Every publisher starts from a complete staging state. Specialized native
 // pages have regions but no card-button accents; leaving this scratch array
 // from a failed card would let their next publish commit unpainted styling.
 static void reset_staged_regions() {
     s_staged_count = 0;
+    s_photo_staged_n = 0;
     memset(s_btn_accent_staged, lcd_palette::kNeutral,
            sizeof s_btn_accent_staged);
 }
@@ -566,6 +580,9 @@ static void publish_regions(const char *card_id, const char *card_type) {
     }
     s_region_count = s_staged_count;
     memcpy(s_btn_accent, s_btn_accent_staged, sizeof s_btn_accent);
+    for (int i = 0; i < s_photo_staged_n; ++i)
+        strlcpy(s_photo_urls[i], s_photo_staged[i], kPhotoUrlCap);
+    s_photo_n = s_photo_staged_n;
     strlcpy(s_card_id, card_id ? card_id : "", sizeof s_card_id);
     strlcpy(s_card_type, card_type ? card_type : "", sizeof s_card_type);
     for (int i = 0; i < s_region_count; ++i)
@@ -1087,6 +1104,224 @@ static size_t utf8_complete_len(const char *s, size_t len) {
     return (len - (i - 1)) < (size_t)need ? i - 1 : len;
 }
 
+// ---- message photos (grammar v27) ---------------------------------------
+// A `list` item may be {"text":"…","images":["https://…",…]}: each image
+// draws as a thumbnail under the item's text, and a tap on it ("p:<n>") opens
+// that photo full screen. The messages app is the producer: a thread item
+// that carried photo attachments becomes this object form (tiny_node.cpp).
+//
+// Photos are JPEGs decoded on the device (tiny_photo.cpp, ROM TJpgDec) to
+// luma, kept here, and dithered at draw time: two levels on the e-ink (its
+// card refresh is monochrome), four on the colour boards. The fetch happens
+// in render_card_at with the render lock released, like the image card;
+// drawing only ever reads this cache, so a scroll or a rotation never touches
+// the network. Every photo pixel is drawn with the literal-gray pen (kMono):
+// a photo must not invert on a dark-theme AMOLED.
+static constexpr int kThumbSlots = 10;   // decoded thumbnails kept in PSRAM
+
+struct Thumb {
+    char url[kPhotoUrlCap];
+    uint8_t *luma;     // nullptr: a remembered permanent failure
+    int w, h;
+    int box_w, box_h;  // the box it was fitted to (one per panel)
+    esp_err_t err;
+    uint32_t used;     // LRU tick
+};
+EXT_RAM_BSS_ATTR static Thumb s_thumbs[kThumbSlots];
+static uint32_t s_thumb_tick = 0;
+
+static bool photo_url_usable(const cJSON *u) {
+    return cJSON_IsString(u) && strncmp(u->valuestring, "https://", 8) == 0 &&
+           strlen(u->valuestring) < (size_t)kPhotoUrlCap;
+}
+
+static void thumb_box(int *bw, int *bh);
+
+static Thumb *thumb_find(const char *url) {
+    int bw, bh;
+    thumb_box(&bw, &bh);
+    for (Thumb &t : s_thumbs)
+        if (t.url[0] && t.box_w == bw && t.box_h == bh && strcmp(t.url, url) == 0) {
+            t.used = ++s_thumb_tick;
+            return &t;
+        }
+    return nullptr;
+}
+
+// Takes ownership of `luma` (nullptr records a failure that will not heal).
+static void thumb_put(const char *url, uint8_t *luma, int w, int h, esp_err_t err) {
+    Thumb *slot = &s_thumbs[0];
+    for (Thumb &t : s_thumbs) {
+        if (!t.url[0]) { slot = &t; break; }
+        if (t.used < slot->used) slot = &t;
+    }
+    heap_caps_free(slot->luma);
+    strlcpy(slot->url, url, sizeof slot->url);
+    slot->luma = luma;
+    slot->w = w;
+    slot->h = h;
+    thumb_box(&slot->box_w, &slot->box_h);
+    slot->err = err;
+    slot->used = ++s_thumb_tick;
+}
+
+// Thumbnail box. Sized from the panel's SHORT side so it is the same in
+// every rotation: a rotation re-layout then finds every thumbnail it needs
+// already decoded at the right size.
+static void thumb_box(int *bw, int *bh) {
+    const int short_side = std::min(s_pw, s_ph);
+    *bw = std::min(short_side - 2 * kMargin - 28, 320);
+    *bh = s_compact ? 120 : 160;
+}
+
+// Error-diffused luma at (x, y), logical coordinates, literal grays.
+static void draw_luma(Canvas &c, int x, int y, const uint8_t *luma, int w, int h,
+                      int levels) {
+    void *scratch = heap_caps_malloc(tiny_photo_util::dither_scratch_bytes(w),
+                                     MALLOC_CAP_SPIRAM);
+    uint8_t *row = (uint8_t *)heap_caps_malloc((size_t)w, MALLOC_CAP_SPIRAM);
+    PenScope pen(c, lcd_palette::kMono);
+    if (!scratch || !row) {
+        heap_caps_free(scratch);
+        heap_caps_free(row);
+        c.draw_rect(x, y, w, h, GrayLevel::Black);   // honest frame, no photo
+        return;
+    }
+    tiny_photo_util::Ditherer d;
+    d.begin(w, levels, scratch);
+    for (int yy = 0; yy < h; ++yy) {
+        d.row(luma + (size_t)yy * w, row);
+        for (int xx = 0; xx < w; ++xx)
+            c.draw_pixel(x + xx, y + yy, static_cast<GrayLevel>(row[xx]));
+    }
+    heap_caps_free(scratch);
+    heap_caps_free(row);
+}
+
+// The photos of one list item, stacked under its text. Returns the new y.
+static int draw_item_photos(Canvas &c, cJSON *imgs, int x, int y) {
+    int bw, bh;
+    thumb_box(&bw, &bh);
+    const int levels = c.has_accent() ? 4 : 2;
+    const cJSON *u = nullptr;
+    cJSON_ArrayForEach(u, imgs) {
+        if (!photo_url_usable(u)) continue;
+        if (s_photo_staged_n >= kPhotoMax) break;
+        const int idx = s_photo_staged_n++;
+        strlcpy(s_photo_staged[idx], u->valuestring, kPhotoUrlCap);
+        y += 6;
+        const Thumb *t = thumb_find(u->valuestring);
+        if (t && t->luma) {
+            draw_luma(c, x, y, t->luma, t->w, t->h, levels);
+            // Tappable only where the human can see it (the menu-row rule):
+            // the region is the visible part, and a sliver is not a target.
+            const int ry0 = std::max(y, s_view_top);
+            const int ry1 = std::min(y + t->h, s_view_bot);
+            if (ry1 - ry0 >= 40) {
+                char id[16];
+                snprintf(id, sizeof id, "p:%d", idx);
+                stage_region(x, ry0, t->w, ry1 - ry0, "photo", id);
+            }
+            y += t->h;
+        } else {
+            // Not decoded: a failure the platform will not fix (404, not a
+            // baseline JPEG) says so; anything else is a photo still to come.
+            const int ph = 40;
+            c.draw_rect(x, y, bw, ph, GrayLevel::Black);
+            c.draw_text(x + 12, y + (ph - text_ink_h(1)) / 2,
+                        t ? "photo unavailable" : "photo", kSmallScale,
+                        GrayLevel::DarkGray);
+            y += ph;
+        }
+    }
+    return y + 4;
+}
+
+// The photo URLs a card will draw, in draw order (list items, and the list
+// parts of a composite), deduplicated. Pointers live as long as `root`.
+static int collect_photos(cJSON *root, const char **out, int max) {
+    int n = 0;
+    auto from_list = [&](cJSON *list) {
+        cJSON *items = cJSON_GetObjectItem(list, "items");
+        const cJSON *it = nullptr;
+        cJSON_ArrayForEach(it, items) {
+            if (!cJSON_IsObject(it)) continue;
+            const cJSON *u = nullptr;
+            cJSON_ArrayForEach(u, cJSON_GetObjectItem(it, "images")) {
+                if (n >= max) return;
+                if (!photo_url_usable(u)) continue;
+                bool dup = false;
+                for (int i = 0; i < n && !dup; ++i) dup = !strcmp(out[i], u->valuestring);
+                if (!dup) out[n++] = u->valuestring;
+            }
+        }
+    };
+    const cJSON *t = cJSON_GetObjectItem(root, "type");
+    if (!cJSON_IsString(t)) return 0;
+    if (!strcmp(t->valuestring, "list")) {
+        from_list(root);
+    } else if (!strcmp(t->valuestring, "composite")) {
+        cJSON *parts = cJSON_GetObjectItem(root, "parts");
+        if (!cJSON_IsArray(parts)) parts = cJSON_GetObjectItem(root, "cards");
+        cJSON *p = nullptr;
+        cJSON_ArrayForEach(p, parts) {
+            const cJSON *pt = cJSON_GetObjectItem(p, "type");
+            if (cJSON_IsString(pt) && !strcmp(pt->valuestring, "list")) from_list(p);
+        }
+    }
+    return n;
+}
+
+// Permanent failures are remembered so a reopen does not refetch them;
+// anything else (timeout, no memory, TLS) is retried on the next open.
+static bool photo_err_permanent(esp_err_t e) {
+    return e == ESP_ERR_NOT_FOUND || e == ESP_ERR_NOT_SUPPORTED ||
+           e == ESP_ERR_INVALID_ARG || e == ESP_ERR_INVALID_SIZE;
+}
+
+// All the photos of one card share this much wall clock. A thread opens on
+// the touch action task, whose wedge watchdog reboots at 45 s. Worst case:
+// messages fetch 15 s + a photo started just inside the budget (8 s cap in
+// tiny_photo) + the e-ink commit ~2 s = 39 s. A photo past the budget draws
+// as "photo" and decodes on the next open.
+static constexpr int64_t kPhotoBudgetUs = 14 * 1000000;
+
+// Decode every photo `root` draws that is not cached yet. Caller holds
+// exactly one render-lock level; it is released around each fetch. Returns
+// ESP_ERR_INVALID_STATE when a newer render claimed the glass meanwhile.
+static esp_err_t prefetch_photos(cJSON *root, uint32_t render_epoch) {
+    const char *urls[kPhotoMax];
+    const int n = collect_photos(root, urls, kPhotoMax);
+    if (n == 0) return ESP_OK;
+    int bw, bh;
+    thumb_box(&bw, &bh);
+    const int64_t t0 = esp_timer_get_time();
+    for (int i = 0; i < n; ++i) {
+        const Thumb *have = thumb_find(urls[i]);
+        if (have && (have->luma || photo_err_permanent(have->err))) continue;
+        if (esp_timer_get_time() - t0 > kPhotoBudgetUs) {
+            ESP_LOGW(TAG, "photos: budget spent, %d of %d left for next open", n - i, n);
+            break;
+        }
+        // `urls` points into root, which this render owns: safe unlocked.
+        char url[kPhotoUrlCap];
+        strlcpy(url, urls[i], sizeof url);
+        uint8_t *luma = nullptr;
+        int w = 0, h = 0;
+        render_unlock();
+        const esp_err_t err = tiny_photo_load(url, bw, bh, false, &luma, &w, &h);
+        render_lock();
+        // The cache is keyed by an immutable URL, not by what is on the
+        // glass, so a stale fetch still fills it.
+        if (err == ESP_OK) thumb_put(url, luma, w, h, ESP_OK);
+        else if (photo_err_permanent(err)) thumb_put(url, nullptr, 0, 0, err);
+        else ESP_LOGW(TAG, "photo %d/%d: %s (retried next open)", i + 1, n,
+                      esp_err_to_name(err));
+        if (render_epoch != s_render_epoch) return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
 static int render_text_card(Canvas &c, cJSON *root, int y, int max_y) {
     cJSON *body = cJSON_GetObjectItem(root, "body");
     if (cJSON_IsString(body)) {
@@ -1103,7 +1338,16 @@ static int render_list_card(Canvas &c, cJSON *root, int y, int max_y) {
     cJSON *it = nullptr;
     cJSON_ArrayForEach(it, items) {
         if (y + kGlyphH * kBodyScale > max_y) break;
-        const char *s = cJSON_IsString(it) ? it->valuestring : "?";
+        // An item is a string, or {"text":"…","images":[…]} (v27).
+        const char *s = "?";
+        cJSON *imgs = nullptr;
+        if (cJSON_IsString(it)) {
+            s = it->valuestring;
+        } else if (cJSON_IsObject(it)) {
+            const cJSON *t = cJSON_GetObjectItem(it, "text");
+            s = cJSON_IsString(t) ? t->valuestring : "";
+            imgs = cJSON_GetObjectItem(it, "images");
+        }
         {
             PenScope pen(c, s_accent);
             c.fill_rect(kMargin + 4, y + kGlyphH * kBodyScale / 2 - 4, 10, 10,
@@ -1111,6 +1355,7 @@ static int render_list_card(Canvas &c, cJSON *root, int y, int max_y) {
         }
         y = draw_wrapped(c, kMargin + 28, y, s, kBodyScale,
                          s_w - 2 * kMargin - 28, max_y);
+        if (cJSON_IsArray(imgs)) y = draw_item_photos(c, imgs, kMargin + 28, y);
         y += line_h - (kGlyphH * kBodyScale + 6);
     }
     return y;
@@ -2576,7 +2821,188 @@ static esp_err_t render_gallery_card(cJSON *root, uint32_t render_epoch) {
     return err;
 }
 
-// Replay source for rotation/glance/scroll. Set only once the card it
+// ---- photo viewer (grammar v27) ------------------------------------------
+// {"type":"photo","url":"https://plugin.tiny.technology/media/<key>"} — one
+// photo, as large as the glass, letterboxed in black, upright in the current
+// rotation. Tapping a message thumbnail ("p:<n>") opens it; a tap anywhere
+// on it ("p:back") returns to the card it was opened from, scrolled where it
+// was. Four grays on every board: the e-ink commit is a gray4 refresh.
+//
+// One decoded photo is kept, fitted inside a square of the panel's LONG
+// side and never enlarged, so a rotation re-lays it out (the replay cache
+// holds the spec; it is a drawn card, not panel-native bytes) with no fetch.
+struct ViewPhoto {
+    char url[kPhotoUrlCap];
+    uint8_t *luma;
+    int w, h;
+    int side;   // the square it was fitted to (one per panel)
+};
+EXT_RAM_BSS_ATTR static ViewPhoto s_view;
+// Replay copy of the card the viewer was opened from ("p:back" target).
+static char *s_view_return = nullptr;
+
+static esp_err_t view_load_locked(const char *url, uint32_t render_epoch) {
+    const int side = std::max(s_pw, s_ph);
+    if (s_view.luma && s_view.side == side && strcmp(s_view.url, url) == 0) return ESP_OK;
+    if (s_rerendering) return ESP_ERR_INVALID_STATE;   // a re-layout never fetches
+    char u[kPhotoUrlCap];
+    strlcpy(u, url, sizeof u);
+    uint8_t *luma = nullptr;
+    int w = 0, h = 0;
+    render_unlock();
+    esp_err_t err = tiny_photo_load(u, side, side, false, &luma, &w, &h);
+    render_lock();
+    if (err != ESP_OK) {
+        // The thumbnail is already decoded: an enlarged thumbnail beats no
+        // photo when the full fetch fails (it is the same picture).
+        const Thumb *t = thumb_find(u);
+        if (!t || !t->luma) return err;
+        ESP_LOGW(TAG, "photo viewer: %s - showing the thumbnail", esp_err_to_name(err));
+        luma = (uint8_t *)heap_caps_malloc((size_t)t->w * t->h, MALLOC_CAP_SPIRAM);
+        if (!luma) return ESP_ERR_NO_MEM;
+        memcpy(luma, t->luma, (size_t)t->w * t->h);
+        w = t->w;
+        h = t->h;
+    }
+    if (render_epoch != s_render_epoch) {   // overtaken: keep nothing shared
+        heap_caps_free(luma);
+        return ESP_ERR_INVALID_STATE;
+    }
+    heap_caps_free(s_view.luma);
+    strlcpy(s_view.url, u, sizeof s_view.url);
+    s_view.luma = luma;
+    s_view.w = w;
+    s_view.h = h;
+    s_view.side = side;
+    return ESP_OK;
+}
+
+static esp_err_t render_photo_card(cJSON *root, uint32_t render_epoch) {
+    Canvas *c = sticky_display_canvas();
+    const cJSON *ju = cJSON_GetObjectItem(root, "url");
+    if (!c || !photo_url_usable(ju)) return ESP_ERR_INVALID_ARG;
+    // The glance strip is the title bar, and a photo has none: nothing to do.
+    if (s_glance_partial) return ESP_OK;
+    esp_err_t err = view_load_locked(ju->valuestring, render_epoch);
+    if (err != ESP_OK) return err;
+
+    display_lock();
+    const int glass_w = s_w, glass_h = s_h;
+    CanvasFrameSnapshot frame(c);
+    err = frame.capture();
+    if (err != ESP_OK) { display_unlock(); return err; }
+    c->set_rotation(s_rot);
+    s_w = c->width();
+    s_h = c->height();
+    c->clear(GrayLevel::White);
+    {
+        PenScope pen(*c, lcd_palette::kMono);   // letterbox: literal black
+        c->fill_rect(0, 0, s_w, s_h, GrayLevel::Black);
+    }
+    int fw = 0, fh = 0;
+    tiny_photo_util::fit(s_view.w, s_view.h, s_w, s_h, true, &fw, &fh);
+    uint8_t *fitted = (uint8_t *)heap_caps_malloc((size_t)fw * fh, MALLOC_CAP_SPIRAM);
+    if (!fitted) {
+        frame.restore();
+        s_w = glass_w; s_h = glass_h;
+        display_unlock();
+        return ESP_ERR_NO_MEM;
+    }
+    tiny_photo_util::resample(s_view.luma, s_view.w, s_view.h, fitted, fw, fh);
+    draw_luma(*c, (s_w - fw) / 2, (s_h - fh) / 2, fitted, fw, fh, 4);
+    heap_caps_free(fitted);
+    {   // the way out, said once in the corner: white chip, themed ink
+        const char *hint = "< back";
+        const int chip_w = text_width(hint, 2) + 24, chip_h = 40;
+        PenScope pen(*c, lcd_palette::kMono);
+        fill_round_rect(*c, 16, 16, chip_w, chip_h, 10, GrayLevel::White);
+        draw_round_rect(*c, 16, 16, chip_w, chip_h, 10, GrayLevel::Black);
+        c->draw_text(28, 16 + (chip_h - text_ink_h(2)) / 2, hint, 2, GrayLevel::Black);
+    }
+    reset_staged_regions();
+    stage_region(0, 0, s_w, s_h, "back", "p:back");   // tap anywhere closes
+    err = sticky_display_refresh();   // gray4 on the e-ink: the photo keeps its grays
+    if (err == ESP_OK) {
+        // Not scrollable. s_scroll / s_scroll_card are left alone on purpose:
+        // "p:back" re-renders the thread under its own card_id, which keeps
+        // the offset the human was reading at.
+        s_content_h = 0;
+        s_view_top = 0;
+        s_view_bot = 1 << 28;
+        const cJSON *jc = cJSON_GetObjectItem(root, "card_id");
+        publish_regions(cJSON_IsString(jc) && jc->valuestring[0] ? jc->valuestring
+                                                                  : "photo",
+                        "photo");
+    } else {
+        reset_staged_regions();
+        frame.restore();
+        s_w = glass_w; s_h = glass_h;
+        repair_restored_frame("photo rollback");
+    }
+    display_unlock();
+    return err;
+}
+
+extern "C" esp_err_t tiny_display_photo_open(int index) {
+    char url[kPhotoUrlCap] = "";
+    regions_lock();
+    if (index >= 0 && index < s_photo_n) strlcpy(url, s_photo_urls[index], sizeof url);
+    regions_unlock();
+    if (!url[0]) return ESP_ERR_INVALID_ARG;
+    // Remember where the photo was opened from, before the viewer replaces
+    // the replay cache. Only a drawn card is a place to come back to. The
+    // guard is scoped: render_card below must own exactly ONE render-lock
+    // level, because the photo fetch releases one level around HTTPS.
+    char *ret = nullptr;
+    {
+        RenderGuard guard;
+        if (s_card_cache && !s_card_cache_panel_native &&
+            strstr(s_card_cache, "\"photo\"") == nullptr) {
+            const size_t n = strlen(s_card_cache) + 1;
+            ret = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+            if (ret) memcpy(ret, s_card_cache, n);
+        }
+    }
+    cJSON *card = cJSON_CreateObject();
+    if (!card) { heap_caps_free(ret); return ESP_ERR_NO_MEM; }
+    cJSON_AddStringToObject(card, "type", "photo");
+    cJSON_AddStringToObject(card, "card_id", "photo");
+    cJSON_AddStringToObject(card, "url", url);
+    char *cs = cJSON_PrintUnformatted(card);
+    cJSON_Delete(card);
+    if (!cs) { heap_caps_free(ret); return ESP_ERR_NO_MEM; }
+    const esp_err_t err = tiny_display_render_card(cs);
+    free(cs);
+    {
+        RenderGuard guard;
+        if (err == ESP_OK) {
+            heap_caps_free(s_view_return);
+            s_view_return = ret;
+            ret = nullptr;
+        }
+    }
+    heap_caps_free(ret);
+    ESP_LOGI(TAG, "photo %d open -> %s", index, esp_err_to_name(err));
+    return err;
+}
+
+extern "C" esp_err_t tiny_display_photo_back(void) {
+    char *ret = nullptr;
+    {
+        RenderGuard guard;
+        ret = s_view_return;
+        s_view_return = nullptr;
+    }
+    if (!ret) return tiny_shell_home();   // opened by render_ui: home is "back"
+    const esp_err_t err = tiny_display_render_card(ret);
+    if (err != ESP_OK) {
+        // Still on the photo: keep the way out (unless a newer one exists).
+        RenderGuard guard;
+        if (!s_view_return) { s_view_return = ret; ret = nullptr; }
+    }
+    heap_caps_free(ret);
+    return err;
+}
 // describes is physically on the glass; a NULL json (allocation failure)
 // CLEARS replay rather than keeping a cache that now describes an older card,
 // so the next rerender cannot resurrect that card over the one on glass.
@@ -2699,6 +3125,12 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     // same sha16 = same pixels).
     {
         const cJSON *jt = cJSON_GetObjectItem(root, "type");
+        if (cJSON_IsString(jt) && strcmp(jt->valuestring, "photo") == 0) {
+            esp_err_t perr = render_photo_card(root, render_epoch);
+            if (perr == ESP_OK) { pending.publish(); displace.commit(); }
+            cJSON_Delete(root);
+            return perr;
+        }
         if (cJSON_IsString(jt) && strcmp(jt->valuestring, "universe") == 0) {
             // v11: the universe page owns its own layout (roster lives in
             // tiny_agent, not in the spec) — merge any pushed slugs, then
@@ -2733,6 +3165,15 @@ static esp_err_t render_card_at(const char *card_json, uint32_t claimed_epoch) {
     const char *type_s = cJSON_IsString(type) ? type->valuestring : "text";
     const char *title_s = cJSON_IsString(title) ? title->valuestring : "";
     const char *cid_s = cJSON_IsString(cid) ? cid->valuestring : "";
+
+    // Message photos (v27): decode what this card will draw BEFORE taking
+    // the panel, with the render lock released like the image card's fetch.
+    // A re-layout (scroll, rotation, glance) never fetches: it draws what is
+    // cached. A newer card overtaking the fetch makes this one stale.
+    if (!s_rerendering && prefetch_photos(root, render_epoch) != ESP_OK) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_STATE;
+    }
     // FINDING 2 (check 23): an empty card_id committed an ANONYMOUS card — the
     // mirror couldn't assert what was on glass and ui_tap reported card_id="".
     // Never an empty identity: synthesize a stable one from the card's own
