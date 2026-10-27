@@ -734,11 +734,17 @@ esp_err_t tiny_shell_key(const char *id) {
             else if (!strcmp(k, "mic")) {
                 if (!kb_dictates() || !tiny_node_dictation_available())
                     return ESP_ERR_NOT_SUPPORTED;  // no key was drawn; a stale tap
-                if (s_kb_listen_gen) return ESP_OK;  // already listening
+                if (s_kb_listen_gen) return ESP_ERR_INVALID_STATE;  // already listening
                 const esp_err_t r = tiny_button_request_dictation(s_kb_gen);
                 if (r == ESP_OK) s_kb_listen_gen = s_kb_gen;
                 else strlcpy(s_kb_note, tiny_dictate_note(r == ESP_ERR_NOT_ALLOWED
                                  ? TINY_DICTATE_MIC : TINY_DICTATE_BUSY), sizeof s_kb_note);
+                // The verdict is the QUEUE's answer, captured under this lock:
+                // a caller must not re-read s_kb_listen_gen afterwards (the
+                // transcript may already have landed and cleared it). The
+                // repaint below shows "listening" or the refusal note.
+                const esp_err_t rr = render_keyboard();
+                return r != ESP_OK ? ESP_ERR_INVALID_STATE : rr;
             }
             else if (strlen(k) == 1) {
                 if (len + 1 < cap) { s_kb_value[len] = k[0]; s_kb_value[len + 1] = 0; }
@@ -835,11 +841,10 @@ esp_err_t tiny_shell_dictate_begin(void) {
             return ESP_ERR_NOT_SUPPORTED;
         if (s_kb_listen_gen) return ESP_ERR_INVALID_STATE;
     }
-    // Repaint through the key path: it owns the lock, the note and the render.
-    // A refusal there lands as a title note; only report what the human feels.
-    const esp_err_t r = tiny_shell_key("k:mic");
-    KbLock l;
-    return (r == ESP_OK && s_kb_listen_gen) ? ESP_OK : ESP_ERR_INVALID_STATE;
+    // Repaint through the key path: it owns the lock, the note and the render,
+    // and returns ESP_OK only when the dictation was queued — decided under
+    // the lock, never re-read after it (a fast transcript clears listen_gen).
+    return tiny_shell_key("k:mic");
 }
 
 // v28: a transcript (or a verdict) back from the ask worker. Lands only in

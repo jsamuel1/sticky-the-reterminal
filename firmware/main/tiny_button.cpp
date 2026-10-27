@@ -46,6 +46,11 @@ static void voice_ask_task(void *) {
         if (req.dictate_gen) {
             // Transcript into the composer. The shell drops it if the human
             // left that composer while we were listening (generation check).
+            // Deliberately LARGER than the composer (2x): a transcript longer
+            // than the field must reach tiny_dictate_merge whole, so the merge
+            // can see it overflow and say "field full". Sized to the field,
+            // classify would cut it silently first and the merge would report
+            // a clean fit for words the human never saw dropped.
             EXT_RAM_BSS_ATTR static char words[TINY_ASK_TEXT_CAP * 2];  // PSRAM .bss
             const int c = tiny_node_dictate(6, words, sizeof words);
             ESP_LOGI(TAG, "dictation (gen %lu) -> %d", (unsigned long)req.dictate_gen, c);
@@ -126,7 +131,7 @@ extern "C" esp_err_t tiny_button_request_dictation(uint32_t gen) {
 // Long-press AI / nav worker plumbing, declared ahead of the AI click: v28's
 // composer dictation hands its e-ink repaint to the same worker.
 enum class Nav : uint8_t { kHome, kUp, kDown, kDictate };
-static void queue_nav(Nav n);
+static bool queue_nav(Nav n);
 
 static void on_ai_click(void *, void *) {
     // §11 THE rule that is the point: a pocketed AI button must never start
@@ -143,7 +148,7 @@ static void on_ai_click(void *, void *) {
     // agent from the middle of a DM reply would answer a question nobody asked.
     // The keyboard repaint blocks on e-ink, so it rides the nav worker.
     if (tiny_shell_composer_open()) {
-        queue_nav(Nav::kDictate);
+        if (!queue_nav(Nav::kDictate)) sticky_buzzer_beep_double();
         return;
     }
     tiny_button_request_voice_ask();
@@ -165,7 +170,12 @@ static void nav_task(void *) {
             case Nav::kDictate: {
                 // v28: AI click / BOOT hold with a composer open. If the
                 // keyboard left the glass since the press, it is an ordinary
-                // voice ask again (the talk arm is still live for it).
+                // voice ask again. That ask consumes the live talk arm, and is
+                // bounded like every hold-to-talk ask: a BOOT release sets
+                // s_talk_released whenever it lands (before or during the
+                // capture), which stops it at the 0.5 s floor; no release at
+                // all stops it at the 15 s cap. kArmTtlUs only expires an arm
+                // nobody consumed (e.g. this queue item was refused).
                 esp_err_t r = tiny_shell_dictate_begin();
                 if (r == ESP_ERR_NOT_SUPPORTED) r = tiny_button_request_voice_ask();
                 if (r != ESP_OK) {
@@ -215,10 +225,15 @@ static void nav_task(void *) {
     }
 }
 
-static void queue_nav(Nav n) {
-    if (!s_nav_q || !tiny_admit::work_enter()) return;
-    if (xQueueSend(s_nav_q, &n, 0) != pdTRUE)
+// true = queued. Callers that armed something for the item (v28 dictation
+// with a talk arm) undo it on false; the page keys ignore it.
+static bool queue_nav(Nav n) {
+    if (!s_nav_q || !tiny_admit::work_enter()) return false;
+    if (xQueueSend(s_nav_q, &n, 0) != pdTRUE) {
         tiny_admit::work_exit();  // queue full: cancel unpublished work
+        return false;
+    }
+    return true;
 }
 
 static void on_ai_long(void *, void *) {
@@ -252,10 +267,14 @@ static void on_talk_start(void *, void *) {
     tiny_lock_note_activity();
     tiny_audio_talk_arm(true);
     // v28: hold-to-talk with a composer open dictates INTO it (same rule as
-    // the reTerminal AI click). The nav worker starts it; an arm it never
-    // consumes expires on its own (tiny_audio kArmTtlUs).
+    // the reTerminal AI click). The nav worker starts it. Refused here (queue
+    // full, sleep claimed) = disarm now, so the arm cannot stretch a later
+    // unrelated capture.
     if (tiny_shell_composer_open()) {
-        queue_nav(Nav::kDictate);
+        if (!queue_nav(Nav::kDictate)) {
+            tiny_audio_talk_arm(false);
+            sticky_buzzer_beep_double();
+        }
         return;
     }
     if (tiny_button_request_voice_ask() != ESP_OK) {

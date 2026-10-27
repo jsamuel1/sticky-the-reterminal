@@ -71,6 +71,17 @@ static void test_merge() {
     }
     CHECK(merge("", "caf\xC3\xA9", 5, &v) == "caf");  // é needs 2 B, 1 left
     CHECK(merge("", "caf\xC3\xA9", 6, &v) == "caf\xC3\xA9");
+    // Review ask (PR #24): first rune multi-byte, exactly one byte of room
+    // — the draft comes back unmodified, never with a lone lead byte.
+    got = merge("abcd", "\xC3\xA9t\xC3\xA9", 6, &v);  // room for " " only
+    CHECK(got == "abcd");
+    CHECK(v == TINY_DICTATE_MERGE_CLIPPED);
+    got = merge("", "\xC3\xA9", 2, &v);                  // empty field, 1 byte
+    CHECK(got == "");
+    CHECK(v == TINY_DICTATE_MERGE_CLIPPED);
+    got = merge("abc", "\xE2\x82\xAC", 6, &v);           // " " + 1 of 3 bytes
+    CHECK(got == "abc");
+    CHECK(v == TINY_DICTATE_MERGE_CLIPPED);
 }
 
 static void test_pop() {

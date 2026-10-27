@@ -68,6 +68,7 @@
 #include "tiny/tiny_pair.h"
 #include "tiny/tiny_dictate_util.h"
 #include "esp_timer.h"
+#include <atomic>
 
 extern "C" int tiny_bootmark_prev(void);
 extern "C" void tiny_bootmark_stage(uint8_t stage);
@@ -88,10 +89,14 @@ static QueueHandle_t s_events = NULL;
 #define REPLY_MAX 8000
 
 // v28 dictation. -1 = no heartbeat has said yet, 0 = the backend's features[]
-// does not list "transcribe", 1 = it does. Written by the node task only.
-static volatile int s_feat_transcribe = -1;
+// does not list "transcribe", 1 = it does. Written by the node task (heartbeat)
+// AND the ask worker (route-missing downgrade), read from the act and button
+// tasks: std::atomic, not volatile, so SMP ordering is defined.
+static std::atomic<int> s_feat_transcribe{-1};
 // The last dictation verdict (status `dictation_last`); "" before the first.
-static const char *volatile s_dictate_last = "";
+// Always points at a string literal (tiny_dictate_class_name), so publishing
+// the pointer atomically is enough.
+static std::atomic<const char *> s_dictate_last{""};
 
 // ---------- HTTP helper: POST/PUT/PATCH json, collect body ----------
 // `dropped` counts the bytes this sink refused. It exists because the refusal
@@ -324,8 +329,8 @@ static int heartbeat(void) {
         // Absent features[] (older backend) keeps the last answer; a present
         // one is the truth. Before any beat answers, dictation is "unknown".
         const int tf = tiny_dictate_feature(resp, "transcribe");
-        if (tf >= 0 && tf != s_feat_transcribe) {
-            s_feat_transcribe = tf;
+        if (tf >= 0 && tf != s_feat_transcribe.load()) {
+            s_feat_transcribe.store(tf);
             ESP_LOGI(TAG, "server dictation (transcribe) -> %s", tf ? "yes" : "no");
         }
         cJSON *o = cJSON_Parse(resp);
@@ -869,17 +874,17 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
 // ask mutex is taken because there is one mic and one panel; a dictation
 // while an ask runs is refused as BUSY, never queued.
 extern "C" bool tiny_node_dictation_available(void) {
-    return tiny_board_caps()->mic && s_feat_transcribe == 1;
+    return tiny_board_caps()->mic && s_feat_transcribe.load() == 1;
 }
 
-extern "C" int tiny_node_dictation_server(void) { return s_feat_transcribe; }
+extern "C" int tiny_node_dictation_server(void) { return s_feat_transcribe.load(); }
 
-extern "C" const char *tiny_node_dictation_last(void) { return s_dictate_last; }
+extern "C" const char *tiny_node_dictation_last(void) { return s_dictate_last.load(); }
 
 extern "C" int tiny_node_dictate(int voice_secs, char *out, size_t out_cap) {
     if (out && out_cap) out[0] = 0;
     auto done = [](tiny_dictate_class_t c) {
-        s_dictate_last = tiny_dictate_class_name(c);
+        s_dictate_last.store(tiny_dictate_class_name(c));
         return (int)c;
     };
     if (!tiny_board_caps()->mic) return done(TINY_DICTATE_UNAVAILABLE);
@@ -930,7 +935,7 @@ extern "C" int tiny_node_dictate(int voice_secs, char *out, size_t out_cap) {
         // The app in front of the worker does not serve the route even though
         // features[] said it would (a split deploy). Stop offering the key
         // until a heartbeat says otherwise.
-        s_feat_transcribe = 0;
+        s_feat_transcribe.store(0);
     }
     if (c != TINY_DICTATE_OK) {
         char note[96];
@@ -1065,10 +1070,11 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     // this board and the backend's features[] naming "transcribe";
     // dictation_server is the backend half alone (null until a beat says).
     cJSON_AddBoolToObject(s, "dictation", tiny_node_dictation_available());
-    if (s_feat_transcribe < 0) cJSON_AddNullToObject(s, "dictation_server");
-    else cJSON_AddBoolToObject(s, "dictation_server", s_feat_transcribe == 1);
-    if (s_dictate_last[0])
-        cJSON_AddStringToObject(s, "dictation_last", s_dictate_last);
+    const int feat = s_feat_transcribe.load();
+    if (feat < 0) cJSON_AddNullToObject(s, "dictation_server");
+    else cJSON_AddBoolToObject(s, "dictation_server", feat == 1);
+    const char *dl = s_dictate_last.load();
+    if (dl[0]) cJSON_AddStringToObject(s, "dictation_last", dl);
     // P0-BOUNCE flight recorder: the stage the PREVIOUS boot reached (9 =
     // clean through validity mark; anything less names where it died).
     cJSON_AddNumberToObject(s, "boot_mark_prev", tiny_bootmark_prev());
