@@ -29,7 +29,7 @@ recovery/                factory-dump manifest + sha (the 32 MB dump itself is g
 
 Versions live in exactly one place: `firmware/main/tiny/tiny_version.h` —
 `TINY_FW_VERSION` (string, e.g. `0.27.0-u2`) and `TINY_GRAMMAR_VERSION`
-(int, currently 27). CMake reads the first; the heartbeat and `status` report
+(int, currently 28). CMake reads the first; the heartbeat and `status` report
 both. Bump the grammar on **any** change to a verb, its args, or a reply
 shape, and add a changelog note (`changelog.d/<pr>-<name>.md`, see
 `changelog.d/README.md` — never edit `CHANGELOG.md` in a PR).
@@ -169,7 +169,7 @@ crash-looping trial names the stage on the next boot (`boot_mark_prev`).
 
 Other NVS namespaces: `tinywifi` (breadcrumbs), `tinyaskq`, `tinyboot`.
 
-## 5. The verb grammar (v27) and the parity rule
+## 5. The verb grammar (v28) and the parity rule
 
 Dispatched in `tiny_node.cpp::dispatch_inner()` — **23 verbs** on every
 board, plus `brightness` where `caps.brightness` is true (colour boards):
@@ -207,6 +207,21 @@ and decodes baseline JPEG with the S3 ROM TJpgDec (no component). Math is
 `render_card_at` with the render lock released; re-layouts draw from the
 thumbnail cache and never fetch. The per-card photo budget (14 s) plus the
 8 s per-photo cap keep a thread open under the act task's 45 s watchdog.
+
+Dictation (v28): the DM-reply and ask keyboards draw a `k:mic` key when
+`status.dictation` is true — the board has a mic AND the heartbeat reply's
+`features[]` (asked with `wantFeatures:"1"`) names `transcribe`. A tap, the
+reTerminal AI click or BOOT hold-to-talk with a composer open queues a
+dictation on the ask worker (one mic: an ask in flight answers busy):
+record → `/api/media` → `POST /api/devices/transcribe` → the words are
+APPENDED to the composer value; OK still sends through the composer's own
+route, nothing is sent by dictation. Keyboard state is shared by the act
+task and the ask worker under `s_kb_mux`; every composer opening bumps
+`s_kb_gen`, and a transcript for an older generation is dropped (words
+never land in a field they were not spoken into). Pure half:
+`tiny/tiny_dictate_util.h` (`tests/host/dictate_host_test.sh`). Title
+notes are ≤ 18 chars so the FNK0104S strip never cuts them. The wifi
+password keyboard never dictates. Backend route: cagataycali/tiny-technology#1.
 
 ## 6. First boot (`tiny_onboard.cpp`, since 0.28.0)
 

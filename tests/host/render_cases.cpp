@@ -346,6 +346,11 @@ static std::vector<Fixture> fixtures() {
         {"composite_settings", R"J({"type":"composite","card_id":"settings","title":"settings","parts":[{"type":"text","body":"Wi-Fi joins a network. Config = QR for phone setup."},{"type":"menu","items":[{"label":"sound: ON","note":"tap to mute beeps","id":"silent"},{"label":"beeps: NORMAL","note":"tap for soft","id":"beepvol"},{"label":"rotation: AUTO","note":"tap to lock at 0 deg","id":"rotlock"}]},{"type":"kv","rows":[["name","tiny-eba6"],["fw","0.32.0"],["channel","sticky-dev"],["wifi","MyHomeNetwork-5G (-61 dBm)"],["mac","ac:15:18:d7:eb:a6"]]}],"buttons":["Wi-Fi","Bluetooth","Config","Home"]})J", false},
         {"keyboard", R"J({"type":"keyboard","card_id":"kb","title":"wi-fi password","value":"correct horse battery staple"})J", false},
         {"keyboard_sym", R"J({"type":"keyboard","card_id":"kb2","title":"message","value":"","sym":true})J", false},
+        // v28 dictation: mic key beside OK; dark while listening; a dictated
+        // UTF-8 value (folded at paint) longer than the old 63-byte field.
+        {"keyboard_mic", R"J({"type":"keyboard","card_id":"kb3","title":"reply to @sam","value":"caf\u00e9 at six? I'll bring the g\u00fczel cake and the long receipt we talked about","mic":true})J", false},
+        {"keyboard_listening", R"J({"type":"keyboard","card_id":"kb4","title":"listening...","value":"ok","mic":true,"listening":true})J", false},
+        {"keyboard_note", R"J({"type":"keyboard","card_id":"kb5","title":"field full - check","value":"see you at six","mic":true})J", false},
         {"home", R"J({"type":"agent_home","card_id":"home"})J", false},
         {"home_preview", R"J({"type":"agent_home","card_id":"home","preview":"Stand-up at 09:30, a review at 11:00, and lunch with Sam at 12:30 - want reminders?"})J", false},
         {"buttons5", R"J({"type":"buttons","card_id":"b5","title":"pick","buttons":["One","Two","Three","Four","Bluetooth"]})J", false},

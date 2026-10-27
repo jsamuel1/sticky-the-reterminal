@@ -1,5 +1,5 @@
 #pragma once
-#define TINY_FW_VERSION "0.33.0"
+#define TINY_FW_VERSION "0.34.0"
 
 // The verb grammar is a 3-consumer contract (dashboard, iOS StickyPanel,
 // relay agents) held together by string prefixes. Bump this on ANY change to
@@ -242,4 +242,26 @@
 //        object form (up to 8 photos per card); a photo-only message reads
 //        "photo"; other attachments read "[n attachment(s)]". The inbox
 //        row of a photo-only last message reads "[photo]".
-#define TINY_GRAMMAR_VERSION 27  // v27: message photos (list images, photo card, p: ids)
+// v28 = dictation into the on-glass composers (DM reply, ask):
+//      + card type `keyboard` gains "mic":bool (adds a k:mic key in the
+//        bottom row, beside OK) and "listening":bool (the key draws dark
+//        while a clip records and transcribes). Without "mic" the frame is
+//        byte-identical to v27. The wifi-password keyboard never has one.
+//      + k:mic records (6 s on the reTerminal; hold-to-talk on colour
+//        boards), POSTs the WAV to /api/media, then POST
+//        /api/devices/transcribe {deviceId, token, audioUrl} -> {text}, and
+//        APPENDS the words to the composer value (whitespace collapsed,
+//        cut on a rune boundary). Nothing is sent: OK sends through the
+//        composer's own route, as before. Failure verdicts paint as the
+//        keyboard title ("didn't catch that", "offline - type it", ...).
+//      + with a composer open, the AI button (reTerminal click) and BOOT
+//        hold-to-talk (colour boards) dictate into it instead of asking.
+//      + heartbeat sends wantFeatures:"1"; a reply features[] naming
+//        "transcribe" turns the mic key on. Absent features[] keeps the last
+//        answer (older backends never send it: no key).
+//      + status gains dictation (bool: mic on this board AND the server
+//        advertises it), dictation_server (bool, null until a beat says) and
+//        dictation_last (last verdict name; absent before the first).
+//      + the composer value grew 63 -> 159 bytes (wifi password still 63);
+//        backspace removes a whole UTF-8 rune.
+#define TINY_GRAMMAR_VERSION 28  // v28: dictation into composers (k:mic, keyboard mic/listening)

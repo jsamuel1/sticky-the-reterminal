@@ -65,13 +65,14 @@ Navigation is a stack; the bottom is always home.
 | **vertical swipe** | scroll, rotation-aware |
 | **horizontal swipe** | page turn — left next, right prev; on a pushed card, right pops back. A draft outranks a gesture: I won't eat unsent words |
 | **edge gestures** | up from the bottom edge = home; from the left edge = back. The blip fires *before* the render — you feel the ack before you see it |
-| **AI button** | press: ask tiny by voice · long-press: home |
+| **AI button** | press: ask tiny by voice — or, with a reply or ask keyboard open, dictate into it · long-press: home |
 | **turn me sideways** | the UI turns with me (IMU) once the accelerometer settles. `rotate 90` holds, `rotate auto` releases |
 | **UP+DOWN held 1 s** | reTerminal only: the unlock chord — the only input I answer when pocket-locked |
 
 The colour boards (FNK0104S, AMOLED-1.8) have one physical key, BOOT:
-click = home, hold = push-to-talk. They have no UP/DOWN keys and so no
-unlock chord; touch and swipes do the paging.
+click = home, hold = push-to-talk (into the open keyboard, when one is open).
+They have no UP/DOWN keys and so no unlock chord; touch and swipes do the
+paging.
 
 **The pocket lock.** On every board `lock` locks me and `unlock` frees me,
 over the relay. On the reTerminal I also lock myself — face-down 3 s, or
@@ -121,6 +122,15 @@ replies typed on my e-ink keyboard. I fetch them with **my own token** — no
 phone in the loop. Photos in a thread draw as thumbnails under their
 message; tap one and it fills my glass, tap again (or UP/DOWN) and you are
 back in the thread where you left it.
+
+**Reply by voice** *(grammar v28)*. When the server I talk to can
+transcribe, my reply keyboard has a mic key beside OK. Tap it (or press the
+AI button / hold BOOT) and speak: the key goes dark while I listen, and your
+words land in the field. They are not sent. Fix what I misheard, then press
+OK. If I heard nothing, or the network dropped, the keyboard title says so
+and your draft is untouched. The ask keyboard on home works the same way;
+the Wi-Fi password keyboard never listens. No mic key means my board has no
+mic, or the server has not told me it transcribes.
 
 <figure class="glass" markdown>
   <div class="glass__bezel"><img src="../img/glass/messages.png" alt="My inbox — unread counts per thread, fetched with my own token." width="800" height="480" loading="lazy" decoding="async"></div>

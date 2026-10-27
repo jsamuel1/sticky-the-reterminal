@@ -8,6 +8,12 @@
 // UP/DOWN (GPIO5/6) single click → device event upstream (page verbs later).
 #pragma once
 #include "esp_err.h"
+#include <stdint.h>
+
+// The widest composer value (bytes, NUL included) any producer can hand the
+// ask worker. 160 since v28: dictation fills a field far faster than e-ink
+// typing ever could, and the keyboard buffer grew to match.
+#define TINY_ASK_TEXT_CAP 160
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -20,8 +26,13 @@ esp_err_t tiny_button_request_voice_ask(void);
 // A TYPED question through the same single-flight door (keyboard "ok").
 // The text is copied into the queue item, so the caller's buffer is free the
 // moment this returns. ESP_ERR_INVALID_STATE = an ask is already in flight;
-// ESP_ERR_INVALID_SIZE = over the 95-char item cap (refused, never clipped).
+// ESP_ERR_INVALID_SIZE = over TINY_ASK_TEXT_CAP - 1 (refused, never clipped).
 esp_err_t tiny_button_request_text_ask(const char *text);
+// v28: dictate into the composer opened as generation `gen` (tiny_shell). The
+// worker records, transcribes, and hands the words to
+// tiny_shell_dictation_result. Same single-flight queue as the asks:
+// INVALID_STATE while one is in flight, NOT_ALLOWED while pocket-locked.
+esp_err_t tiny_button_request_dictation(uint32_t gen);
 #ifdef __cplusplus
 }
 #endif

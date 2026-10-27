@@ -22,7 +22,7 @@ Third person; contracts don't do voices. Base URL from config (`api`, default
 
 | route | when | body (besides `deviceId`,`token`) | reply |
 |---|---|---|---|
-| `POST /api/devices/heartbeat` | every 30 s, ~60 s idle | `capabilities[]` = exactly what dispatches; `wantUnread:"1"` opt-in | `{ok}`; `unread` rides the beat when asked |
+| `POST /api/devices/heartbeat` | every 30 s, ~60 s idle | `capabilities[]` = exactly what dispatches; `wantUnread:"1"` and `wantFeatures:"1"` opt-ins | `{ok}`; `unread` rides the beat when asked; `features[]` (optional device routes the backend serves) when asked — absent = assume none |
 | `PUT /api/devices/relay` | poll: 5 s active, 60 s after two quiet minutes | `max:5` | `{messages:[{id, payload:"<string>"}]}` — execute in order; unknown verb → help text. Delivered once: an envelope a poll returned is never returned again, PATCHed or not |
 | `PATCH /api/devices/relay` | one per invoke envelope; none for a typed push (`type` ≠ `invoke`, e.g. late-reply `notify`), since v26 | `inReplyTo`, `payload:"<string ≤ 8000 B>"` → `{result[, images:[{url,format}]]}` | ack |
 | `POST /api/media` | screenshot, voice WAV | `data:<base64>`, `contentType` | `{url}` on **plugin.tiny.technology** — a different host, which matters for OTA pinning |
@@ -30,6 +30,7 @@ Third person; contracts don't do voices. Base URL from config (`api`, default
 | `POST /api/devices/transcript` | after every ask | `text`, `label:"sticky-ask"`, `audioUrl`, `durationS` | durable record |
 | `POST /api/devices/event` | button tap on a card | `kind:"ui_tap"`, `card_id`, `button_id` | lands in the owner's activity feed |
 | `POST /api/devices/messages` | messages app, `messages` verb | <code>op:unread&vert;<wbr>inbox&vert;<wbr>thread&vert;<wbr>send</code> (+`with` / `to`,`body`) | see below |
+| `POST /api/devices/transcribe` | composer dictation (v28: `k:mic`, AI / BOOT with a keyboard open) | `audioUrl` from `/api/media`, uploaded by this device's owner | `{text}` — words only: no agent turn, nothing sent or stored. 404 with a sentence = not this owner's audio; 404 without = the route is not deployed; 422 = nothing heard. Offered only when the heartbeat (sent with `wantFeatures:"1"`) answers `features:["transcribe"]` |
 | `PUT /api/firmware/manifest` | `ota [channel]`, boot check | `channel:"sticky-stable"` | `{bundle:{url, sha256[, force]}}` |
 | `GET https://plugin.tiny.technology/media/<key>` | `ota <url> <sha256>` (v15) | — (capability URL, no auth) | the app image; `Content-Length` set |
 

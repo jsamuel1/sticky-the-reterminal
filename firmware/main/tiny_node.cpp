@@ -66,6 +66,7 @@
 #include "tiny/tiny_shell.h"
 #include "tiny/tiny_onboard.h"
 #include "tiny/tiny_pair.h"
+#include "tiny/tiny_dictate_util.h"
 #include "esp_timer.h"
 
 extern "C" int tiny_bootmark_prev(void);
@@ -85,6 +86,12 @@ static QueueHandle_t s_events = NULL;
 
 #define HTTP_TIMEOUT_MS 15000
 #define REPLY_MAX 8000
+
+// v28 dictation. -1 = no heartbeat has said yet, 0 = the backend's features[]
+// does not list "transcribe", 1 = it does. Written by the node task only.
+static volatile int s_feat_transcribe = -1;
+// The last dictation verdict (status `dictation_last`); "" before the first.
+static const char *volatile s_dictate_last = "";
 
 // ---------- HTTP helper: POST/PUT/PATCH json, collect body ----------
 // `dropped` counts the bytes this sink refused. It exists because the refusal
@@ -307,10 +314,20 @@ static int heartbeat(void) {
     // Opt-in DM badge (worker b553660d): reply gains {"unread":n}. STRING "1"
     // — the edge zod schema string lesson (messages_call comment) applies.
     cJSON_AddStringToObject(b, "wantUnread", "1");
-    char resp[192] = "";
+    // v28: ask which optional device routes this backend serves (features[]),
+    // so the composer offers a mic key only where dictation can work.
+    cJSON_AddStringToObject(b, "wantFeatures", "1");
+    char resp[256] = "";
     const int st = post_cjson(HTTP_METHOD_POST, "/api/devices/heartbeat", b,
                               resp, sizeof resp);
     if (st == 200 && resp[0]) {
+        // Absent features[] (older backend) keeps the last answer; a present
+        // one is the truth. Before any beat answers, dictation is "unknown".
+        const int tf = tiny_dictate_feature(resp, "transcribe");
+        if (tf >= 0 && tf != s_feat_transcribe) {
+            s_feat_transcribe = tf;
+            ESP_LOGI(TAG, "server dictation (transcribe) -> %s", tf ? "yes" : "no");
+        }
         cJSON *o = cJSON_Parse(resp);
         if (o) {
             const cJSON *u = cJSON_GetObjectItem(o, "unread");
@@ -845,6 +862,85 @@ extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
     return ESP_OK;
 }
 
+// ---------- dictation (grammar v28): speech -> text INTO a composer ---------
+// Record, upload, POST /api/devices/transcribe; the words come back to the
+// caller and nowhere else. No agent turn, nothing sent: the composer appends
+// them for the human to correct, and its OK sends through its own route. The
+// ask mutex is taken because there is one mic and one panel; a dictation
+// while an ask runs is refused as BUSY, never queued.
+extern "C" bool tiny_node_dictation_available(void) {
+    return tiny_board_caps()->mic && s_feat_transcribe == 1;
+}
+
+extern "C" int tiny_node_dictation_server(void) { return s_feat_transcribe; }
+
+extern "C" const char *tiny_node_dictation_last(void) { return s_dictate_last; }
+
+extern "C" int tiny_node_dictate(int voice_secs, char *out, size_t out_cap) {
+    if (out && out_cap) out[0] = 0;
+    auto done = [](tiny_dictate_class_t c) {
+        s_dictate_last = tiny_dictate_class_name(c);
+        return (int)c;
+    };
+    if (!tiny_board_caps()->mic) return done(TINY_DICTATE_UNAVAILABLE);
+    tiny_admit::Work work;  // mic + TLS: never under a sleep
+    if (!work) return done(TINY_DICTATE_BUSY);
+    if (!s_ask_mux) s_ask_mux = xSemaphoreCreateMutex();
+    if (!s_ask_mux || xSemaphoreTake(s_ask_mux, 0) != pdTRUE)
+        return done(TINY_DICTATE_BUSY);
+    struct Give { ~Give() { xSemaphoreGive(s_ask_mux); } } give;
+    if (!tiny_wifi_is_up()) return done(TINY_DICTATE_TRANSPORT);
+
+    uint8_t *wav = NULL;
+    size_t wlen = 0;
+    tiny_audio_chime("ask");
+    esp_err_t r = tiny_audio_record_wav(voice_secs, &wav, &wlen);
+    if (r != ESP_OK) {
+        ESP_LOGW(TAG, "dictate: record failed: %s", esp_err_to_name(r));
+        return done(TINY_DICTATE_MIC);
+    }
+    tiny_audio_chime("ack");
+    EXT_RAM_BSS_ATTR static char url[256];  // PSRAM .bss; one dictation at a time
+    url[0] = 0;
+    r = tiny_upload_media(wav, wlen, "audio/wav", url, sizeof url);
+    free(wav);
+    if (r != ESP_OK || !url[0]) {
+        ESP_LOGW(TAG, "dictate: upload failed: %s (internal heap %u B)",
+                 esp_err_to_name(r),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        return done(TINY_DICTATE_UPLOAD);
+    }
+    cJSON *b = base_body();
+    cJSON_AddStringToObject(b, "audioUrl", url);
+    char *bs = cJSON_PrintUnformatted(b);
+    cJSON_Delete(b);
+    if (!bs) return done(TINY_DICTATE_SERVER);
+    EXT_RAM_BSS_ATTR static char resp[2048];  // PSRAM .bss: a 15 s transcript fits
+    // 30 s: an R2 read plus one speech-to-text call (the proxy's own budget).
+    const int st = http_json_t(HTTP_METHOD_POST, "/api/devices/transcribe", bs,
+                               resp, sizeof resp, 30000);
+    free(bs);
+    const tiny_dictate_class_t c = tiny_dictate_classify(st, resp, out, out_cap);
+    // Body text stays off the log and the feed: it is a private draft.
+    ESP_LOGI(TAG, "dictate -> HTTP %d, %s (%u B)", st, tiny_dictate_class_name(c),
+             (unsigned)(out ? strlen(out) : 0));
+    // A 401 here is reported, not counted: the 3-strike auth-halt counters
+    // belong to the node task (heartbeat/poll), and this runs on the act task.
+    if (c == TINY_DICTATE_ROUTE_MISSING) {
+        // The app in front of the worker does not serve the route even though
+        // features[] said it would (a split deploy). Stop offering the key
+        // until a heartbeat says otherwise.
+        s_feat_transcribe = 0;
+    }
+    if (c != TINY_DICTATE_OK) {
+        char note[96];
+        snprintf(note, sizeof note, "dictation failed: HTTP %d %s", st,
+                 tiny_dictate_class_name(c));
+        tiny_node_post_event("device_note", note);
+    }
+    return done(c);
+}
+
 // Defined with the relay poll it governs (~line 1060), read here so `status`
 // can report the cadence it is actually running. Forward-declared rather than
 // moved: the definition belongs next to the loop it times. (0.14.14 shipped
@@ -965,6 +1061,14 @@ extern "C" esp_err_t tiny_node_status_json(char *out, size_t cap) {
     cJSON_AddNumberToObject(s, "relay_pushes_dropped", (double)s_relay_pushes_dropped);
     if (s_relay_last_push_type[0])
         cJSON_AddStringToObject(s, "relay_last_push", s_relay_last_push_type);
+    // v28: can the composer dictate here? `dictation` is the AND of a mic on
+    // this board and the backend's features[] naming "transcribe";
+    // dictation_server is the backend half alone (null until a beat says).
+    cJSON_AddBoolToObject(s, "dictation", tiny_node_dictation_available());
+    if (s_feat_transcribe < 0) cJSON_AddNullToObject(s, "dictation_server");
+    else cJSON_AddBoolToObject(s, "dictation_server", s_feat_transcribe == 1);
+    if (s_dictate_last[0])
+        cJSON_AddStringToObject(s, "dictation_last", s_dictate_last);
     // P0-BOUNCE flight recorder: the stage the PREVIOUS boot reached (9 =
     // clean through validity mark; anything less names where it died).
     cJSON_AddNumberToObject(s, "boot_mark_prev", tiny_bootmark_prev());
