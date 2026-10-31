@@ -12,7 +12,24 @@ static int g_fail = 0;
     ++g_fail; \
 } } while (0)
 
+// ask_reservation_other_tu.cpp: the same header, compiled separately.
+bool other_tu_reserve();
+void other_tu_release();
+bool other_tu_held();
+
 int main() {
+    // One slot across translation units, the way tiny_button.cpp (producer)
+    // and tiny_node.cpp (engine) share it. Per-TU slots would let both win.
+    tiny_ask_reservation::release();
+    CHECK(other_tu_reserve());
+    CHECK(tiny_ask_reservation::held());
+    CHECK(!tiny_ask_reservation::reserve());
+    tiny_ask_reservation::release();
+    CHECK(!other_tu_held());
+    CHECK(tiny_ask_reservation::reserve());
+    CHECK(!other_tu_reserve());
+    other_tu_release();
+    CHECK(!tiny_ask_reservation::held());
     // Test isolation only; production releases only from its current owner.
     tiny_ask_reservation::release();
     CHECK(tiny_ask_reservation::reserve());

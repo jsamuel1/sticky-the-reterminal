@@ -2,6 +2,10 @@
 #pragma once
 #include <atomic>
 
+// Every function is plain `inline` (external linkage), never `static inline`:
+// the slot is a function-local static, and with internal linkage each
+// translation unit (tiny_node.cpp, tiny_button.cpp, ...) would get its OWN
+// slot. Two independent slots means no single-flight at all.
 namespace tiny_ask_reservation {
 inline std::atomic<bool> &slot() {
     static std::atomic<bool> value{false};
@@ -11,6 +15,6 @@ inline bool reserve() {
     bool expected = false;
     return slot().compare_exchange_strong(expected, true);
 }
-static inline void release() { slot().store(false); }
-static inline bool held() { return slot().load(); }
+inline void release() { slot().store(false); }
+inline bool held() { return slot().load(); }
 }  // namespace tiny_ask_reservation
