@@ -31,7 +31,10 @@ static QueueHandle_t s_ask_q = NULL;  // depth 1: an ask in flight wins
 // the mic", anything else is a typed question. Copying the text into the item
 // instead of a shared buffer keeps the two producers (AI button, keyboard ok)
 // race-free without a lock — the queue's copy semantics ARE the lock.
-struct AskReq { char text[96]; };
+// v28: `dictate_gen` != 0 makes it a DICTATION for the composer opened as
+// that generation: the transcript goes back to the shell, never to the agent.
+// text is sized TINY_ASK_TEXT_CAP, the composer's widest value.
+struct AskReq { char text[TINY_ASK_TEXT_CAP]; uint32_t dictate_gen; };
 
 static void voice_ask_task(void *) {
     AskReq req;
@@ -40,6 +43,21 @@ static void voice_ask_task(void *) {
         // Producer reserved before publishing req; adopt that count so sleep
         // cannot claim in the queue handoff gap.
         tiny_admit::Work queued(tiny_admit::AdoptReserved::Yes);
+        if (req.dictate_gen) {
+            // Transcript into the composer. The shell drops it if the human
+            // left that composer while we were listening (generation check).
+            // Deliberately LARGER than the composer (2x): a transcript longer
+            // than the field must reach tiny_dictate_merge whole, so the merge
+            // can see it overflow and say "field full". Sized to the field,
+            // classify would cut it silently first and the merge would report
+            // a clean fit for words the human never saw dropped.
+            EXT_RAM_BSS_ATTR static char words[TINY_ASK_TEXT_CAP * 2];  // PSRAM .bss
+            const int c = tiny_node_dictate(6, words, sizeof words);
+            ESP_LOGI(TAG, "dictation (gen %lu) -> %d", (unsigned long)req.dictate_gen, c);
+            if (c != 0) tiny_audio_chime("error");
+            tiny_shell_dictation_result(req.dictate_gen, c, words);
+            continue;
+        }
         const bool typed = req.text[0] != 0;
         ESP_LOGI(TAG, "%s ask starting", typed ? "typed" : "AI button: voice");
         EXT_RAM_BSS_ATTR static char out[512];  // PSRAM .bss
@@ -76,8 +94,7 @@ extern "C" esp_err_t tiny_button_request_voice_ask(void) {
 }
 
 // Typed path (keyboard "ok"). Refuses (never clips) a question over the
-// item's 95 chars — the keyboard buffer is 63, so hitting this means the
-// contract changed upstream and clipping would send a DIFFERENT question.
+// item's cap — clipping would send a DIFFERENT question.
 extern "C" esp_err_t tiny_button_request_text_ask(const char *text) {
     if (!s_ask_q) return ESP_ERR_INVALID_STATE;
     if (!text || !*text) return ESP_ERR_INVALID_ARG;
@@ -96,6 +113,26 @@ extern "C" esp_err_t tiny_button_request_text_ask(const char *text) {
     return ESP_OK;
 }
 
+extern "C" esp_err_t tiny_button_request_dictation(uint32_t gen) {
+    if (!gen) return ESP_ERR_INVALID_ARG;
+    if (tiny_lock_is_locked()) return ESP_ERR_NOT_ALLOWED;  // §11, same as voice
+    if (!s_ask_q) return ESP_ERR_INVALID_STATE;
+    AskReq req = {};
+    req.dictate_gen = gen;
+    if (!tiny_admit::work_enter()) return ESP_ERR_INVALID_STATE;
+    if (xQueueSend(s_ask_q, &req, 0) != pdTRUE) {
+        tiny_admit::work_exit();
+        ESP_LOGW(TAG, "ask/dictation already in flight - dictation dropped");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+// Long-press AI / nav worker plumbing, declared ahead of the AI click: v28's
+// composer dictation hands its e-ink repaint to the same worker.
+enum class Nav : uint8_t { kHome, kUp, kDown, kDictate };
+static bool queue_nav(Nav n);
+
 static void on_ai_click(void *, void *) {
     // §11 THE rule that is the point: a pocketed AI button must never start
     // voice capture. (request_voice_ask refuses on its own too — this gate
@@ -107,13 +144,19 @@ static void on_ai_click(void *, void *) {
         return;
     }
     tiny_lock_note_activity();
+    // v28: with a composer open, the AI button dictates INTO it. Asking the
+    // agent from the middle of a DM reply would answer a question nobody asked.
+    // The keyboard repaint blocks on e-ink, so it rides the nav worker.
+    if (tiny_shell_composer_open()) {
+        if (!queue_nav(Nav::kDictate)) sticky_buzzer_beep_double();
+        return;
+    }
     tiny_button_request_voice_ask();
 }
 
 // Long-press AI = the home button, from anywhere (M10). Renders block on the
 // e-ink busy-wait, and iot_button callbacks run on its timer task — so hand
 // the work to the shell nav queue below instead of rendering here.
-enum class Nav : uint8_t { kHome, kUp, kDown };
 static QueueHandle_t s_nav_q = NULL;
 
 static void nav_task(void *) {
@@ -124,6 +167,23 @@ static void nav_task(void *) {
         tiny_admit::Work work(tiny_admit::AdoptReserved::Yes);
         switch (n) {
             case Nav::kHome: tiny_shell_home(); break;
+            case Nav::kDictate: {
+                // v28: AI click / BOOT hold with a composer open. If the
+                // keyboard left the glass since the press, it is an ordinary
+                // voice ask again. That ask consumes the live talk arm, and is
+                // bounded like every hold-to-talk ask: a BOOT release sets
+                // s_talk_released whenever it lands (before or during the
+                // capture), which stops it at the 0.5 s floor; no release at
+                // all stops it at the 15 s cap. kArmTtlUs only expires an arm
+                // nobody consumed (e.g. this queue item was refused).
+                esp_err_t r = tiny_shell_dictate_begin();
+                if (r == ESP_ERR_NOT_SUPPORTED) r = tiny_button_request_voice_ask();
+                if (r != ESP_OK) {
+                    tiny_audio_talk_arm(false);
+                    sticky_buzzer_beep_double();  // busy: dead-end word
+                }
+                break;
+            }
             // Phone rule (M12): when the card on the glass overflows, UP/DOWN
             // are the scroll wheel; only a card that FITS lets them page.
             // Clamped at the edges — reaching the bottom does not fall through
@@ -165,10 +225,15 @@ static void nav_task(void *) {
     }
 }
 
-static void queue_nav(Nav n) {
-    if (!s_nav_q || !tiny_admit::work_enter()) return;
-    if (xQueueSend(s_nav_q, &n, 0) != pdTRUE)
+// true = queued. Callers that armed something for the item (v28 dictation
+// with a talk arm) undo it on false; the page keys ignore it.
+static bool queue_nav(Nav n) {
+    if (!s_nav_q || !tiny_admit::work_enter()) return false;
+    if (xQueueSend(s_nav_q, &n, 0) != pdTRUE) {
         tiny_admit::work_exit();  // queue full: cancel unpublished work
+        return false;
+    }
+    return true;
 }
 
 static void on_ai_long(void *, void *) {
@@ -201,6 +266,17 @@ static void on_talk_start(void *, void *) {
     }
     tiny_lock_note_activity();
     tiny_audio_talk_arm(true);
+    // v28: hold-to-talk with a composer open dictates INTO it (same rule as
+    // the reTerminal AI click). The nav worker starts it. Refused here (queue
+    // full, sleep claimed) = disarm now, so the arm cannot stretch a later
+    // unrelated capture.
+    if (tiny_shell_composer_open()) {
+        if (!queue_nav(Nav::kDictate)) {
+            tiny_audio_talk_arm(false);
+            sticky_buzzer_beep_double();
+        }
+        return;
+    }
     if (tiny_button_request_voice_ask() != ESP_OK) {
         tiny_audio_talk_arm(false);
         sticky_buzzer_beep_double();  // ask in flight: dead-end word

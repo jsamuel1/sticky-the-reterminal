@@ -8,6 +8,9 @@ amoled18-90/composite_wifi a642a1bb
 amoled18-90/home d4ab94cf
 amoled18-90/home_preview 9ec2e65b
 amoled18-90/keyboard e8e76965
+amoled18-90/keyboard_listening cf447de2
+amoled18-90/keyboard_mic de6990f6
+amoled18-90/keyboard_note e430dff9
 amoled18-90/keyboard_sym 422e6118
 amoled18-90/kv fc895e22
 amoled18-90/list d1b95a86
@@ -28,6 +31,9 @@ amoled18/composite_wifi e9dbd33c
 amoled18/home 5e46ba61
 amoled18/home_preview fe53e586
 amoled18/keyboard 8ab53759
+amoled18/keyboard_listening b595d4a1
+amoled18/keyboard_mic c1d13e26
+amoled18/keyboard_note dfe75727
 amoled18/keyboard_sym f2a50566
 amoled18/kv b681ec28
 amoled18/list c39b6a52
@@ -48,6 +54,9 @@ fnk0104s/composite_wifi 6ab96e59
 fnk0104s/home ead213ad
 fnk0104s/home_preview cc4a89e6
 fnk0104s/keyboard e1c0bfef
+fnk0104s/keyboard_listening 88d49c7f
+fnk0104s/keyboard_mic dab2570a
+fnk0104s/keyboard_note a387d2a6
 fnk0104s/keyboard_sym 06431b39
 fnk0104s/kv 7d585f58
 fnk0104s/list db69014e
@@ -68,6 +77,9 @@ reterminal-0/composite_wifi 493cd627
 reterminal-0/home a0dead43
 reterminal-0/home_preview f395e39c
 reterminal-0/keyboard 307862d5
+reterminal-0/keyboard_listening 462b7c06
+reterminal-0/keyboard_mic 3c880f96
+reterminal-0/keyboard_note 98e22108
 reterminal-0/keyboard_sym 87fe9011
 reterminal-0/kv cd71f32f
 reterminal-0/list 1106630d
@@ -88,6 +100,9 @@ reterminal-90/composite_wifi ae466810
 reterminal-90/home 0cb1ede4
 reterminal-90/home_preview 5b9fd9c1
 reterminal-90/keyboard cdb8aaa6
+reterminal-90/keyboard_listening 377a514c
+reterminal-90/keyboard_mic 6f0e2b4f
+reterminal-90/keyboard_note 83fd4f5c
 reterminal-90/keyboard_sym b683738c
 reterminal-90/kv 4b9c35c5
 reterminal-90/list 3b9e38c5

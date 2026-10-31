@@ -176,6 +176,12 @@ outlines ghost on partial refresh) and tappable menu rows with right-aligned
 notes. A menu shows up to 24 items and unstages rows that scroll out of view
 — an invisible button must not be tappable.
 
+Since grammar v28 the keyboard takes `"mic":true`, which adds a dictation
+key (`k:mic`) beside OK, and `"listening":true`, which draws that key dark
+while a clip records and transcribes. I set both myself, only on the reply
+and ask keyboards and only when dictation can work here. Without `mic` the
+keyboard is pixel-identical to before.
+
 <figure class="glass" markdown>
   <div class="glass__bezel"><img src="../img/glass/card-menu.png" alt="A menu — tappable rows with right-aligned notes; each row carries its own id." width="800" height="480" loading="lazy" decoding="async"></div>
   <figcaption markdown="span">A `menu` — tappable rows with right-aligned notes; each row carries its own id.</figcaption>

@@ -28,6 +28,7 @@
 #include "tiny/tiny_ble.h"
 #include "tiny/tiny_button.h"
 #include "tiny/tiny_agent.h"
+#include "tiny/tiny_dictate_util.h"
 
 #include "nvs.h"
 
@@ -305,8 +306,11 @@ static int s_ap_total = 0;
 // its first customer, DM compose (gate 7) its second. The purpose decides
 // what "ok"/"cancel" mean; the key handling itself never changes.
 enum class KbFor { kWifi, kCompose, kAsk };
-static KbFor s_kb_for = KbFor::kWifi;
-static char s_kb_value[64] = "";
+static volatile KbFor s_kb_for = KbFor::kWifi;
+// 160 since v28 (TINY_ASK_TEXT_CAP): dictation fills a reply far faster than
+// e-ink typing, and a 63-byte field would clip a spoken sentence. The wifi
+// password stays held to 63 by kb_cap() — the WPA2 passphrase limit.
+static char s_kb_value[TINY_ASK_TEXT_CAP] = "";
 static char s_kb_ssid[33] = "";
 // 48, matching the button-id contract in tiny_display.h (logins up to 39
 // chars). At 32 this silently clipped past 31 characters — and this variable is
@@ -316,23 +320,70 @@ static char s_kb_ssid[33] = "";
 static char s_kb_peer[48] = "";  // "@login" target when s_kb_for == kCompose
 static bool s_kb_shift = false;
 static bool s_kb_sym = false;   // v2: symbols plane (?123)
-static bool s_kb_active = false;
+static volatile bool s_kb_active = false;  // read lock-free by composer_open
+
+// ---- v28 dictation state -------------------------------------------------
+// Keys arrive on the act task and transcripts on the ask worker, so every
+// read or write of the keyboard state below goes through s_kb_mux.
+// s_kb_gen names ONE opening of a composer: a transcript carries the gen it
+// was started under and is dropped if the human has since closed, sent or
+// reopened — words never land in a field they were not spoken into.
+static SemaphoreHandle_t s_kb_mux = xSemaphoreCreateRecursiveMutex();
+struct KbLock {
+    KbLock() { if (s_kb_mux) xSemaphoreTakeRecursive(s_kb_mux, portMAX_DELAY); }
+    ~KbLock() { if (s_kb_mux) xSemaphoreGiveRecursive(s_kb_mux); }
+};
+static uint32_t s_kb_gen = 0;        // bumped on every composer open
+static uint32_t s_kb_listen_gen = 0; // != 0 while a dictation runs for that gen
+static char s_kb_note[TINY_DICTATE_TITLE_MAX + 1] = "";  // one-shot verdict title, "" = none
+
+// The dictation key belongs to composers whose words go to a person or the
+// agent; a wifi password is never spoken aloud.
+static bool kb_dictates(void) { return s_kb_for != KbFor::kWifi; }
+static size_t kb_cap(void) {
+    return s_kb_for == KbFor::kWifi ? 64 : sizeof s_kb_value;
+}
+
+static void kb_open(KbFor purpose) {
+    KbLock l;
+    s_kb_value[0] = 0;
+    s_kb_shift = false;
+    s_kb_sym = false;
+    s_kb_for = purpose;
+    s_kb_note[0] = 0;
+    s_kb_listen_gen = 0;
+    if (++s_kb_gen == 0) s_kb_gen = 1;  // 0 means "no dictation" on the wire
+    s_kb_active = true;
+}
 
 static esp_err_t render_keyboard(void) {
+    KbLock l;
     cJSON *card = cJSON_CreateObject();
     cJSON_AddStringToObject(card, "type", "keyboard");
     cJSON_AddStringToObject(card, "card_id", "kb");
-    char title[64];
-    if (s_kb_for == KbFor::kCompose)
+    char title[96];
+    if (s_kb_listen_gen)
+        snprintf(title, sizeof title, TINY_DICTATE_TITLE_LISTENING);
+    else if (s_kb_note[0])
+        snprintf(title, sizeof title, "%s", s_kb_note);
+    else if (s_kb_for == KbFor::kCompose)
         snprintf(title, sizeof title, "reply to @%s", s_kb_peer);
     else if (s_kb_for == KbFor::kAsk)
-        snprintf(title, sizeof title, "ask tiny - type your question");
+        snprintf(title, sizeof title, kb_dictates() && tiny_node_dictation_available()
+                 ? "ask - type or mic" : "ask tiny - type your question");
     else
         snprintf(title, sizeof title, "password for %s", s_kb_ssid);
     cJSON_AddStringToObject(card, "title", title);
     cJSON_AddStringToObject(card, "value", s_kb_value);
     cJSON_AddBoolToObject(card, "shift", s_kb_shift);
     cJSON_AddBoolToObject(card, "sym", s_kb_sym);
+    // v28: the mic key is drawn only where pressing it can work — a mic on
+    // this board and a backend that advertised transcribe. "listening" darkens
+    // it while a dictation for THIS opening is in flight.
+    if (kb_dictates() && tiny_node_dictation_available()) {
+        cJSON_AddBoolToObject(card, "mic", true);
+        if (s_kb_listen_gen) cJSON_AddBoolToObject(card, "listening", true);
+    }
     char *cs = cJSON_PrintUnformatted(card);
     cJSON_Delete(card);
     if (!cs) return ESP_ERR_NO_MEM;
@@ -655,76 +706,173 @@ esp_err_t tiny_shell_nav_back(void) {
 }
 
 esp_err_t tiny_shell_key(const char *id) {
-    if (!s_kb_active || !id || strncmp(id, "k:", 2) != 0) return ESP_ERR_INVALID_STATE;
+    if (!id || strncmp(id, "k:", 2) != 0) return ESP_ERR_INVALID_STATE;
     const char *k = id + 2;
-    size_t len = strlen(s_kb_value);
-    if (!strcmp(k, "shift")) { s_kb_shift = !s_kb_shift; }
-    else if (!strcmp(k, "sym")) { s_kb_sym = !s_kb_sym; s_kb_shift = false; }
-    else if (!strcmp(k, "bksp")) { if (len) s_kb_value[len - 1] = 0; }
-    else if (!strcmp(k, "space")) { if (len < sizeof s_kb_value - 1) { s_kb_value[len] = ' '; s_kb_value[len + 1] = 0; } }
-    else if (!strcmp(k, "cancel")) {
-        s_kb_active = false;
-        if (s_kb_for == KbFor::kAsk) return tiny_shell_home();
-        if (s_kb_for == KbFor::kCompose) {
+    // v28: keys (act task) and transcripts (ask worker) share this state.
+    // Hold the lock for edits; ok/cancel snapshot what they need and release
+    // it BEFORE any HTTPS or full repaint, so a transcript arriving meanwhile
+    // waits microseconds, not a send.
+    KbFor purpose;
+    EXT_RAM_BSS_ATTR static char value[TINY_ASK_TEXT_CAP];  // act task only
+    char peer[sizeof s_kb_peer];
+    char ssid[sizeof s_kb_ssid];
+    {
+        KbLock l;
+        if (!s_kb_active) return ESP_ERR_INVALID_STATE;
+        const size_t cap = kb_cap();
+        size_t len = strlen(s_kb_value);
+        const bool closing = !strcmp(k, "cancel") || !strcmp(k, "ok");
+        if (!closing) {
+            // Any edit retires a one-shot verdict note: the title goes back
+            // to naming the composer once the human is typing again.
+            s_kb_note[0] = 0;
+            if (!strcmp(k, "shift")) { s_kb_shift = !s_kb_shift; }
+            else if (!strcmp(k, "sym")) { s_kb_sym = !s_kb_sym; s_kb_shift = false; }
+            // Rune-safe: a dictated é is two bytes, and half of one is not a letter.
+            else if (!strcmp(k, "bksp")) { tiny_dictate_utf8_pop(s_kb_value); }
+            else if (!strcmp(k, "space")) { if (len + 1 < cap) { s_kb_value[len] = ' '; s_kb_value[len + 1] = 0; } }
+            else if (!strcmp(k, "mic")) {
+                if (!kb_dictates() || !tiny_node_dictation_available())
+                    return ESP_ERR_NOT_SUPPORTED;  // no key was drawn; a stale tap
+                if (s_kb_listen_gen) return ESP_ERR_INVALID_STATE;  // already listening
+                const esp_err_t r = tiny_button_request_dictation(s_kb_gen);
+                if (r == ESP_OK) s_kb_listen_gen = s_kb_gen;
+                else strlcpy(s_kb_note, tiny_dictate_note(r == ESP_ERR_NOT_ALLOWED
+                                 ? TINY_DICTATE_MIC : TINY_DICTATE_BUSY), sizeof s_kb_note);
+                // The verdict is the QUEUE's answer, captured under this lock:
+                // a caller must not re-read s_kb_listen_gen afterwards (the
+                // transcript may already have landed and cleared it). The
+                // repaint below shows "listening" or the refusal note.
+                const esp_err_t rr = render_keyboard();
+                return r != ESP_OK ? ESP_ERR_INVALID_STATE : rr;
+            }
+            else if (strlen(k) == 1) {
+                if (len + 1 < cap) { s_kb_value[len] = k[0]; s_kb_value[len + 1] = 0; }
+                s_kb_shift = false;  // shift is one-shot, like a phone
+            } else return ESP_ERR_INVALID_ARG;
+        } else {
+            // Closing the composer orphans any dictation in flight: its words
+            // come back under a generation nobody holds and are dropped.
+            s_kb_active = false;
+            s_kb_listen_gen = 0;
+            if (++s_kb_gen == 0) s_kb_gen = 1;
+        }
+        if (!closing) return render_keyboard();  // same card_id -> partial refresh
+        purpose = s_kb_for;
+        strlcpy(value, s_kb_value, sizeof value);
+        strlcpy(peer, s_kb_peer, sizeof peer);
+        strlcpy(ssid, s_kb_ssid, sizeof ssid);
+    }
+    const size_t len = strlen(value);
+    if (!strcmp(k, "cancel")) {
+        if (purpose == KbFor::kAsk) return tiny_shell_home();
+        if (purpose == KbFor::kCompose) {
             // 52: "t:" + a 48-byte peer. -Werror=format-truncation caught this
             // the moment s_kb_peer grew to hold a full-length login — the
             // compiler was right, and it is the same clipped-address bug one hop
             // downstream: cancelling a draft must return to the SAME thread.
             char t[52];
-            snprintf(t, sizeof t, "t:%s", s_kb_peer);
+            snprintf(t, sizeof t, "t:%s", peer);
             return tiny_node_messages_open(t);  // back to the thread, unsent
         }
         return render_wifi_ex(false);
     }
-    else if (!strcmp(k, "ok")) {
-        s_kb_active = false;
-        if (s_kb_for == KbFor::kAsk) {
-            if (!len) return tiny_shell_home();     // empty: never ask ""
-            // Same single-flight door as the AI button — the worker streams
-            // the answer onto the glass. The request copies the text, so the
-            // keyboard buffer is reusable the moment this returns.
-            esp_err_t ar = tiny_button_request_text_ask(s_kb_value);
-            if (ar == ESP_OK) {
-                // The worker takes seconds of HTTP before the first SSE delta
-                // paints — leaving the keyboard on glass would read as a
-                // dropped question. Echo it (cJSON: it is the human's bytes).
-                cJSON *c = cJSON_CreateObject();
-                char *cs = NULL;
-                if (c) {
-                    cJSON_AddStringToObject(c, "type", "text");
-                    cJSON_AddStringToObject(c, "card_id", "ask");
-                    cJSON_AddStringToObject(c, "title", "asking tiny");
-                    char q[96];
-                    snprintf(q, sizeof q, "you: %s", s_kb_value);
-                    cJSON_AddStringToObject(c, "body", q);
-                    cJSON_AddStringToObject(c, "footer", "thinking...");
-                    cs = cJSON_PrintUnformatted(c);
-                    cJSON_Delete(c);
-                }
-                esp_err_t r = ESP_ERR_NO_MEM;
-                if (cs) { r = tiny_display_render_card(cs); free(cs); }
-                return r;
+    // "ok"
+    if (purpose == KbFor::kAsk) {
+        if (!len) return tiny_shell_home();     // empty: never ask ""
+        // Same single-flight door as the AI button — the worker streams
+        // the answer onto the glass. The request copies the text, so the
+        // keyboard buffer is reusable the moment this returns.
+        esp_err_t ar = tiny_button_request_text_ask(value);
+        if (ar == ESP_OK) {
+            // The worker takes seconds of HTTP before the first SSE delta
+            // paints — leaving the keyboard on glass would read as a
+            // dropped question. Echo it (cJSON: it is the human's bytes).
+            cJSON *c = cJSON_CreateObject();
+            char *cs = NULL;
+            if (c) {
+                cJSON_AddStringToObject(c, "type", "text");
+                cJSON_AddStringToObject(c, "card_id", "ask");
+                cJSON_AddStringToObject(c, "title", "asking tiny");
+                char q[TINY_ASK_TEXT_CAP + 8];
+                snprintf(q, sizeof q, "you: %s", value);
+                cJSON_AddStringToObject(c, "body", q);
+                cJSON_AddStringToObject(c, "footer", "thinking...");
+                cs = cJSON_PrintUnformatted(c);
+                cJSON_Delete(c);
             }
-            // Refused: say why instead of silently eating the question.
-            return tiny_display_render_card(
-                "{\"type\":\"text\",\"card_id\":\"askbusy\",\"title\":\"one at a time\","
-                "\"body\":\"an ask is already in flight - wait for the answer, then try again\"}");
+            esp_err_t r = ESP_ERR_NO_MEM;
+            if (cs) { r = tiny_display_render_card(cs); free(cs); }
+            return r;
         }
-        if (s_kb_for == KbFor::kCompose) {
-            if (!len) {  // empty body: treat as cancel, never POST ""
-                char t[52];  // see the cancel branch above
-                snprintf(t, sizeof t, "t:%s", s_kb_peer);
-                return tiny_node_messages_open(t);
-            }
-            return tiny_node_messages_send(s_kb_peer, s_kb_value);
-        }
-        return wifi_join(s_kb_ssid, s_kb_value);
+        // Refused: say why instead of silently eating the question.
+        return tiny_display_render_card(
+            "{\"type\":\"text\",\"card_id\":\"askbusy\",\"title\":\"one at a time\","
+            "\"body\":\"an ask is already in flight - wait for the answer, then try again\"}");
     }
-    else if (strlen(k) == 1) {
-        if (len < sizeof s_kb_value - 1) { s_kb_value[len] = k[0]; s_kb_value[len + 1] = 0; }
-        s_kb_shift = false;  // shift is one-shot, like a phone
-    } else return ESP_ERR_INVALID_ARG;
-    return render_keyboard();  // same card_id -> partial refresh path
+    if (purpose == KbFor::kCompose) {
+        if (!len) {  // empty body: treat as cancel, never POST ""
+            char t[52];  // see the cancel branch above
+            snprintf(t, sizeof t, "t:%s", peer);
+            return tiny_node_messages_open(t);
+        }
+        return tiny_node_messages_send(peer, value);
+    }
+    return wifi_join(ssid, value);
+}
+
+// v28: is a composer that takes dictation open? Called from the iot_button
+// TIMER task, so it must not block: a lock-free advisory read (single-word
+// loads; the field can be a beat stale). tiny_shell_dictate_begin re-checks
+// everything under the lock on the nav worker, including that the keyboard
+// is still the card on glass.
+bool tiny_shell_composer_open(void) {
+    return s_kb_active && s_kb_for != KbFor::kWifi && tiny_node_dictation_available();
+}
+
+// v28: the button path into the same dictation the mic key starts.
+// NOT_SUPPORTED = no dictating composer is on glass (the caller asks the
+// agent instead); INVALID_STATE = one is open but cannot start now (busy).
+esp_err_t tiny_shell_dictate_begin(void) {
+    {
+        KbLock l;
+        if (!s_kb_active || !kb_dictates() || !tiny_node_dictation_available() ||
+            strcmp(tiny_display_current_card_id(), "kb") != 0)
+            return ESP_ERR_NOT_SUPPORTED;
+        if (s_kb_listen_gen) return ESP_ERR_INVALID_STATE;
+    }
+    // Repaint through the key path: it owns the lock, the note and the render,
+    // and returns ESP_OK only when the dictation was queued — decided under
+    // the lock, never re-read after it (a fast transcript clears listen_gen).
+    return tiny_shell_key("k:mic");
+}
+
+// v28: a transcript (or a verdict) back from the ask worker. Lands only in
+// the composer opening it was spoken into; a stale one is dropped.
+void tiny_shell_dictation_result(uint32_t gen, int verdict, const char *text) {
+    KbLock l;
+    if (!s_kb_active || gen != s_kb_gen || s_kb_listen_gen != gen) {
+        ESP_LOGI(TAG, "dictation for gen %lu dropped: composer is gone (now %lu%s)",
+                 (unsigned long)gen, (unsigned long)s_kb_gen,
+                 s_kb_active ? "" : ", closed");
+        return;
+    }
+    s_kb_listen_gen = 0;
+    const auto v = (tiny_dictate_class_t)verdict;
+    if (v == TINY_DICTATE_OK) {
+        const tiny_dictate_merge_t m = tiny_dictate_merge(s_kb_value, kb_cap(), text);
+        if (m == TINY_DICTATE_MERGE_CLIPPED)
+            strlcpy(s_kb_note, TINY_DICTATE_TITLE_CLIPPED, sizeof s_kb_note);
+        else if (m == TINY_DICTATE_MERGE_EMPTY)
+            strlcpy(s_kb_note, tiny_dictate_note(TINY_DICTATE_NOTHING), sizeof s_kb_note);
+        else
+            strlcpy(s_kb_note, TINY_DICTATE_TITLE_CHECK, sizeof s_kb_note);
+    } else {
+        strlcpy(s_kb_note, tiny_dictate_note(v), sizeof s_kb_note);
+    }
+    // Only repaint if the keyboard is still the card on glass (a relay
+    // render_ui may have painted over it; the next key repaints anyway).
+    if (!strcmp(tiny_display_current_card_id(), "kb")) render_keyboard();
 }
 
 esp_err_t tiny_shell_rescan_wifi(void) { return render_wifi_ex(true); }
@@ -920,12 +1068,11 @@ esp_err_t tiny_shell_menu(const char *id) {
         int i = atoi(id + 2);
         if (i < 0 || i >= s_ap_count) return ESP_ERR_INVALID_ARG;
         if (s_aps[i].open) return wifi_join(s_aps[i].ssid, "");
-        strlcpy(s_kb_ssid, s_aps[i].ssid, sizeof s_kb_ssid);
-        s_kb_value[0] = 0;
-        s_kb_shift = false;
-        s_kb_sym = false;
-        s_kb_for = KbFor::kWifi;
-        s_kb_active = true;
+        {
+            KbLock l;
+            strlcpy(s_kb_ssid, s_aps[i].ssid, sizeof s_kb_ssid);
+            kb_open(KbFor::kWifi);
+        }
         return render_keyboard();
     }
     // "wf:<idx>" = forget row; "wf:yes"/"wf:no" = the confirm card.
@@ -1010,11 +1157,12 @@ esp_err_t tiny_shell_menu(const char *id) {
 
 // Open the keyboard as a DM composer targeting @login. Called by the messages
 // app ("Reply" tap) off the touch task; renders immediately, no network.
-// Compose cap = the keyboard buffer (63 chars) — pocket replies are short, and
-// the send handler 400s over the platform's 2000-cp cap long before we can
-// type it at 2 keys/sec. Documented debt: grow with the UTF-8 font work.
+// Compose cap = the keyboard buffer (159 bytes since v28, sized for a
+// dictated sentence) — well under the platform's 2000-cp cap, which the send
+// handler would 400 rather than clip.
 esp_err_t tiny_shell_compose(const char *login) {
     if (!login || !*login) return ESP_ERR_INVALID_ARG;
+    KbLock l;
     // Refuse to open a composer we cannot address correctly. Sending to a
     // clipped login is worse than not offering to send: the human watches their
     // words go somewhere and has no way to know it was the wrong somewhere.
@@ -1025,11 +1173,7 @@ esp_err_t tiny_shell_compose(const char *login) {
                  (int)strlen(login), (unsigned)sizeof s_kb_peer);
         return ESP_ERR_INVALID_SIZE;
     }
-    s_kb_value[0] = 0;
-    s_kb_shift = false;
-    s_kb_sym = false;
-    s_kb_for = KbFor::kCompose;
-    s_kb_active = true;
+    kb_open(KbFor::kCompose);
     return render_keyboard();
 }
 
@@ -1037,11 +1181,7 @@ esp_err_t tiny_shell_compose(const char *login) {
 // Renders immediately, no network; "ok" hands the text to the single-flight
 // ask worker (tiny_button_request_text_ask) and the answer streams.
 esp_err_t tiny_shell_ask_compose(void) {
-    s_kb_value[0] = 0;
-    s_kb_shift = false;
-    s_kb_sym = false;
-    s_kb_for = KbFor::kAsk;
-    s_kb_active = true;
+    kb_open(KbFor::kAsk);
     return render_keyboard();
 }
 

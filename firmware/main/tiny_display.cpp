@@ -1490,20 +1490,24 @@ static void render_keyboard_card(Canvas &c, cJSON *root, int y, int max_y) {
     cJSON *sy  = cJSON_GetObjectItem(root, "sym");
     const bool shift = cJSON_IsBool(sh) && cJSON_IsTrue(sh);
     const bool sym   = cJSON_IsBool(sy) && cJSON_IsTrue(sy);
+    // v28: "mic":true adds a dictation key (k:mic) to the bottom row;
+    // "listening":true draws it dark while the clip records/transcribes.
+    const bool mic       = cJSON_IsTrue(cJSON_GetObjectItem(root, "mic"));
+    const bool listening = mic && cJSON_IsTrue(cJSON_GetObjectItem(root, "listening"));
     // value box
     const int vh = 44;
     {
         PenScope pen(c, s_accent);
         c.draw_rect(kMargin, y, s_w - 2 * kMargin, vh, GrayLevel::Black);
     }
-    char vbuf[64] = "";
-    if (cJSON_IsString(val)) strlcpy(vbuf, val->valuestring, sizeof vbuf);
+    char vbuf[160] = "";  // v28: the composer value grew to TINY_ASK_TEXT_CAP
+    if (cJSON_IsString(val)) ascii_fold(vbuf, sizeof vbuf, val->valuestring);
     // TAIL-CLIP (iter-4 finding): right-anchor the tail chars that fit; the
     // ellipsis '~' marks the cut. A text field shows its TAIL while you type.
     const int avail_px  = s_w - 2 * kMargin - 20 - 5;  // pad-left + caret room
     const int max_chars = avail_px / (kGlyphW * 2);
     const char *vshow = vbuf;
-    char tail[64];
+    char tail[160];
     const int vlen = (int)strlen(vbuf);
     if (vlen > max_chars && max_chars > 1) {
         snprintf(tail, sizeof tail, "%c%s", '~',
@@ -1574,22 +1578,42 @@ static void render_keyboard_card(Canvas &c, cJSON *root, int y, int max_y) {
     }
     // bottom row: cancel / plane toggle / space / period / OK — the phone
     // arrangement. Period earns a dedicated key (the single most typed
-    // symbol); the toggle names the OTHER plane, like iOS.
+    // symbol); the toggle names the OTHER plane, like iOS. v28: with "mic",
+    // the dictation key takes one unit from space, beside OK where the thumb
+    // already is.
     int ry = top + 4 * (kh + gap);
     const char *plane_lab = sym ? "abc" : "?123";
     struct { const char *lab; const char *id; int units; int scale; bool dark; }
-    specials[5] = {
+    specials[6] = {
         { "x",       "k:cancel", 1, 3, false },  // UI_SPEC §6: close reads BIG
         { plane_lab, "k:sym",    2, 2, false },
-        { "space",   "k:space",  4, 2, false },
+        { "space",   "k:space",  mic ? 3 : 4, 2, false },
         { ".",       "k:.",      1, 2, false },
+        { "mic",     "k:mic",    1, 2, listening },
         { "OK",      "k:ok",     2, 2, true  } };
+    const int nspec = 6;
     int units = 10;
-    int uw = (s_w - 2 * kMargin - gap * 4) / units;
+    int uw = (s_w - 2 * kMargin - gap * ((mic ? nspec : nspec - 1) - 1)) / units;
     int x = kMargin;
-    for (auto &sp : specials) {
+    for (int si = 0; si < nspec; ++si) {
+        auto &sp = specials[si];
+        if (!mic && !strcmp(sp.id, "k:mic")) continue;
         int w = uw * sp.units + (sp.units - 1);
-        kb_key_face(c, x, ry, w, kh, sp.lab, sp.scale, sp.dark, false);
+        if (!strcmp(sp.id, "k:mic")) {
+            // Glyph, not the word: the same capsule the home input bar draws.
+            kb_key_face(c, x, ry, w, kh, "", 2, sp.dark, false);
+            const GrayLevel ink = sp.dark ? GrayLevel::White : GrayLevel::Black;
+            const int cx = x + w / 2, cy = ry + kh / 2 - 6;
+            {
+                PenScope pen(c, sp.dark ? s_accent : (uint8_t)lcd_palette::kNeutral);
+                draw_round_rect(c, cx - 8, cy - 14, 16, 22, 8, ink);
+                c.fill_rect(cx - 5, cy - 10, 10, 14, ink);
+                c.fill_rect(cx - 1, cy + 8, 3, 6, ink);
+                c.fill_rect(cx - 9, cy + 14, 19, 3, ink);
+            }
+        } else {
+            kb_key_face(c, x, ry, w, kh, sp.lab, sp.scale, sp.dark, false);
+        }
         stage_region(x, ry, w, kh, sp.lab, sp.id);
         x += w + gap;
     }

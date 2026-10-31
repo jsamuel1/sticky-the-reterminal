@@ -64,6 +64,21 @@ void tiny_node_set_paint_breakdown(int board_ms, int disp_ms);
 // chars, for the home card's preview line. ESP_ERR_NOT_FOUND before the
 // first answer of this boot; never a guess, never stale across reboots.
 esp_err_t tiny_node_last_answer(char *out, size_t cap);
+
+// Dictation (grammar v28): speech -> text INTO an open composer. Records
+// voice_secs (hold-to-talk overrides on colour boards), uploads, POSTs
+// /api/devices/transcribe and writes the transcript into out. No agent turn,
+// nothing sent. Returns a tiny_dictate_class_t (tiny/tiny_dictate_util.h);
+// TINY_DICTATE_BUSY while an ask holds the mic. BLOCKS up to ~50 s: call it
+// from the ask worker, never the touch task.
+int tiny_node_dictate(int voice_secs, char *out, size_t out_cap);
+// True when this board has a mic AND the backend's heartbeat features[]
+// names "transcribe". The composer offers its mic key only then.
+bool tiny_node_dictation_available(void);
+// The backend half alone: -1 not yet known, 0 no, 1 yes.
+int tiny_node_dictation_server(void);
+// Last verdict name ("ok", "nothing-heard", ...), "" before the first.
+const char *tiny_node_dictation_last(void);
 #ifdef __cplusplus
 }
 #endif

@@ -9,6 +9,8 @@
 //   Home key: LONG-PRESS the AI button, from anywhere (single click stays ask)
 #pragma once
 #include "esp_err.h"
+#include <stdbool.h>
+#include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -55,6 +57,16 @@ esp_err_t tiny_shell_compose(const char *login);
 // "ok" routes the question into the same single-flight ask worker the AI
 // button uses; the answer streams onto the glass.
 esp_err_t tiny_shell_ask_compose(void);
+// v28 dictation. composer_open: a composer that takes dictation (DM reply or
+// ask; never the wifi password) is on the glass and dictation is available.
+bool tiny_shell_composer_open(void);
+// Start a dictation into the open composer (the AI / BOOT button path; the
+// mic key "k:mic" does the same). INVALID_STATE when one is already running
+// or the ask worker is busy; NOT_SUPPORTED when no composer can take it.
+esp_err_t tiny_shell_dictate_begin(void);
+// The ask worker's hand-back: verdict is a tiny_dictate_class_t. Merged only
+// into the composer opening `gen` names; anything else is dropped.
+void tiny_shell_dictation_result(uint32_t gen, int verdict, const char *text);
 #ifdef __cplusplus
 }
 #endif
