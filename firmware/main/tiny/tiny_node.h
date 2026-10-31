@@ -23,10 +23,21 @@ void      tiny_node_note_activity(void);
 esp_err_t tiny_node_sleep_now(const char *why);
 // Post a device event upstream (ui_tap etc) — used by tiny_touch.
 esp_err_t tiny_node_post_event(const char *kind, const char *json_fields);
+// The reservation primitive lives in tiny_ask_reservation.h; its host test
+// races queue-style producers against direct callers with real threads.
+// Queue producers reserve before publish. Direct callers reserve on engine
+// entry. Queue-worker-only functions below adopt the producer's slot.
+bool tiny_node_ask_reserve(void);
+void tiny_node_ask_release(void);
 // The ask engine (relay verb AND the AI button): text!=NULL → text ask,
 // else records voice_secs of mic audio. Renders the answer (card, or the
 // text as a text-card); human-readable summary into out. BLOCKS up to ~90s.
-esp_err_t tiny_node_do_ask(const char *text, int voice_secs, char *out, size_t out_cap);
+esp_err_t tiny_node_do_ask(const char *text, int voice_secs, char *out,
+                           size_t out_cap);
+// Queue-worker-only adoption path. Caller must own tiny_node_ask_reserve() and
+// must release it after all synchronous hand-back work completes.
+esp_err_t tiny_node_do_ask_reserved(const char *text, int voice_secs, char *out,
+                                    size_t out_cap);
 // Machine-readable device status as a JSON object string: fw, device_id,
 // battery_pct, charging, wifi, rssi_dbm, ssid, heap_free, uptime_s, sleeping,
 // display, card_id, auth_halted, summary. Unknown values are JSON null, never
@@ -69,9 +80,11 @@ esp_err_t tiny_node_last_answer(char *out, size_t cap);
 // voice_secs (hold-to-talk overrides on colour boards), uploads, POSTs
 // /api/devices/transcribe and writes the transcript into out. No agent turn,
 // nothing sent. Returns a tiny_dictate_class_t (tiny/tiny_dictate_util.h);
-// TINY_DICTATE_BUSY while an ask holds the mic. BLOCKS up to ~50 s: call it
-// from the ask worker, never the touch task.
+// TINY_DICTATE_BUSY while another ask/dictation owns the shared reservation.
+// BLOCKS up to ~50 s: call from the ask worker, never the touch task.
 int tiny_node_dictate(int voice_secs, char *out, size_t out_cap);
+// Queue-worker-only adoption path; same reservation contract as above.
+int tiny_node_dictate_reserved(int voice_secs, char *out, size_t out_cap);
 // True when this board has a mic AND the backend's heartbeat features[]
 // names "transcribe". The composer offers its mic key only then.
 bool tiny_node_dictation_available(void);
