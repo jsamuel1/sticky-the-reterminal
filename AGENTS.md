@@ -218,7 +218,11 @@ APPENDED to the composer value; OK still sends through the composer's own
 route, nothing is sent by dictation. Keyboard state is shared by the act
 task and the ask worker under `s_kb_mux`; every composer opening bumps
 `s_kb_gen`, and a transcript for an older generation is dropped (words
-never land in a field they were not spoken into). Pure half:
+never land in a field they were not spoken into). Button callbacks read an
+atomic committed-composer hint and the nav worker re-checks under the lock.
+The ask/dictation slot is reserved before queue publication, so a relay ask
+cannot overtake an accepted mic request. While listening, only Cancel can
+change the draft. Pure half:
 `tiny/tiny_dictate_util.h` (`tests/host/dictate_host_test.sh`). Title
 notes are ≤ 18 chars so the FNK0104S strip never cuts them. The wifi
 password keyboard never dictates. Backend route: cagataycali/tiny-technology#1.

@@ -57,8 +57,9 @@ esp_err_t tiny_shell_compose(const char *login);
 // "ok" routes the question into the same single-flight ask worker the AI
 // button uses; the answer streams onto the glass.
 esp_err_t tiny_shell_ask_compose(void);
-// v28 dictation. composer_open: a composer that takes dictation (DM reply or
-// ask; never the wifi password) is on the glass and dictation is available.
+// v28 dictation. composer_open is a lock-free advisory hint for button
+// callbacks: a composer that can take dictation is open. dictate_begin always
+// re-checks purpose, capability and card identity under the keyboard lock.
 bool tiny_shell_composer_open(void);
 // Start a dictation into the open composer (the AI / BOOT button path; the
 // mic key "k:mic" does the same). INVALID_STATE when one is already running

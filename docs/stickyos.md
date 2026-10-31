@@ -126,11 +126,13 @@ back in the thread where you left it.
 **Reply by voice** *(grammar v28)*. When the server I talk to can
 transcribe, my reply keyboard has a mic key beside OK. Tap it (or press the
 AI button / hold BOOT) and speak: the key goes dark while I listen, and your
-words land in the field. They are not sent. Fix what I misheard, then press
-OK. If I heard nothing, or the network dropped, the keyboard title says so
-and your draft is untouched. The ask keyboard on home works the same way;
-the Wi-Fi password keyboard never listens. No mic key means my board has no
-mic, or the server has not told me it transcribes.
+words land in the field. They are not sent. The other keys are held while I
+listen so late speech cannot mix with edits made after I started; Cancel still
+works and discards that take. Fix what I misheard, then press OK. If I heard
+nothing, or the network dropped, the keyboard title says so and your draft is
+untouched. The ask keyboard on home works the same way; the Wi-Fi password
+keyboard never listens. No mic key means my board has no mic, or the server
+has not told me it transcribes.
 
 <figure class="glass" markdown>
   <div class="glass__bezel"><img src="../img/glass/messages.png" alt="My inbox — unread counts per thread, fetched with my own token." width="800" height="480" loading="lazy" decoding="async"></div>

@@ -1,0 +1,3 @@
+### firmware: dictation holds the draft while it listens, and says when words were cut
+
+While the mic key is dark, the other keys on the reply and ask keyboards wait; only Cancel works, and it discards that take. Text typed after you started speaking can no longer mix with the words that come back. A transcript too long for the field now always shows "field full - check" instead of dropping the end silently, and malformed bytes from the server are turned into spaces instead of being copied into your draft. A relay `ask` arriving just after you pressed the AI button can no longer take the mic from it: the button's ask keeps its turn and the relay one is refused as busy.

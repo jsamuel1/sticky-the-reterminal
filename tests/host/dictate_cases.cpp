@@ -53,6 +53,13 @@ static void test_merge() {
     CHECK(v == TINY_DICTATE_MERGE_EMPTY);
     CHECK(merge("draft", "", 64, &v) == "draft");
     CHECK(v == TINY_DICTATE_MERGE_EMPTY);
+    // Invalid UTF-8 never lands in the composer: bad bytes collapse like
+    // other separators, while surrounding valid words stay editable.
+    CHECK(merge("", "ok \xC0\xAF now", 64, &v) == "ok now");
+    CHECK(v == TINY_DICTATE_MERGE_OK);
+    CHECK(merge("", "\x80\x80", 64, &v) == "");
+    CHECK(v == TINY_DICTATE_MERGE_EMPTY);
+    CHECK(merge("", "\xED\xA0\x80 x", 64, &v) == "x"); // UTF-8 surrogate
     // Clipping: the head that fits, verdict says so, no trailing join space.
     std::string got = merge("", "abcdefghij", 6, &v);
     CHECK(got == "abcde");
@@ -104,10 +111,22 @@ static void test_classify() {
     CHECK(tiny_dictate_classify(200, R"({"ok":true,"text":"see you at six"})", t, sizeof t) ==
           TINY_DICTATE_OK);
     CHECK(!strcmp(t, "see you at six"));
-    // Long transcript: cut to the buffer on a rune boundary.
+    // Long transcript: cut to the buffer on a rune boundary and say clipped.
     CHECK(tiny_dictate_classify(200, "{\"text\":\"aaaaaaaaaaaaaa\xC3\xA9\xC3\xA9\"}", t, sizeof t) ==
-          TINY_DICTATE_OK);
+          TINY_DICTATE_CLIPPED);
     CHECK(strlen(t) < sizeof t && valid_utf8(t));
+    CHECK(tiny_dictate_classify(200, "{\"text\":\"ok \\uD800 now\"}", t, sizeof t) ==
+          TINY_DICTATE_NOTHING);  // cJSON rejects unpaired surrogate
+    // Invalid input bytes become separators; runs still collapse in the merge.
+    CHECK(tiny_dictate_classify(200, "{\"text\":\"ok\xC0\xAFnow\"}", t, sizeof t) ==
+          TINY_DICTATE_OK);
+    CHECK(!strcmp(t, "ok  now"));
+    CHECK(valid_utf8(t));
+    char malformed_tail[64];
+    snprintf(malformed_tail, sizeof malformed_tail,
+             "{\"text\":\"ok%.*s\xC0\"}", 30, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    CHECK(tiny_dictate_classify(200, malformed_tail, t, sizeof t) ==
+          TINY_DICTATE_CLIPPED);  // valid unread runes remain before bad tail
     CHECK(tiny_dictate_classify(200, R"({"ok":true,"text":"   "})", t, sizeof t) == TINY_DICTATE_NOTHING);
     CHECK(t[0] == 0);
     CHECK(tiny_dictate_classify(200, R"({"ok":true})", t, sizeof t) == TINY_DICTATE_NOTHING);
@@ -126,8 +145,8 @@ static void test_classify() {
     CHECK(tiny_dictate_classify(0, "", t, sizeof t) == TINY_DICTATE_TRANSPORT);
     CHECK(tiny_dictate_classify(424, R"({"error":"registry unreachable"})", t, sizeof t) == TINY_DICTATE_SERVER);
     CHECK(tiny_dictate_classify(500, "oops", t, sizeof t) == TINY_DICTATE_SERVER);
-    // Every verdict has a stable name and every failure a note.
-    for (int c = TINY_DICTATE_OK; c <= TINY_DICTATE_UNAVAILABLE; ++c) {
+    // Every verdict has a stable name; every failure/truncation has a note.
+    for (int c = TINY_DICTATE_OK; c <= TINY_DICTATE_CLIPPED; ++c) {
         const auto k = (tiny_dictate_class_t)c;
         CHECK(strcmp(tiny_dictate_class_name(k), "?") != 0);
         CHECK((k == TINY_DICTATE_OK) == (tiny_dictate_note(k)[0] == 0));
@@ -155,6 +174,55 @@ int main() {
     test_pop();
     test_classify();
     test_feature();
+    // Cross-task routing reads only the atomic committed-composer hint, then
+    // re-checks lock-owned keyboard state before capture admission.
+    const std::string shell_src = [] {
+        FILE *f = fopen("../../firmware/main/tiny_shell.cpp", "rb");
+        CHECK(f != nullptr);
+        if (!f) return std::string{};
+        std::string s;
+        char chunk[1024];
+        size_t n = 0;
+        while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) s.append(chunk, n);
+        fclose(f);
+        return s;
+    }();
+    CHECK(shell_src.find("static std::atomic<bool> s_dictating_composer_open") !=
+          std::string::npos);
+    CHECK(shell_src.find("return s_kb_active && s_kb_for") == std::string::npos);
+    CHECK(shell_src.find("if (!s_kb_active || !kb_dictates()") != std::string::npos);
+
+    // One atomic reservation spans queue publication through worker hand-back.
+    // Direct relay calls compete for the same slot, so either producer wins;
+    // never both. A producer that cannot reserve publishes nothing.
+    const auto read_source = [](const char *path) {
+        FILE *f = fopen(path, "rb");
+        CHECK(f != nullptr);
+        if (!f) return std::string{};
+        std::string s;
+        char chunk[1024];
+        size_t n = 0;
+        while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) s.append(chunk, n);
+        fclose(f);
+        return s;
+    };
+    const std::string button_src = read_source("../../firmware/main/tiny_button.cpp");
+    const std::string node_src = read_source("../../firmware/main/tiny_node.cpp");
+    const size_t reserve = button_src.find("AskReservation ask_slot;");
+    const size_t publish = button_src.find("xQueueSend(s_ask_q, &req, 0)");
+    CHECK(reserve != std::string::npos && publish != std::string::npos &&
+          reserve < publish);
+    CHECK(button_src.find("tiny_node_dictate_reserved(") != std::string::npos);
+    CHECK(button_src.find("tiny_node_do_ask_reserved(") != std::string::npos);
+    CHECK(button_src.find("tiny_node_ask_release();") != std::string::npos);
+    CHECK(node_src.find("reserved ? tiny_ask_reservation::held()") !=
+          std::string::npos);
+    CHECK(node_src.find("return tiny_node_do_ask_impl(text, voice_secs, out, out_cap, false);") !=
+          std::string::npos);
+    CHECK(node_src.find("return tiny_node_do_ask_impl(text, voice_secs, out, out_cap, true);") !=
+          std::string::npos);
+    CHECK(node_src.find("s_ask_mux") == std::string::npos);
+
     if (g_fail) {
         fprintf(stderr, "dictate host test: %d FAILED\n", g_fail);
         return 1;
