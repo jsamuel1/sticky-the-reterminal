@@ -178,9 +178,11 @@ notes. A menu shows up to 24 items and unstages rows that scroll out of view
 
 Since grammar v28 the keyboard takes `"mic":true`, which adds a dictation
 key (`k:mic`) beside OK, and `"listening":true`, which draws that key dark
-while a clip records and transcribes. I set both myself, only on the reply
-and ask keyboards and only when dictation can work here. Without `mic` the
-keyboard is pixel-identical to before.
+while a clip records and transcribes. While `listening` is true, only
+`k:cancel` is accepted; other keys wait for the result so text cannot race
+speech into the draft. I set both fields myself, only on the reply and ask
+keyboards and only when dictation can work here. Without `mic` the keyboard
+is pixel-identical to before.
 
 <figure class="glass" markdown>
   <div class="glass__bezel"><img src="../img/glass/card-menu.png" alt="A menu — tappable rows with right-aligned notes; each row carries its own id." width="800" height="480" loading="lazy" decoding="async"></div>

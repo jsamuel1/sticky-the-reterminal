@@ -39,6 +39,7 @@ typedef enum {
     TINY_DICTATE_UPLOAD,        // the recording never reached the media store
     TINY_DICTATE_BUSY,          // the mic is in use (an ask is in flight)
     TINY_DICTATE_UNAVAILABLE,   // no mic, or the server does not advertise it
+    TINY_DICTATE_CLIPPED,       // transcript staging cap cut the server text
 } tiny_dictate_class_t;
 
 static inline const char *tiny_dictate_class_name(tiny_dictate_class_t c) {
@@ -54,6 +55,7 @@ static inline const char *tiny_dictate_class_name(tiny_dictate_class_t c) {
         case TINY_DICTATE_UPLOAD:        return "upload";
         case TINY_DICTATE_BUSY:          return "busy";
         case TINY_DICTATE_UNAVAILABLE:   return "unavailable";
+        case TINY_DICTATE_CLIPPED:       return "clipped";
     }
     return "?";
 }
@@ -75,6 +77,7 @@ static inline const char *tiny_dictate_note(tiny_dictate_class_t c) {
         case TINY_DICTATE_UPLOAD:        return "upload failed";
         case TINY_DICTATE_BUSY:          return "mic busy - wait";
         case TINY_DICTATE_UNAVAILABLE:   return "no dictation here";
+        case TINY_DICTATE_CLIPPED:       return "field full - check";
     }
     return "";
 }
@@ -114,6 +117,28 @@ static inline void tiny_dictate_utf8_pop(char *s) {
     s[i] = 0;
 }
 
+// Validate one UTF-8 rune and report its byte length. Invalid bytes are
+// separators at this trust boundary, never copied into the editable draft.
+static inline bool tiny_dictate_utf8_valid(const unsigned char *s, size_t n,
+                                           size_t *rune_len) {
+    const unsigned char c = s[0];
+    size_t need = 0;
+    if (c < 0x80) need = 1;
+    else if (c >= 0xC2 && c <= 0xDF) need = 2;
+    else if (c >= 0xE0 && c <= 0xEF) need = 3;
+    else if (c >= 0xF0 && c <= 0xF4) need = 4;
+    else return false;
+    if (need > n) return false;
+    for (size_t i = 1; i < need; ++i)
+        if ((s[i] & 0xC0) != 0x80) return false;
+    if (need == 3 && c == 0xE0 && s[1] < 0xA0) return false;  // overlong
+    if (need == 3 && c == 0xED && s[1] >= 0xA0) return false; // surrogate
+    if (need == 4 && c == 0xF0 && s[1] < 0x90) return false;  // overlong
+    if (need == 4 && c == 0xF4 && s[1] >= 0x90) return false; // > U+10FFFF
+    if (rune_len) *rune_len = need;
+    return true;
+}
+
 // Append `spoken` to the composer value `buf` (capacity `cap`, NUL included).
 // Control bytes become spaces, whitespace runs collapse to one space, ends are
 // trimmed; a single space joins it to existing text that does not already end
@@ -132,24 +157,33 @@ static inline tiny_dictate_merge_t tiny_dictate_merge(char *buf, size_t cap,
     bool any = false;
     bool pending_space = len > 0 && buf[len - 1] != ' ';
     bool clipped = false;
-    for (const char *p = spoken; *p; ++p) {
-        const unsigned char ch = (unsigned char)*p;
+    const unsigned char *p = (const unsigned char *)spoken;
+    const size_t spoken_len = strlen(spoken);
+    size_t pos = 0;
+    while (pos < spoken_len) {
+        const unsigned char ch = p[pos];
         const bool ws = ch < 0x20 || ch == 0x7F || ch == ' ';
         if (ws) {
             if (any) pending_space = true;  // collapse; leading ones dropped
+            ++pos;
+            continue;
+        }
+        size_t rune = 0;
+        if (!tiny_dictate_utf8_valid(p + pos, spoken_len - pos, &rune)) {
+            if (any) pending_space = true;  // invalid bytes become one space
+            ++pos;
             continue;
         }
         any = true;  // there IS something to say, whether or not it fits
-        if (pending_space) {
-            if (len + 1 >= cap) { clipped = true; break; }
-            buf[len++] = ' ';
-            pending_space = false;
-        }
-        if (len + 1 >= cap) { clipped = true; break; }
-        buf[len++] = (char)ch;
+        const size_t join = pending_space ? 1 : 0;
+        if (len + join + rune >= cap) { clipped = true; break; }
+        if (pending_space) buf[len++] = ' ';
+        memcpy(buf + len, p + pos, rune);
+        len += rune;
+        pos += rune;
+        pending_space = false;
     }
-    // Never leave a half rune, and never end on the joining space.
-    len = start + tiny_dictate_utf8_floor(buf + start, len - start);
+    // Every rune was admitted atomically, so len already ends on a boundary.
     while (len > start && buf[len - 1] == ' ') --len;
     buf[len] = 0;
     if (!any) return TINY_DICTATE_MERGE_EMPTY;
@@ -170,16 +204,44 @@ static inline tiny_dictate_class_t tiny_dictate_classify(int st, const char *bod
     tiny_dictate_class_t c;
     if (st == 200) {
         if (cJSON_IsString(t) && t->valuestring && t->valuestring[0] && text && cap) {
+            // Stage complete, valid UTF-8 runes, normalizing AS WE COPY so
+            // capacity is spent only on words: whitespace, control bytes and
+            // invalid bytes are separators, leading ones are dropped, runs
+            // collapse to one space, and a separator is written only when a
+            // word follows it. Normalizing after a raw copy let 319 leading
+            // spaces fill a 320-byte buffer and the words behind them vanish
+            // as "nothing heard".
+            const unsigned char *src = (const unsigned char *)t->valuestring;
             const size_t n = strlen(t->valuestring);
-            const size_t keep = tiny_dictate_utf8_floor(t->valuestring, n < cap ? n : cap - 1);
-            memcpy(text, t->valuestring, keep);
+            size_t read = 0, keep = 0;
+            bool pending_space = false;
+            // Clipped means a WORD rune was left unread. Unread separators
+            // (trailing spaces, invalid bytes) are sanitizing, not loss.
+            bool transcript_clipped = false;
+            while (read < n) {
+                const unsigned char ch = src[read];
+                size_t rune = 0;
+                const bool valid = tiny_dictate_utf8_valid(src + read, n - read, &rune);
+                if (!valid || ch < 0x20 || ch == 0x7F || ch == ' ') {
+                    if (keep) pending_space = true;
+                    read += valid ? rune : 1;
+                    continue;
+                }
+                const size_t join = pending_space ? 1 : 0;
+                if (keep + join + rune >= cap) { transcript_clipped = true; break; }
+                if (pending_space) text[keep++] = ' ';
+                memcpy(text + keep, src + read, rune);
+                keep += rune;
+                read += rune;
+                pending_space = false;
+            }
             text[keep] = 0;
-            // Blank after trimming is "nothing heard", not success.
-            bool blank = true;
-            for (size_t i = 0; i < keep; ++i)
-                if ((unsigned char)text[i] > 0x20) { blank = false; break; }
-            c = blank ? TINY_DICTATE_NOTHING : TINY_DICTATE_OK;
-            if (blank) text[0] = 0;
+            // Clipped wins over blank: words that did not fit were still
+            // spoken, and the glass must say so rather than "didn't catch
+            // that". Blank with nothing unread is "nothing heard".
+            c = transcript_clipped ? TINY_DICTATE_CLIPPED
+                : keep == 0        ? TINY_DICTATE_NOTHING
+                                   : TINY_DICTATE_OK;
         } else {
             c = TINY_DICTATE_NOTHING;
         }

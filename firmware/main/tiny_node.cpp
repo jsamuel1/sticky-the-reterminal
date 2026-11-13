@@ -67,6 +67,7 @@
 #include "tiny/tiny_onboard.h"
 #include "tiny/tiny_pair.h"
 #include "tiny/tiny_dictate_util.h"
+#include "tiny/tiny_ask_reservation.h"
 #include "esp_timer.h"
 #include <atomic>
 
@@ -549,13 +550,35 @@ extern "C" esp_err_t tiny_node_last_answer(char *out, size_t cap) {
     return ESP_OK;
 }
 
-// ONE ask at a time, across ALL callers. The AI button already single-flights
-// itself through its queue, but the relay dispatch runs on the node task —
-// a ghost button press racing a relay ask made both write the same static
-// buffers and the same display stream, and the streamed summary came back
-// with the two answers' words INTERLEAVED (seen on glass in 0.15.2). The panel is one surface and the mic is one mic: a second
-// concurrent ask has no correct output, so it is refused, not queued.
-static SemaphoreHandle_t s_ask_mux = NULL;
+// ONE ask at a time, across ALL callers. Queue producers reserve before
+// publishing, closing the enqueue-to-worker gap against relay/direct asks.
+// Direct callers reserve on entry. The owner releases only after the complete
+// ask or dictation settles.
+extern "C" bool tiny_node_ask_reserve(void) {
+    return tiny_ask_reservation::reserve();
+}
+
+extern "C" void tiny_node_ask_release(void) { tiny_ask_reservation::release(); }
+
+struct AskGuard {
+    bool admitted;
+    bool releases;
+    explicit AskGuard(bool reserved)
+        : admitted(reserved ? tiny_ask_reservation::held()
+                            : tiny_node_ask_reserve()),
+          releases(!reserved && admitted) {}
+    ~AskGuard() { if (releases) tiny_node_ask_release(); }
+    explicit operator bool() const { return admitted; }
+    AskGuard(const AskGuard &) = delete;
+    AskGuard &operator=(const AskGuard &) = delete;
+};
+
+// `reserved` is accepted only from the private button worker path. It verifies
+// the producer's slot still exists; direct calls must win reserve() themselves.
+static esp_err_t tiny_node_do_ask_impl(const char *text, int voice_secs,
+                                       char *out, size_t out_cap, bool reserved);
+static int tiny_node_dictate_impl(int voice_secs, char *out, size_t out_cap,
+                                  bool reserved);
 
 // §16 drain context. The node task's drain re-uses do_ask, but a drained ask
 // must NOT re-enqueue on transport failure (the text is STILL AT THE HEAD —
@@ -590,23 +613,28 @@ static void voice_fail_card(const char *title, const char *why, esp_err_t r) {
 
 extern "C" esp_err_t tiny_node_do_ask(const char *text, int voice_secs,
                                       char *out, size_t out_cap) {
-    // Work/sleep admission (tiny_admit.h): an ask records the mic, holds a
-    // TLS socket and paints its answer for up to ~90 s, and every ask path
-    // (relay verb, AI/BOOT button, typed, queued drain) comes through here,
-    // so the PWR key or auto-sleep cannot power down in the middle of one.
+    return tiny_node_do_ask_impl(text, voice_secs, out, out_cap, false);
+}
+
+extern "C" esp_err_t tiny_node_do_ask_reserved(const char *text, int voice_secs,
+                                               char *out, size_t out_cap) {
+    return tiny_node_do_ask_impl(text, voice_secs, out, out_cap, true);
+}
+
+static esp_err_t tiny_node_do_ask_impl(const char *text, int voice_secs,
+                                       char *out, size_t out_cap, bool reserved) {
+    AskGuard ask_guard(reserved);
+    if (!ask_guard) {
+        snprintf(out, out_cap, "ask already in flight - one panel, one answer");
+        return ESP_ERR_INVALID_STATE;
+    }
+    // A queued producer owns a sleep-work reservation through this whole
+    // call; the engine's nested Work count protects direct callers too.
     tiny_admit::Work work;
     if (!work) {
         snprintf(out, out_cap, "ask refused: going to sleep");
         return ESP_ERR_INVALID_STATE;
     }
-    if (!s_ask_mux) s_ask_mux = xSemaphoreCreateMutex();
-    if (!s_ask_mux || xSemaphoreTake(s_ask_mux, 0) != pdTRUE) {
-        snprintf(out, out_cap, "ask already in flight - one panel, one answer");
-        return ESP_ERR_INVALID_STATE;
-    }
-    // RAII release: this function has six return paths and a manual give on
-    // each would eventually miss one (that is how locks die).
-    struct AskGuard { ~AskGuard() { xSemaphoreGive(s_ask_mux); } } guard;
     // Status light (FNK0104S; no-op elsewhere): amber while the ask is in
     // flight, off when it returns, red if it painted askfail. A voice ask
     // arms PENDING (dark); the capture shows blue, and its OK end promotes
@@ -882,18 +910,26 @@ extern "C" int tiny_node_dictation_server(void) { return s_feat_transcribe.load(
 extern "C" const char *tiny_node_dictation_last(void) { return s_dictate_last.load(); }
 
 extern "C" int tiny_node_dictate(int voice_secs, char *out, size_t out_cap) {
+    return tiny_node_dictate_impl(voice_secs, out, out_cap, false);
+}
+
+extern "C" int tiny_node_dictate_reserved(int voice_secs, char *out,
+                                          size_t out_cap) {
+    return tiny_node_dictate_impl(voice_secs, out, out_cap, true);
+}
+
+static int tiny_node_dictate_impl(int voice_secs, char *out, size_t out_cap,
+                                  bool reserved) {
     if (out && out_cap) out[0] = 0;
     auto done = [](tiny_dictate_class_t c) {
         s_dictate_last.store(tiny_dictate_class_name(c));
         return (int)c;
     };
     if (!tiny_board_caps()->mic) return done(TINY_DICTATE_UNAVAILABLE);
+    AskGuard ask_guard(reserved);
+    if (!ask_guard) return done(TINY_DICTATE_BUSY);
     tiny_admit::Work work;  // mic + TLS: never under a sleep
     if (!work) return done(TINY_DICTATE_BUSY);
-    if (!s_ask_mux) s_ask_mux = xSemaphoreCreateMutex();
-    if (!s_ask_mux || xSemaphoreTake(s_ask_mux, 0) != pdTRUE)
-        return done(TINY_DICTATE_BUSY);
-    struct Give { ~Give() { xSemaphoreGive(s_ask_mux); } } give;
     if (!tiny_wifi_is_up()) return done(TINY_DICTATE_TRANSPORT);
 
     uint8_t *wav = NULL;

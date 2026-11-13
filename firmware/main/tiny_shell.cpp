@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <atomic>
 
 #include "cJSON.h"
 #include "esp_log.h"
@@ -306,7 +307,7 @@ static int s_ap_total = 0;
 // its first customer, DM compose (gate 7) its second. The purpose decides
 // what "ok"/"cancel" mean; the key handling itself never changes.
 enum class KbFor { kWifi, kCompose, kAsk };
-static volatile KbFor s_kb_for = KbFor::kWifi;
+static KbFor s_kb_for = KbFor::kWifi;
 // 160 since v28 (TINY_ASK_TEXT_CAP): dictation fills a reply far faster than
 // e-ink typing, and a 63-byte field would clip a spoken sentence. The wifi
 // password stays held to 63 by kb_cap() — the WPA2 passphrase limit.
@@ -320,11 +321,11 @@ static char s_kb_ssid[33] = "";
 static char s_kb_peer[48] = "";  // "@login" target when s_kb_for == kCompose
 static bool s_kb_shift = false;
 static bool s_kb_sym = false;   // v2: symbols plane (?123)
-static volatile bool s_kb_active = false;  // read lock-free by composer_open
+static bool s_kb_active = false;
 
 // ---- v28 dictation state -------------------------------------------------
-// Keys arrive on the act task and transcripts on the ask worker, so every
-// read or write of the keyboard state below goes through s_kb_mux.
+// Keyboard state below is owned by s_kb_mux. Button callbacks use the atomic
+// hint because they cannot block; real admission re-checks under this mux.
 // s_kb_gen names ONE opening of a composer: a transcript carries the gen it
 // was started under and is dropped if the human has since closed, sent or
 // reopened — words never land in a field they were not spoken into.
@@ -336,6 +337,15 @@ struct KbLock {
 static uint32_t s_kb_gen = 0;        // bumped on every composer open
 static uint32_t s_kb_listen_gen = 0; // != 0 while a dictation runs for that gen
 static char s_kb_note[TINY_DICTATE_TITLE_MAX + 1] = "";  // one-shot verdict title, "" = none
+// Lock-free advisory bit for the iot_button timer task. Real admission always
+// re-checks purpose, generation, capability and card identity under s_kb_mux.
+static std::atomic<bool> s_dictating_composer_open{false};
+
+static void kb_publish_hint(esp_err_t render_result) {
+    s_dictating_composer_open.store(
+        render_result == ESP_OK && s_kb_active && s_kb_for != KbFor::kWifi &&
+        !strcmp(tiny_display_current_card_id(), "kb"));
+}
 
 // The dictation key belongs to composers whose words go to a person or the
 // agent; a wifi password is never spoken aloud.
@@ -354,6 +364,7 @@ static void kb_open(KbFor purpose) {
     s_kb_listen_gen = 0;
     if (++s_kb_gen == 0) s_kb_gen = 1;  // 0 means "no dictation" on the wire
     s_kb_active = true;
+    s_dictating_composer_open.store(false);  // published only after kb reaches glass
 }
 
 static esp_err_t render_keyboard(void) {
@@ -389,6 +400,7 @@ static esp_err_t render_keyboard(void) {
     if (!cs) return ESP_ERR_NO_MEM;
     esp_err_t r = tiny_display_render_card(cs);
     free(cs);
+    kb_publish_hint(r);
     return r;
 }
 
@@ -721,10 +733,15 @@ esp_err_t tiny_shell_key(const char *id) {
         if (!s_kb_active) return ESP_ERR_INVALID_STATE;
         const size_t cap = kb_cap();
         size_t len = strlen(s_kb_value);
+        // Every edit retires a one-shot verdict note: the title goes back to
+        // naming the composer once the human is typing again. While dictation
+        // is running, only cancel remains active; edits/send cannot race speech
+        // into a draft state changed after the human pressed mic. The mic key's
+        // repeat also returns the same busy verdict.
+        if (s_kb_listen_gen && strcmp(k, "cancel") != 0)
+            return ESP_ERR_INVALID_STATE;
         const bool closing = !strcmp(k, "cancel") || !strcmp(k, "ok");
         if (!closing) {
-            // Any edit retires a one-shot verdict note: the title goes back
-            // to naming the composer once the human is typing again.
             s_kb_note[0] = 0;
             if (!strcmp(k, "shift")) { s_kb_shift = !s_kb_shift; }
             else if (!strcmp(k, "sym")) { s_kb_sym = !s_kb_sym; s_kb_shift = false; }
@@ -734,7 +751,6 @@ esp_err_t tiny_shell_key(const char *id) {
             else if (!strcmp(k, "mic")) {
                 if (!kb_dictates() || !tiny_node_dictation_available())
                     return ESP_ERR_NOT_SUPPORTED;  // no key was drawn; a stale tap
-                if (s_kb_listen_gen) return ESP_ERR_INVALID_STATE;  // already listening
                 const esp_err_t r = tiny_button_request_dictation(s_kb_gen);
                 if (r == ESP_OK) s_kb_listen_gen = s_kb_gen;
                 else strlcpy(s_kb_note, tiny_dictate_note(r == ESP_ERR_NOT_ALLOWED
@@ -754,6 +770,7 @@ esp_err_t tiny_shell_key(const char *id) {
             // Closing the composer orphans any dictation in flight: its words
             // come back under a generation nobody holds and are dropped.
             s_kb_active = false;
+            s_dictating_composer_open.store(false);
             s_kb_listen_gen = 0;
             if (++s_kb_gen == 0) s_kb_gen = 1;
         }
@@ -822,12 +839,11 @@ esp_err_t tiny_shell_key(const char *id) {
 }
 
 // v28: is a composer that takes dictation open? Called from the iot_button
-// TIMER task, so it must not block: a lock-free advisory read (single-word
-// loads; the field can be a beat stale). tiny_shell_dictate_begin re-checks
-// everything under the lock on the nav worker, including that the keyboard
-// is still the card on glass.
+// TIMER task, so it must not block. The atomic bit is only a routing hint;
+// tiny_shell_dictate_begin re-checks keyboard state, capability and card
+// identity under the lock on the nav worker.
 bool tiny_shell_composer_open(void) {
-    return s_kb_active && s_kb_for != KbFor::kWifi && tiny_node_dictation_available();
+    return s_dictating_composer_open.load() && tiny_node_dictation_available();
 }
 
 // v28: the button path into the same dictation the mic key starts.
@@ -859,9 +875,9 @@ void tiny_shell_dictation_result(uint32_t gen, int verdict, const char *text) {
     }
     s_kb_listen_gen = 0;
     const auto v = (tiny_dictate_class_t)verdict;
-    if (v == TINY_DICTATE_OK) {
+    if (v == TINY_DICTATE_OK || v == TINY_DICTATE_CLIPPED) {
         const tiny_dictate_merge_t m = tiny_dictate_merge(s_kb_value, kb_cap(), text);
-        if (m == TINY_DICTATE_MERGE_CLIPPED)
+        if (v == TINY_DICTATE_CLIPPED || m == TINY_DICTATE_MERGE_CLIPPED)
             strlcpy(s_kb_note, TINY_DICTATE_TITLE_CLIPPED, sizeof s_kb_note);
         else if (m == TINY_DICTATE_MERGE_EMPTY)
             strlcpy(s_kb_note, tiny_dictate_note(TINY_DICTATE_NOTHING), sizeof s_kb_note);
@@ -871,7 +887,7 @@ void tiny_shell_dictation_result(uint32_t gen, int verdict, const char *text) {
         strlcpy(s_kb_note, tiny_dictate_note(v), sizeof s_kb_note);
     }
     // Only repaint if the keyboard is still the card on glass (a relay
-    // render_ui may have painted over it; the next key repaints anyway).
+    // render_ui may have painted over it; the next key repaints the draft).
     if (!strcmp(tiny_display_current_card_id(), "kb")) render_keyboard();
 }
 

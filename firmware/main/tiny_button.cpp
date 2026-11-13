@@ -36,12 +36,27 @@ static QueueHandle_t s_ask_q = NULL;  // depth 1: an ask in flight wins
 // text is sized TINY_ASK_TEXT_CAP, the composer's widest value.
 struct AskReq { char text[TINY_ASK_TEXT_CAP]; uint32_t dictate_gen; };
 
+// Queue producers reserve the node's global ask slot before publish so direct
+// relay asks cannot slip into the enqueue-to-receive gap.
+class AskReservation {
+public:
+    AskReservation() : owned_(tiny_node_ask_reserve()) {}
+    ~AskReservation() { if (owned_) tiny_node_ask_release(); }
+    explicit operator bool() const { return owned_; }
+    void transfer() { owned_ = false; }
+    AskReservation(const AskReservation &) = delete;
+    AskReservation &operator=(const AskReservation &) = delete;
+
+private:
+    bool owned_;
+};
+
 static void voice_ask_task(void *) {
     AskReq req;
     for (;;) {
         if (xQueueReceive(s_ask_q, &req, portMAX_DELAY) != pdTRUE) continue;
-        // Producer reserved before publishing req; adopt that count so sleep
-        // cannot claim in the queue handoff gap.
+        // Producer reserved both sleep-work and the node's one ask slot before
+        // publishing req. The called engine adopts the ask reservation.
         tiny_admit::Work queued(tiny_admit::AdoptReserved::Yes);
         if (req.dictate_gen) {
             // Transcript into the composer. The shell drops it if the human
@@ -52,22 +67,28 @@ static void voice_ask_task(void *) {
             // classify would cut it silently first and the merge would report
             // a clean fit for words the human never saw dropped.
             EXT_RAM_BSS_ATTR static char words[TINY_ASK_TEXT_CAP * 2];  // PSRAM .bss
-            const int c = tiny_node_dictate(6, words, sizeof words);
+            const int c = tiny_node_dictate_reserved(6, words, sizeof words);
             ESP_LOGI(TAG, "dictation (gen %lu) -> %d", (unsigned long)req.dictate_gen, c);
             if (c != 0) tiny_audio_chime("error");
             tiny_shell_dictation_result(req.dictate_gen, c, words);
+            // Every call above is synchronous today. Keep release after the
+            // shell hand-back: this explicit edge owns the producer's slot.
+            tiny_node_ask_release();
             continue;
         }
         const bool typed = req.text[0] != 0;
         ESP_LOGI(TAG, "%s ask starting", typed ? "typed" : "AI button: voice");
         EXT_RAM_BSS_ATTR static char out[512];  // PSRAM .bss
-        esp_err_t r = tiny_node_do_ask(typed ? req.text : NULL, 6, out, sizeof out);
+        esp_err_t r = tiny_node_do_ask_reserved(typed ? req.text : NULL, 6,
+                                                out, sizeof out);
         ESP_LOGI(TAG, "%s ask -> %s: %s", typed ? "typed" : "AI button",
                  esp_err_to_name(r), out);
         if (r != ESP_OK) tiny_audio_chime("error");
         char note[560];
         snprintf(note, sizeof note, "%s ask: %s", typed ? "typed" : "AI button", out);
         tiny_node_post_event("device_note", note);
+        // Keep the reservation through the observable device-note hand-back.
+        tiny_node_ask_release();
     }
 }
 
@@ -82,14 +103,18 @@ extern "C" esp_err_t tiny_button_request_voice_ask(void) {
     }
     AskReq req = {};
     if (!s_ask_q) return ESP_ERR_INVALID_STATE;
+    AskReservation ask_slot;
+    if (!ask_slot) return ESP_ERR_INVALID_STATE;
     // Reserve before publishing: a check followed by enqueue has a TOCTOU
     // gap where sleep can claim and make an accepted ask disappear.
     if (!tiny_admit::work_enter()) return ESP_ERR_INVALID_STATE;
     if (xQueueSend(s_ask_q, &req, 0) != pdTRUE) {
+        // AskReservation still owns the slot and releases it on return.
         tiny_admit::work_exit();
         ESP_LOGW(TAG, "ask already in flight - request dropped");
         return ESP_ERR_INVALID_STATE;
     }
+    ask_slot.transfer();  // worker/engine adopts node reservation
     return ESP_OK;
 }
 
@@ -104,12 +129,16 @@ extern "C" esp_err_t tiny_button_request_text_ask(const char *text) {
                  (int)strlen(text), (unsigned)sizeof req.text);
         return ESP_ERR_INVALID_SIZE;
     }
+    AskReservation ask_slot;
+    if (!ask_slot) return ESP_ERR_INVALID_STATE;
     if (!tiny_admit::work_enter()) return ESP_ERR_INVALID_STATE;
     if (xQueueSend(s_ask_q, &req, 0) != pdTRUE) {
+        // AskReservation still owns the slot and releases it on return.
         tiny_admit::work_exit();
         ESP_LOGW(TAG, "ask already in flight - typed request dropped");
         return ESP_ERR_INVALID_STATE;
     }
+    ask_slot.transfer();  // worker/engine adopts node reservation
     return ESP_OK;
 }
 
@@ -119,12 +148,16 @@ extern "C" esp_err_t tiny_button_request_dictation(uint32_t gen) {
     if (!s_ask_q) return ESP_ERR_INVALID_STATE;
     AskReq req = {};
     req.dictate_gen = gen;
+    AskReservation ask_slot;
+    if (!ask_slot) return ESP_ERR_INVALID_STATE;
     if (!tiny_admit::work_enter()) return ESP_ERR_INVALID_STATE;
     if (xQueueSend(s_ask_q, &req, 0) != pdTRUE) {
+        // AskReservation still owns the slot and releases it on return.
         tiny_admit::work_exit();
         ESP_LOGW(TAG, "ask/dictation already in flight - dictation dropped");
         return ESP_ERR_INVALID_STATE;
     }
+    ask_slot.transfer();  // worker/engine adopts node reservation
     return ESP_OK;
 }
 
