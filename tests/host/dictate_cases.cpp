@@ -117,10 +117,10 @@ static void test_classify() {
     CHECK(strlen(t) < sizeof t && valid_utf8(t));
     CHECK(tiny_dictate_classify(200, "{\"text\":\"ok \\uD800 now\"}", t, sizeof t) ==
           TINY_DICTATE_NOTHING);  // cJSON rejects unpaired surrogate
-    // Invalid input bytes become separators; runs still collapse in the merge.
+    // Invalid input bytes become separators and collapse during staging.
     CHECK(tiny_dictate_classify(200, "{\"text\":\"ok\xC0\xAFnow\"}", t, sizeof t) ==
           TINY_DICTATE_OK);
-    CHECK(!strcmp(t, "ok  now"));
+    CHECK(!strcmp(t, "ok now"));
     CHECK(valid_utf8(t));
     char malformed_tail[64];
     snprintf(malformed_tail, sizeof malformed_tail,
@@ -129,6 +129,54 @@ static void test_classify() {
           TINY_DICTATE_CLIPPED);  // valid unread runes remain before bad tail
     CHECK(tiny_dictate_classify(200, R"({"ok":true,"text":"   "})", t, sizeof t) == TINY_DICTATE_NOTHING);
     CHECK(t[0] == 0);
+    // Review ask (PR #25): capacity is spent on words, not on separators.
+    // Leading whitespace / control / invalid bytes ahead of real speech must
+    // never fill the staging buffer and turn the words into "nothing heard".
+    {
+        char big[320];
+        std::string body = "{\"text\":\"" + std::string(319, ' ') + "kept words\"}";
+        CHECK(tiny_dictate_classify(200, body.c_str(), big, sizeof big) == TINY_DICTATE_OK);
+        CHECK(!strcmp(big, "kept words"));
+        // Leading run longer than the buffer, then valid speech.
+        body = "{\"text\":\"" + std::string(1000, ' ') + "kept words\"}";
+        CHECK(tiny_dictate_classify(200, body.c_str(), big, sizeof big) == TINY_DICTATE_OK);
+        CHECK(!strcmp(big, "kept words"));
+        // Newlines/tabs (JSON escapes) and invalid bytes are separators too.
+        body = "{\"text\":\"";
+        for (int i = 0; i < 200; ++i) body += "\\n\\t\xC0";
+        body += "kept\"}";
+        CHECK(tiny_dictate_classify(200, body.c_str(), big, sizeof big) == TINY_DICTATE_OK);
+        CHECK(!strcmp(big, "kept"));
+        // Inner runs collapse during staging, so spaced words still fit.
+        body = "{\"text\":\"a" + std::string(400, ' ') + "b" + std::string(400, ' ') + "\"}";
+        CHECK(tiny_dictate_classify(200, body.c_str(), big, sizeof big) == TINY_DICTATE_OK);
+        CHECK(!strcmp(big, "a b"));
+    }
+    // At / beyond the cap: leading whitespace, then more words than fit. The
+    // head that fits is kept, the verdict is CLIPPED, never NOTHING.
+    CHECK(tiny_dictate_classify(200,
+                                ("{\"text\":\"" + std::string(40, ' ') +
+                                 "aaaaaaaaaaaaaaaaaaaa\"}").c_str(),
+                                t, sizeof t) == TINY_DICTATE_CLIPPED);
+    CHECK(!strcmp(t, "aaaaaaaaaaaaaaa"));  // 15 B + NUL = sizeof t
+    // A single word rune that cannot fit at all is still clipped speech.
+    {
+        char one[2];
+        CHECK(tiny_dictate_classify(200, "{\"text\":\"   \xC3\xA9\"}", one, sizeof one) ==
+              TINY_DICTATE_CLIPPED);
+        CHECK(one[0] == 0);
+    }
+    // Exactly fits after leading whitespace: OK, no join space, no trailing one.
+    CHECK(tiny_dictate_classify(200,
+                                ("{\"text\":\"" + std::string(50, ' ') +
+                                 "abc def ghij kl" + std::string(50, ' ') + "\"}").c_str(),
+                                t, sizeof t) == TINY_DICTATE_OK);
+    CHECK(!strcmp(t, "abc def ghij kl"));
+    // Words then trailing separators beyond the cap: not clipped.
+    CHECK(tiny_dictate_classify(200,
+                                ("{\"text\":\"ok" + std::string(300, ' ') + "\"}").c_str(),
+                                t, sizeof t) == TINY_DICTATE_OK);
+    CHECK(!strcmp(t, "ok"));
     CHECK(tiny_dictate_classify(200, R"({"ok":true})", t, sizeof t) == TINY_DICTATE_NOTHING);
     CHECK(tiny_dictate_classify(422, R"({"ok":false,"error":"nothing transcribed"})", t, sizeof t) ==
           TINY_DICTATE_NOTHING);
